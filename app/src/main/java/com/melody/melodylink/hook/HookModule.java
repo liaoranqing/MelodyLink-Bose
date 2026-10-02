@@ -224,6 +224,7 @@ public final class HookModule extends XposedModule {
             // Enco X3 mask we map Bose onto), so mirror the state there too.
             sonySessionState.acceptAnc(state);
             writeSharedBoseState();
+            BoseControlProviderBridge.refreshTile();
             refreshTargetRepository("Bose connected");
             log(Log.INFO, TAG, event("Bose BMAP session done; ANC state=" + state.getAncMode()));
         }
@@ -245,6 +246,7 @@ public final class HookModule extends XposedModule {
                     sonySessionState.acceptAnc(state);
                     writeSharedBoseState();
                     refreshTargetRepository("Bose ANC write");
+                    BoseControlProviderBridge.refreshTile();
                 }
                 Object result = createSetCommandState(0);
                 if (result != null) future.complete(result); else future.completeExceptionally(new IllegalStateException("Bose ANC result DTO unavailable"));
@@ -490,6 +492,7 @@ public final class HookModule extends XposedModule {
             }
             ClassLoader loader = param.getClassLoader();
             melodyClassLoader = loader;
+            if (isPrimaryProcess()) installProviderBridge(loader);
             hookAny(loader, "whitelist",
                     "com.oplus.melody.common.util.V#a#3",
                     "com.oplus.melody.common.util.T#a#3");
@@ -1100,6 +1103,7 @@ public final class HookModule extends XposedModule {
                     domainMode, new java.util.HashMap<>());
             boseSessionState.acceptAnc(optimistic);
             sonySessionState.acceptAnc(optimistic);
+            BoseControlProviderBridge.refreshTile();
             boseTransport.setAncMode(domainMode);
             Object result = createSetCommandState(0);
             if (result != null) future.complete(result);
@@ -1801,6 +1805,66 @@ public final class HookModule extends XposedModule {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    /**
+     * The volume-panel tile reads EarphoneControlProvider, which lives in this
+     * process but may be instantiated before our package hook runs; install the
+     * bridge directly and retry once Application.attach lands.
+     */
+    private void installProviderBridge(ClassLoader loader) {
+        Application application = currentApplication();
+        if (application != null && tryInstallBridge(loader, application)) return;
+        try {
+            Method attach = Application.class.getDeclaredMethod("attach", Context.class);
+            hook(attach)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(chain -> {
+                        Object result = chain.proceed();
+                        try {
+                            Context base = chain.getArg(0) instanceof Context
+                                    ? (Context) chain.getArg(0) : null;
+                            Context app = base == null ? null : base.getApplicationContext();
+                            tryInstallBridge(loader, app != null ? app : base);
+                        } catch (Throwable ignored) {
+                        }
+                        return result;
+                    });
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "provider bridge attach hook unavailable", t);
+        }
+    }
+
+    private boolean tryInstallBridge(ClassLoader loader, Context context) {
+        if (context == null) return false;
+        BoseControlProviderBridge.install(this, loader, context,
+                new BoseControlProviderBridge.Callbacks() {
+                    @Override public boolean isBoseActive() {
+                        return targetBoseDevice != null && boseHostConnected;
+                    }
+                    @Override public AncMode currentMode() {
+                        EarbudsState state = boseSessionState.getAnc();
+                        return state == null ? null : state.getAncMode();
+                    }
+                    @Override public boolean requestMode(AncMode mode) {
+                        if (targetBoseDevice == null || !boseHostConnected) return false;
+                        boseTransport.setAncMode(mode);
+                        return true;
+                    }
+                    @Override public String deviceName() {
+                        BluetoothDevice device = targetBoseDevice;
+                        try {
+                            if (device != null && device.getName() != null) return device.getName();
+                        } catch (SecurityException ignored) {
+                        }
+                        return "Bose";
+                    }
+                    @Override public String deviceAddress() {
+                        BluetoothDevice device = targetBoseDevice;
+                        return device == null ? null : device.getAddress();
+                    }
+                });
+        return true;
     }
 
     private static File sharedStateFile() {
