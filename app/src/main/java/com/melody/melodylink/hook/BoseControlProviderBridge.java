@@ -197,7 +197,7 @@ final class BoseControlProviderBridge {
                     // Keep the tile alive on transient ACL drops (Bose Music profile
                     // switches) — SystemUI latches wear=false until reboot otherwise.
                 }
-            }, Context.RECEIVER_EXPORTED);
+            }, filter, Context.RECEIVER_EXPORTED);
         } catch (Throwable t) {
             Log.w(TAG, "[MelodyLink] ACL watcher failed", t);
         }
