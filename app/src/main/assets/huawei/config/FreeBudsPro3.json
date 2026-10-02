@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"huawei.freebuds_pro3","name":"HUAWEI FreeBuds Pro 3","image":"huawei/images/freebuds3.png","aliases":["HUAWEI FreeBuds Pro 3","FreeBuds Pro 3"],"batteryParts":["LEFT","RIGHT","CASE"],"capabilities":{"supportsAnc":true,"supportsTransparency":true,"supportsAncReadback":true,"supportsAncLevels":true,"supportsLowLatency":true}}

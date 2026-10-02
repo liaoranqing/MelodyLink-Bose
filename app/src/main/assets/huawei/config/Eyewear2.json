@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"huawei.eyewear2","name":"HUAWEI Eyewear 2","image":"huawei/images/eyewear2.png","aliases":["HUAWEI Eyewear 2","Eyewear 2"],"batteryParts":["LEFT","RIGHT"],"capabilities":{"supportsAnc":false,"supportsTransparency":false,"supportsAncReadback":false,"supportsAncLevels":false,"supportsLowLatency":true}}

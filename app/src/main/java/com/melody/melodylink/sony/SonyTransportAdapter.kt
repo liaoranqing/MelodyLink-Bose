@@ -1,0 +1,371 @@
+package com.melody.melodylink.sony
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
+import com.melody.melodylink.sony.config.DeviceIdentity
+import com.melody.melodylink.sony.config.SonyDeviceCatalog
+import com.melody.melodylink.sony.config.SonyConfigRegistry
+import com.melody.melodylink.sony.config.SonyDeviceConfig
+import com.melody.melodylink.sony.config.SonySupportLevel
+import com.melody.melodylink.sony.config.SonyAdvancedSettingId
+import com.op.bttest.sony.SonyAncMode
+import com.op.bttest.sony.SonyAncState
+import com.op.bttest.sony.SonyBatteryState
+import com.op.bttest.sony.SonyLogEntry
+import com.op.bttest.sony.SonyPayloads
+import com.op.bttest.sony.SonyProtocol
+import com.op.bttest.sony.SonyProtocolVersion
+import com.op.bttest.sony.SonyRfcommClient
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+
+/** Target-only Sony transport facade with a Java-callable callback surface. */
+class SonyTransportAdapter @JvmOverloads constructor(
+    private val listener: Listener,
+    configRegistry: SonyDeviceCatalog? = SonyConfigRegistry.empty(),
+) : SonyTransportPort {
+    interface Listener {
+        fun onConnecting()
+        fun onConnected(state: SonyAncState)
+        fun onBatteryState(state: SonyBatteryState)
+        fun onSettingState(id: SonyAdvancedSettingId, value: Boolean)
+        fun onSettingWriteResult(id: SonyAdvancedSettingId, success: Boolean, value: Boolean?, reason: String)
+        fun onAncWriteResult(success: Boolean, state: SonyAncState?, reason: String)
+        fun onCommandSessionFinished(reason: String)
+        fun onDisconnected()
+        fun onFailed(reason: String)
+        fun onLog(message: String)
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val generation = AtomicLong()
+    private var activeJob: Job? = null
+    private var client: SonyRfcommClient? = null
+    private var protocol: SonyProtocol? = null
+    private var activeConfig: SonyDeviceConfig? = null
+    @Volatile
+    private var configRegistry: SonyDeviceCatalog? = configRegistry
+    private var connectionPlanner = SonyConnectionPlanner(configRegistry)
+    @Volatile
+    private var experimentalWritesEnabled = false
+    private var connectingAddress: String? = null
+    private var connectedAddress: String? = null
+
+    @Volatile
+    override var isConnected: Boolean = false
+        private set
+
+    @Volatile
+    var currentState: SonyAncState? = null
+        private set
+
+    @Volatile
+    var currentBatteryState: SonyBatteryState? = null
+        private set
+
+    override fun setConfigRegistry(registry: SonyDeviceCatalog) {
+        configRegistry = registry
+        connectionPlanner = SonyConnectionPlanner(registry)
+    }
+
+    override fun isRegisteredDevice(bluetoothName: String?): Boolean =
+        bluetoothName != null && configRegistry?.findBest(DeviceIdentity(bluetoothName = bluetoothName)) != null
+
+    /** Enables writes only for profiles explicitly marked EXPERIMENTAL. */
+    fun setExperimentalWritesEnabled(enabled: Boolean) {
+        experimentalWritesEnabled = enabled
+    }
+
+    @SuppressLint("MissingPermission")
+    @Synchronized
+    override fun connect(device: BluetoothDevice) {
+        val address = try {
+            device.address
+        } catch (_: SecurityException) {
+            null
+        }
+        if (address != null && isConnected && connectedAddress.equals(address, ignoreCase = true)) {
+            listener.onLog("Sony RFCOMM already connected; ignoring duplicate connect")
+            return
+        }
+        if (address != null && connectingAddress.equals(address, ignoreCase = true)
+            && activeJob?.isActive == true
+        ) {
+            listener.onLog("Sony RFCOMM connection already in progress; ignoring duplicate connect")
+            return
+        }
+
+        val requestedConfig = resolveConfig(device)
+        if (configRegistry != null && requestedConfig == null) {
+            listener.onFailed("Sony device is not registered in the configuration catalog")
+            return
+        }
+        if (requestedConfig?.supportLevel == SonySupportLevel.UNSUPPORTED) {
+            listener.onFailed("Sony device profile is marked unsupported")
+            return
+        }
+
+        val request = generation.incrementAndGet()
+        activeJob?.cancel()
+        connectingAddress = address
+        activeJob = scope.launch {
+            listener.onConnecting()
+            isConnected = false
+            currentState = null
+            currentBatteryState = null
+            connectedAddress = null
+            activeConfig = null
+
+            val versions = connectionPlanner.protocolCandidates(deviceUuids(device), requestedConfig)
+            var lastFailure = "no Sony protocol connection succeeded"
+            for (version in versions) {
+                if (request != generation.get()) return@launch
+                val candidate = SonyRfcommClient { entry ->
+                    when (entry.direction) {
+                        SonyLogEntry.Direction.INFO,
+                        SonyLogEntry.Direction.ERROR -> listener.onLog(entry.message)
+                        SonyLogEntry.Direction.TX,
+                        SonyLogEntry.Direction.RX -> Unit
+                    }
+                }
+                client = candidate
+                try {
+                    listener.onLog("trying Sony ${version.name} transport")
+                    if (!candidate.connect(device, version)) {
+                        lastFailure = "Sony ${version.name} RFCOMM connect failed"
+                        candidate.disconnect()
+                        continue
+                    }
+                    val candidateProtocol = SonyProtocol(
+                        client = candidate,
+                        version = version,
+                        defaultV1AsmType = requestedConfig?.protocol?.defaultV1AsmType
+                            ?: SonyPayloads.DEFAULT_V1_ASM_TYPE,
+                        defaultV2AsmType = requestedConfig?.protocol?.defaultV2AsmType
+                            ?: SonyPayloads.DEFAULT_V2_ASM_TYPE,
+                        v1WindSupported = requestedConfig?.quirks?.v1WindSupported ?: true,
+                    )
+                    protocol = candidateProtocol
+                    if (!candidateProtocol.initialize()) {
+                        lastFailure = "Sony ${version.name} protocol initialization failed"
+                        candidate.disconnect()
+                        continue
+                    }
+                    val state = candidateProtocol.getAncState()
+                    if (state == null) {
+                        lastFailure = "Sony ${version.name} ANC state read failed"
+                        candidate.disconnect()
+                        continue
+                    }
+                    if (request != generation.get()) {
+                        candidate.disconnect()
+                        return@launch
+                    }
+                    isConnected = true
+                    currentState = state
+                    connectedAddress = address
+                    connectingAddress = null
+                    activeConfig = requestedConfig
+                    candidateProtocol.getBatteryState(connectionPlanner.batteryTypes(requestedConfig))?.let {
+                        currentBatteryState = it
+                        listener.onBatteryState(it)
+                    }
+                    listener.onConnected(state)
+                    readSupportedAdvancedSettings(candidateProtocol, requestedConfig)
+                    return@launch
+                } catch (cancelled: CancellationException) {
+                    candidate.disconnect()
+                    throw cancelled
+                } catch (throwable: Throwable) {
+                    lastFailure = "Sony ${version.name} transport failed: ${throwable.javaClass.simpleName}"
+                    listener.onLog(lastFailure)
+                    candidate.disconnect()
+                }
+            }
+            if (request == generation.get()) {
+                client = null
+                protocol = null
+                connectingAddress = null
+                connectedAddress = null
+                listener.onFailed(lastFailure)
+            }
+        }
+    }
+
+    @Synchronized
+    override fun disconnect() {
+        generation.incrementAndGet()
+        activeJob?.cancel()
+        activeJob = scope.launch {
+            client?.disconnect()
+            client = null
+            protocol = null
+            activeConfig = null
+            connectingAddress = null
+            connectedAddress = null
+            val wasConnected = isConnected
+            isConnected = false
+            currentState = null
+            currentBatteryState = null
+            if (wasConnected) listener.onDisconnected()
+        }
+    }
+
+    override fun setAncMode(mode: SonyAncMode, ambientLevel: Int, focusOnVoice: Boolean) {
+        val request = generation.get()
+        scope.launch {
+            val activeProtocol = protocol
+            if (!isConnected || activeProtocol == null) {
+                listener.onFailed("Sony ANC write requested while disconnected")
+                return@launch
+            }
+            val config = activeConfig
+            if (config != null && !config.permitsAncWrites(mode, experimentalWritesEnabled)) {
+                listener.onAncWriteResult(false, null, "Sony ANC writes are not enabled for ${config.id}")
+                return@launch
+            }
+            try {
+                val ok = activeProtocol.setAncMode(
+                    SonyAncState(
+                        mode = mode,
+                        ambientLevel = ambientLevel,
+                        focusOnVoice = focusOnVoice,
+                    ),
+                )
+                if (!ok || request != generation.get()) {
+                    listener.onAncWriteResult(false, null, "Sony ANC write failed")
+                    return@launch
+                }
+                val state = if (config?.quirks?.requiresAncReadAfterWrite != false) {
+                    activeProtocol.getAncState()
+                } else {
+                    currentState
+                }
+                if (state == null) {
+                    listener.onAncWriteResult(false, null, "Sony ANC state refresh failed")
+                } else {
+                    currentState = state
+                    listener.onAncWriteResult(true, state, "")
+                    disconnectAfterCommand("ANC command acknowledged")
+                }
+            } catch (throwable: Throwable) {
+                listener.onLog("Sony ANC write failed: ${throwable.javaClass.simpleName}")
+                listener.onAncWriteResult(false, null, "Sony ANC write failed")
+            }
+        }
+    }
+
+    override fun refreshBattery() {
+        val request = generation.get()
+        scope.launch {
+            val activeProtocol = protocol
+            if (!isConnected || activeProtocol == null) {
+                listener.onLog("Sony battery refresh requested while disconnected")
+                return@launch
+            }
+            try {
+                val state = activeProtocol.getBatteryState(connectionPlanner.batteryTypes(activeConfig))
+                if (state != null && request == generation.get()) {
+                    currentBatteryState = state
+                    listener.onBatteryState(state)
+                    disconnectAfterCommand("battery command completed")
+                } else if (state == null) {
+                    listener.onLog("Sony battery refresh returned no confirmed values")
+                }
+            } catch (throwable: Throwable) {
+                listener.onLog("Sony battery refresh failed: ${throwable.javaClass.simpleName}")
+            }
+        }
+    }
+
+    private fun disconnectAfterCommand(reason: String) {
+        listener.onLog("Sony RFCOMM closing after successful $reason")
+        listener.onCommandSessionFinished(reason)
+        disconnect()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun deviceUuids(device: BluetoothDevice): Set<java.util.UUID> = try {
+        device.uuids?.map { it.uuid }?.toSet().orEmpty()
+    } catch (_: SecurityException) {
+        emptySet()
+    }
+
+    fun readSetting(id: SonyAdvancedSettingId) {
+        scope.launch {
+            val p = protocol ?: return@launch
+            val value = readSettingValue(p, id)
+            if (value != null) {
+                listener.onSettingState(id, value)
+            } else {
+                listener.onSettingWriteResult(id, false, null, "Sony setting read failed")
+            }
+        }
+    }
+
+    fun writeSetting(id: SonyAdvancedSettingId, value: Boolean) {
+        val request = generation.get()
+        scope.launch {
+            val p = protocol
+            if (!isConnected || p == null) {
+                listener.onSettingWriteResult(id, false, null, "Sony setting write requested while disconnected")
+                return@launch
+            }
+            val config = activeConfig
+            val allowed = config?.advancedSettings?.any { it.id == id } == true &&
+                config.supportLevel.permitsWrites
+            if (!allowed) {
+                listener.onSettingWriteResult(id, false, null, "Sony setting is not enabled for this profile")
+                return@launch
+            }
+            try {
+                val sent = when (id) {
+                    SonyAdvancedSettingId.DSEE -> p.setDseeEnabled(value)
+                    SonyAdvancedSettingId.PAUSE_WHEN_REMOVED -> p.setPauseWhenRemovedEnabled(value)
+                }
+                // A successful setter confirms the command according to its protocol policy.
+                // Do not issue another query here: older devices such as WF-1000XM3 can time
+                // out on an immediate follow-up read even after accepting the write.
+                val confirmed = if (sent && request == generation.get()) value else null
+                listener.onSettingWriteResult(id, confirmed == value, confirmed, if (confirmed == value) "" else "Sony setting readback failed")
+                if (confirmed == value) disconnectAfterCommand("${id.name} command completed")
+            } catch (throwable: Throwable) {
+                listener.onSettingWriteResult(id, false, null, "Sony setting write failed")
+            }
+        }
+    }
+
+    private suspend fun readSupportedAdvancedSettings(p: SonyProtocol, config: SonyDeviceConfig?) {
+        config?.advancedSettings?.sortedBy { it.order }?.forEach { setting ->
+            val value = readSettingValue(p, setting.id)
+            if (value != null) {
+                listener.onSettingState(setting.id, value)
+            } else {
+                listener.onSettingWriteResult(setting.id, false, null, "Sony setting read failed")
+            }
+        }
+    }
+
+    private suspend fun readSettingValue(p: SonyProtocol, id: SonyAdvancedSettingId): Boolean? = when (id) {
+        SonyAdvancedSettingId.DSEE -> p.getDseeEnabled()
+        SonyAdvancedSettingId.PAUSE_WHEN_REMOVED -> p.getPauseWhenRemovedEnabled()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun resolveConfig(device: BluetoothDevice): SonyDeviceConfig? =
+        connectionPlanner.resolve(
+            DeviceIdentity(
+                bluetoothName = try {
+                    device.name
+                } catch (_: SecurityException) {
+                    null
+                },
+            ),
+        )
+
+}

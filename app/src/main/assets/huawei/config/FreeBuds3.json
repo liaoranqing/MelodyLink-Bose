@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"huawei.freebuds3","name":"HUAWEI FreeBuds 3","image":"huawei/images/freebuds3.png","aliases":["HUAWEI FreeBuds 3","FreeBuds 3"],"batteryParts":["LEFT","RIGHT","CASE"],"capabilities":{"supportsAnc":true,"supportsTransparency":false,"supportsAncReadback":false,"supportsAncLevels":true,"supportsLowLatency":false}}

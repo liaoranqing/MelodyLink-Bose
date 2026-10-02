@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"huawei.freebuds5","name":"HUAWEI FreeBuds 5","image":"huawei/images/freebuds5.png","aliases":["HUAWEI FreeBuds 5","FreeBuds 5"],"batteryParts":["LEFT","RIGHT","CASE"],"capabilities":{"supportsAnc":true,"supportsTransparency":false,"supportsAncReadback":true,"supportsAncLevels":true,"supportsLowLatency":true}}

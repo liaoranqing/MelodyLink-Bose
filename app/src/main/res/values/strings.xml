@@ -1,0 +1,41 @@
+<resources>
+    <string name="app_name">MelodyLink</string>
+
+    <!-- Bottom Navigation -->
+    <string name="home">首页</string>
+    <string name="settings">设置</string>
+
+    <!-- Home Screen -->
+    <string name="module_status">模块状态</string>
+    <string name="xposed_activated">Xposed 模块已激活</string>
+    <string name="welcome_title">欢迎使用 MelodyLink</string>
+    <string name="welcome_subtitle">增强您的无线耳机体验</string>
+    <string name="supported_devices">支持的设备</string>
+    <string name="device_sony">🎧 Sony 耳机</string>
+    <string name="device_samsung">🎧 Samsung Galaxy Buds</string>
+    <string name="device_huawei">🎧 Huawei FreeBuds</string>
+    <string name="device_bose">🎧 Bose 耳机</string>
+    <string name="instructions">使用说明</string>
+    <string name="instruction_1">确保 Xposed 模块已激活</string>
+    <string name="instruction_2">重启系统使模块生效</string>
+    <string name="instruction_3">连接支持的蓝牙耳机</string>
+    <string name="instruction_4">在系统蓝牙设置中查看耳机信息</string>
+    <string name="features">功能特性</string>
+    <string name="feature_1">✓ 多品牌耳机支持</string>
+    <string name="feature_2">✓ 电池状态显示</string>
+    <string name="feature_3">✓ ANC 模式控制</string>
+    <string name="feature_4">✓ 系统深度集成</string>
+
+    <!-- Settings Screen -->
+    <string name="appearance">外观</string>
+    <string name="theme_mode">主题模式</string>
+    <string name="theme_system">跟随系统</string>
+    <string name="theme_light">浅色</string>
+    <string name="theme_dark">深色</string>
+    <string name="about">关于</string>
+    <string name="app_info">应用信息</string>
+    <string name="version_format">版本 %s</string>
+    <string name="about_melodylink">关于 MelodyLink</string>
+    <string name="app_description">MelodyLink 是一个 Xposed 模块，用于增强多品牌无线耳机的系统集成。</string>
+    <string name="supported_brands_title">支持的品牌:</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "manufacturer": "xiaomi",
+  "devices": "xiaomi/config/devices.json",
+  "imageManifest": "xiaomi/image-manifest.json"
+}
