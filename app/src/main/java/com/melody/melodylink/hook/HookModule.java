@@ -485,7 +485,9 @@ public final class HookModule extends XposedModule {
             }
             ClassLoader loader = param.getClassLoader();
             melodyClassLoader = loader;
-            hookNamed(loader, "com.oplus.melody.common.util.V", "a", 3, "whitelist");
+            hookAny(loader, "whitelist",
+                    "com.oplus.melody.common.util.V#a#3",
+                    "com.oplus.melody.common.util.T#a#3");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "f", 4, "deviceInfo");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "c", 1, "deviceRegistryAdd");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "d", 1, "deviceRegistryGet");
@@ -512,30 +514,42 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "onFinishInflate", 0, "sonyDetailInflated");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "setViewModel", 1, "sonyDetailViewModel");
             hookNamed(loader, "androidx.preference.PreferenceGroup", "f", 1, "detailPreferenceAdd");
-            hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "z", 1, "repositoryObserve");
-            hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "y", 1, "repositoryGet");
+            hookAny(loader, "repositoryObserve",
+                    "com.oplus.melody.model.repository.earphone.U#z#1",
+                    "com.oplus.melody.model.repository.earphone.J#A#1");
+            hookAny(loader, "repositoryGet",
+                    "com.oplus.melody.model.repository.earphone.U#y#1",
+                    "com.oplus.melody.model.repository.earphone.J#y#1");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "g1", 1, "repositoryDtoBuild");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "getConnectionState", 0, "dtoConnectionState");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "getAclConnectionState", 0, "dtoAclState");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "isSupportSpp", 0, "dtoSupportSpp");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "isInitCmdCompleted", 0, "dtoInitCompleted");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "getNoiseReductionModeIndex", 0, "dtoNoiseReductionMode");
-            hookNamed(loader, "v9.C1576a", "getConnectionState", 0, "detailInfoConnectionState");
-            hookNamed(loader, "v9.C1576a", "getHeadsetConnectionState", 0, "detailInfoHeadsetState");
-            hookNamed(loader, "v9.C1576a", "getIsSpp", 0, "detailInfoSupportSpp");
+            hookAny(loader, "detailInfoConnectionState",
+                    "v9.C1576a#getConnectionState#0", "G9.a#getConnectionState#0");
+            hookAny(loader, "detailInfoHeadsetState",
+                    "v9.C1576a#getHeadsetConnectionState#0", "G9.a#getHeadsetConnectionState#0");
+            hookAny(loader, "detailInfoSupportSpp",
+                    "v9.C1576a#getIsSpp#0", "G9.a#getIsSpp#0");
             hookNamed(loader, "v9.a", "getConnectionState", 0, "detailInfoConnectionStateActual");
             hookNamed(loader, "v9.a", "getHeadsetConnectionState", 0, "detailInfoHeadsetStateActual");
             hookNamed(loader, "v9.a", "getIsSpp", 0, "detailInfoSupportSppActual");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.opsreduction.a", "getCurrentNoiseReductionModeIndex", 0, "opsNoiseReductionMode");
-            hookNamed(loader, "pa.C1405p", "getCurrentNoiseReductionModeIndex", 0, "noiseReductionModeVO");
+            hookAny(loader, "noiseReductionModeVO",
+                    "pa.C1405p#getCurrentNoiseReductionModeIndex#0",
+                    "Ba.z#getCurrentNoiseReductionModeIndex#0");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem", "onEarphoneDataChanged", 1, "noiseReductionItemDataChanged");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem$a", "c", 2, "nativeNoiseReductionClick");
             hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "u", 2, "connectToDevice");
             hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "v", 1, "connectImmediate");
             hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "u0", 2, "sendPacket");
-            hookNamed(loader, "E7.c", "b", 1, "nativeConnectDevice");
-            hookNamed(loader, "E7.c", "a", 2, "directConnectSpp");
-            hookNamed(loader, "E7.c", "e", 1, "nativeConnectionState");
+            hookAny(loader, "nativeConnectDevice",
+                    "E7.c#b#1", "e7.c#c#1");
+            hookAny(loader, "directConnectSpp",
+                    "E7.c#a#2", "e7.c#a#2");
+            hookAny(loader, "nativeConnectionState",
+                    "E7.c#e#1", "e7.c#f#1");
             hookNamed(loader, "A7.h", "h", 2, "nativeConnectSuccess");
             hookNamed(loader, "A7.h", "e", 2, "nativeConnectFailure");
             hookNamed(loader, "C7.b", "k", 1, "socketFailureBranch");
@@ -548,7 +562,9 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "V7.v", "g", 0, "melodyEarphoneLiveDataRequest");
             hookNamed(loader, "V7.u", "handleMessage", 1, "melodyEarphoneLiveDataResponse");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "k1", 1, "stateCallback");
-            hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "x1", 1, "repositoryNotify");
+            hookAny(loader, "repositoryNotify",
+                    "com.oplus.melody.model.repository.earphone.U#x1#1",
+                    "com.oplus.melody.model.repository.earphone.J#B1#1");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.opsreduction.OpsReductionItem", "onBindViewHolder", 1, "opsReductionItemBound");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.opsreduction.buttonseekbar.NoiseReductionButtonSeekBarView", "h", 0, "opsReductionSwitchToCurrentMode");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.opsreduction.buttonseekbar.NoiseReductionButtonSeekBarView", "i", 0, "opsReductionUpdateActionView");
@@ -561,7 +577,19 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private void hookNamed(ClassLoader loader, String className, String methodName, int arity, String label) {
+    /**
+     * Binds the first candidate that resolves. Candidates are "className#methodName#arity".
+     * Melody's obfuscated names drift between versions, so each hook lists every known alias.
+     */
+    private void hookAny(ClassLoader loader, String label, String... candidates) {
+        for (String candidate : candidates) {
+            String[] parts = candidate.split("#");
+            if (hookNamed(loader, parts[0], parts[1], Integer.parseInt(parts[2]), label)) return;
+        }
+        log(Log.WARN, TAG, event("no candidate resolved for " + label));
+    }
+
+    private boolean hookNamed(ClassLoader loader, String className, String methodName, int arity, String label) {
         try {
             Class<?> type = Class.forName(className, false, loader);
             Method selected = null;
@@ -584,7 +612,7 @@ public final class HookModule extends XposedModule {
             }
             if (selected == null) {
                 log(Log.WARN, TAG, label + " not found: " + className + "." + methodName + "/" + arity);
-                return;
+                return false;
             }
             Method method = selected;
             hook(method)
@@ -834,8 +862,10 @@ public final class HookModule extends XposedModule {
                 }
             });
             log(Log.INFO, TAG, event("hooked " + label + " " + signature(method)));
+            return true;
         } catch (Throwable t) {
             log(Log.WARN, TAG, "cannot hook " + label + " in " + className, t);
+            return false;
         }
     }
 
@@ -2822,7 +2852,15 @@ public final class HookModule extends XposedModule {
                     return;
                 }
             }
-            Method notifyChanged = repository.getClass().getDeclaredMethod("x1", String.class);
+            Method notifyChanged = null;
+            for (String candidate : new String[]{"x1", "B1"}) {
+                try {
+                    notifyChanged = repository.getClass().getDeclaredMethod(candidate, String.class);
+                    break;
+                } catch (NoSuchMethodException ignored) {
+                }
+            }
+            if (notifyChanged == null) throw new NoSuchMethodException("repository notify (x1/B1)");
             notifyChanged.setAccessible(true);
             notifyChanged.invoke(repository, address);
             log(Log.INFO, TAG, event("published native Melody repository update for registered Sony device"
@@ -2858,8 +2896,14 @@ public final class HookModule extends XposedModule {
                 return;
             }
             ClassLoader loader = status.getClass().getClassLoader();
-            Class<?> batteryStatusClass = Class.forName(
-                    "com.oplus.melody.model.repository.earphone.V$a", false, loader);
+            Class<?> batteryStatusClass;
+            try {
+                batteryStatusClass = Class.forName(
+                        "com.oplus.melody.model.repository.earphone.V$a", false, loader);
+            } catch (ClassNotFoundException renamed) {
+                batteryStatusClass = Class.forName(
+                        "com.oplus.melody.model.repository.earphone.K", false, loader);
+            }
             Constructor<?> constructor = batteryStatusClass.getConstructor(int.class, boolean.class);
             boolean updated = false;
             updated |= setBatteryStatus(status, "setLeftBatteryStatus", constructor, state.getBattery().get(BatteryPart.LEFT));
@@ -2869,7 +2913,15 @@ public final class HookModule extends XposedModule {
                 log(Log.INFO, TAG, event("Sony battery publish retained previous Melody values (" + reason + ")"));
                 return;
             }
-            Method notifyChanged = repository.getClass().getDeclaredMethod("x1", String.class);
+            Method notifyChanged = null;
+            for (String candidate : new String[]{"x1", "B1"}) {
+                try {
+                    notifyChanged = repository.getClass().getDeclaredMethod(candidate, String.class);
+                    break;
+                } catch (NoSuchMethodException ignored) {
+                }
+            }
+            if (notifyChanged == null) throw new NoSuchMethodException("battery notify (x1/B1)");
             notifyChanged.setAccessible(true);
             notifyChanged.invoke(repository, address);
             log(Log.INFO, TAG, event("published Sony battery through Melody V/U.x1 (" + reason + ")"));
