@@ -176,10 +176,10 @@ final class BoseControlProviderBridge {
         // repository the stock provider answers with real whitelist-backed columns,
         // which SystemUI trusts more than our synthesized row.
         if (result != null && result.getCount() > 0) return null;
-        // Wear/spatial takeover is disabled until the exact SystemUI contract is
-        // captured from these logs: guessed ear_left/ear_right values made the
-        // whole device card grey out (0.2.5 regression).
-        if (PATH_WEAR.equals(path) || PATH_SPATIAL.equals(path)) return null;
+        // Wear takeover stays off (SystemUI never queries it — confirmed from
+        // the captured panel-open sequence). Spatial answers only when the stock
+        // provider has no row, with the exact 4-column shape read from its smali.
+        if (PATH_WEAR.equals(path)) return null;
         // SystemUI queries this provider on its own schedule, often while the
         // Melody UI never ran a session — so presence is a bond-state probe
         // (same rule the verified v1.x module used), not the in-app flag.
@@ -187,6 +187,7 @@ final class BoseControlProviderBridge {
         String address = cb.deviceAddress();
         if (address == null) return null;
         if (PATH_ACTIVE.equals(path)) {
+            ensureWearAnnounced();
             closeCursor(result);
             MatrixCursor cursor = new MatrixCursor(new String[]{"name", "address"});
             cursor.addRow(new Object[]{cb.deviceName(), address});
@@ -195,6 +196,7 @@ final class BoseControlProviderBridge {
         if (PATH_NOISE.equals(path)) {
             if (args != null && args.length > 0 && args[0] != null
                     && !args[0].equalsIgnoreCase(address)) return null;
+            ensureWearAnnounced();
             closeCursor(result);
             MatrixCursor cursor = new MatrixCursor(
                     new String[]{"name", "address", "type", "supports"});
@@ -220,7 +222,8 @@ final class BoseControlProviderBridge {
             if (args != null && args.length > 0 && args[0] != null
                     && !args[0].equalsIgnoreCase(address)) return null;
             closeCursor(result);
-            // Stock row: name/address/type(=spatialType)/supports(=isSupport flag)
+            // Column shape copied from the stock query dispatcher:
+            // name/address/type(=spatialType)/supports(=1 int flag).
             MatrixCursor cursor = new MatrixCursor(
                     new String[]{"name", "address", "type", "supports"});
             cursor.addRow(new Object[]{cb.deviceName(), address,
@@ -228,6 +231,18 @@ final class BoseControlProviderBridge {
             return cursor;
         }
         return null;
+    }
+
+    /**
+     * v1.x rule: SystemUI latches the "worn" hint from notifyChange(0x500|1);
+     * without it the noise tile stays hidden even when queries answer. Fire it
+     * once per install, right after we first answer an active/noise query.
+     */
+    private static void ensureWearAnnounced() {
+        if (worn) return;
+        worn = true;
+        Context ctx = appContext;
+        if (ctx != null) notifyChange(ctx, FLAG_WEAR | 0x01);
     }
 
     private static String dumpCursor(Cursor cursor) {
@@ -277,9 +292,11 @@ final class BoseControlProviderBridge {
             return accepted;
         }
         if (METHOD_SPATIAL.equals(method)) {
-            // Disabled pending the captured SystemUI contract (see patchQuery).
-            diag("volume-panel spatial toggle ignored (contract pending)", null);
-            return false;
+            int type = extras.getInt("type", -1);
+            if (type < 0) return false;
+            boolean accepted = cb.requestSpatial(type);
+            diag("volume-panel spatial toggle type=" + type + " accepted=" + accepted, null);
+            return accepted;
         }
         if (METHOD_WEAR.equals(method)) return true;
         return false;
