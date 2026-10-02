@@ -230,13 +230,6 @@ public final class BoseTransport {
                 reportAnc(false, null, "mode START rejected");
                 return;
             }
-            BoseBmap.Frame confirmed = command(BoseBmap.BLOCK_AUDIO_MODES,
-                    BoseBmap.FUNC_CURRENT_MODE, BoseBmap.OP_GET, null);
-            if (confirmed == null || confirmed.payload.length == 0
-                    || confirmed.u8(0) != modeValue) {
-                reportAnc(false, null, "mode read-back mismatch");
-                return;
-            }
             if (ancValue != null) {
                 if (!writeSettingsLocked(myGen, BoseDeviceConfig.SETTING_ANC, ancValue)) {
                     reportAnc(false, null, "ANC byte rejected");
