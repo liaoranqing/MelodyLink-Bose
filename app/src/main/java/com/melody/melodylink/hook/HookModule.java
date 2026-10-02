@@ -1090,7 +1090,20 @@ public final class HookModule extends XposedModule {
             ensureXiaomiTransport().setAncMode(domainMode);
         } else if (targetBoseDevice != null && boseHostConnected) {
             pendingAncMode = null;
+            // Bose BMAP runs a serial short-session queue (battery refresh may be ahead
+            // of this write); waiting for the device reply makes the UI time out and
+            // toast a false "switch failed". Complete optimistically now — the icon
+            // projection reads our mirrored state, and onAncWriteResult still syncs
+            // the confirmed value (or logs a real failure) when the session lands.
+            EarbudsState optimistic = new EarbudsState(
+                    com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
+                    domainMode, new java.util.HashMap<>());
+            boseSessionState.acceptAnc(optimistic);
+            sonySessionState.acceptAnc(optimistic);
             boseTransport.setAncMode(domainMode);
+            Object result = createSetCommandState(0);
+            if (result != null) future.complete(result);
+            else future.completeExceptionally(new IllegalStateException("Bose ANC result DTO unavailable"));
         } else if (targetHuaweiDevice != null && isRegisteredHuaweiDevice(targetHuaweiDevice)
                 && huaweiTransport.isConnected()) {
             pendingAncMode = null;
