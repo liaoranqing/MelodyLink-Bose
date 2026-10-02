@@ -32,6 +32,8 @@ import com.melody.melodylink.vendor.sony.SonyEarbudsFacade;
 import com.melody.melodylink.vendor.samsung.SamsungEarbudsFacade;
 import com.melody.melodylink.vendor.huawei.HuaweiEarbudsFacade;
 import com.melody.melodylink.vendor.xiaomi.XiaomiEarbudsFacade;
+import com.melody.melodylink.bose.BoseDeviceConfig;
+import com.melody.melodylink.bose.BoseTransport;
 import com.melody.melodylink.huawei.config.HuaweiDeviceCatalog;
 import com.melody.melodylink.huawei.config.HuaweiConfigIssue;
 import com.melody.melodylink.huawei.config.HuaweiConfigLoadResult;
@@ -91,6 +93,7 @@ public final class HookModule extends XposedModule {
     private volatile BluetoothDevice targetSamsungDevice;
     private volatile BluetoothDevice targetHuaweiDevice;
     private volatile BluetoothDevice targetXiaomiDevice;
+    private volatile BluetoothDevice targetBoseDevice;
     /** Host A2DP/HFP state remains authoritative for UI connection, even if AF00 control setup fails. */
     private volatile boolean xiaomiHostConnected;
     private volatile Object earphoneRepository;
@@ -98,6 +101,9 @@ public final class HookModule extends XposedModule {
     private final MelodySessionState sonySessionState = new MelodySessionState();
     private final MelodySessionState huaweiSessionState = new MelodySessionState();
     private final MelodySessionState xiaomiSessionState = new MelodySessionState();
+    private final MelodySessionState boseSessionState = new MelodySessionState();
+    /** A2DP host link is authoritative for the Bose UI, like Xiaomi; the BMAP channel is transient. */
+    private volatile boolean boseHostConnected;
     private volatile ClassLoader melodyClassLoader;
     private volatile CompletableFuture<Object> pendingNoiseWrite;
     private volatile AncMode pendingAncMode;
@@ -201,6 +207,51 @@ public final class HookModule extends XposedModule {
             clearHuaweiSessionState();
             refreshTargetRepository("Huawei failed");
             log(Log.WARN, TAG, event("Huawei RFCOMM failed: " + reason));
+        }
+        @Override public void onLog(String message) { log(Log.INFO, TAG, event(message)); }
+    });
+
+    /**
+     * Bose BMAP runs short-lived RFCOMM sessions (channel 2 is single-client), so the
+     * host A2DP link — not the transport — is the authoritative "connected" marker,
+     * mirroring the Xiaomi pattern.
+     */
+    private final BoseTransport boseTransport = new BoseTransport(new BoseTransport.Listener() {
+        @Override public void onConnecting() { log(Log.INFO, TAG, event("Bose BMAP connecting")); }
+        @Override public void onConnected(EarbudsState state) {
+            boseSessionState.acceptAnc(state);
+            writeSharedBoseState();
+            refreshTargetRepository("Bose connected");
+            log(Log.INFO, TAG, event("Bose BMAP session done; ANC state=" + state.getAncMode()));
+        }
+        @Override public void onBatteryState(EarbudsState state) {
+            boseSessionState.acceptBattery(state);
+            publishBatteryState(state, "Bose battery read");
+            refreshTargetRepository("Bose battery read");
+            log(Log.INFO, TAG, event("Bose battery state received"));
+        }
+        @Override public void onAncWriteResult(boolean success, EarbudsState state, String reason) {
+            CompletableFuture<Object> future;
+            synchronized (HookModule.this) { future = pendingNoiseWrite; pendingNoiseWrite = null; }
+            log(success ? Log.INFO : Log.WARN, TAG, event("Bose ANC write " + (success ? "succeeded" : "failed: " + reason)));
+            if (future == null) return;
+            if (success) {
+                if (state != null) {
+                    boseSessionState.acceptAnc(state);
+                    writeSharedBoseState();
+                    refreshTargetRepository("Bose ANC write");
+                }
+                Object result = createSetCommandState(0);
+                if (result != null) future.complete(result); else future.completeExceptionally(new IllegalStateException("Bose ANC result DTO unavailable"));
+            } else future.completeExceptionally(new IllegalStateException(reason));
+        }
+        @Override public void onDisconnected() {
+            log(Log.INFO, TAG, event("Bose BMAP channel closed"));
+        }
+        @Override public void onFailed(String reason) {
+            failPendingNoiseWrite(reason);
+            refreshTargetRepository("Bose failed");
+            log(Log.WARN, TAG, event("Bose BMAP failed: " + reason));
         }
         @Override public void onLog(String message) { log(Log.INFO, TAG, event(message)); }
     });
@@ -700,7 +751,7 @@ public final class HookModule extends XposedModule {
                         if (hasPendingNoiseWrite()) {
                             log(Log.INFO, TAG, event("ignored duplicate Sony noise update while ANC write is pending"));
                         } else if ((sonyTransport.isConnected() || samsungTransport.isConnected() || huaweiTransport.isConnected()
-                                || (xiaomiTransport != null && xiaomiTransport.isConnected()))
+                                || (xiaomiTransport != null && xiaomiTransport.isConnected()) || boseHostConnected)
                                 && startSonyNoiseWrite(chain.getArg(2))) {
                             log(Log.INFO, TAG, event("routed target noise reduction write to vendor RFCOMM"));
                         } else {
@@ -712,7 +763,8 @@ public final class HookModule extends XposedModule {
                     if ("whitelist".equals(label) && deviceName instanceof String
                             && (isRegisteredSonyName((String) deviceName)
                             || isRegisteredHuaweiName((String) deviceName)
-                            || isRegisteredXiaomiName((String) deviceName))) {
+                            || isRegisteredXiaomiName((String) deviceName)
+                            || isRegisteredBoseName((String) deviceName))) {
                         activeSonyImageProfile = findSonyProfileByName((String) deviceName);
                         activeHuaweiImageProfile = findHuaweiProfileByName((String) deviceName);
                         activeXiaomiImageProfile = findXiaomiProfileByName((String) deviceName);
@@ -852,6 +904,16 @@ public final class HookModule extends XposedModule {
                 transport.connect((BluetoothDevice) device);
                 return true;
             }
+            if (isRegisteredBoseName(((BluetoothDevice) device).getName())) {
+                targetBoseDevice = (BluetoothDevice) device;
+                boseHostConnected = true;
+                rememberTargetAddress((String) address);
+                writeSharedBoseState();
+                log(Log.INFO, TAG, event("starting Bose BMAP session name=" + ((BluetoothDevice) device).getName()
+                        + " addressHash=" + Integer.toHexString(((String) address).hashCode())));
+                boseTransport.connect((BluetoothDevice) device);
+                return true;
+            }
             if (isRegisteredHuaweiDevice((BluetoothDevice) device)) {
                 targetHuaweiDevice = (BluetoothDevice) device;
                 rememberTargetAddress((String) address);
@@ -939,6 +1001,8 @@ public final class HookModule extends XposedModule {
             if (targetXiaomiDevice != null && isRegisteredXiaomiDevice(targetXiaomiDevice)) {
                 XiaomiEarbudsFacade transport = ensureXiaomiTransport();
                 if (transport != null) transport.setAncMode(domainMode);
+            } else if (targetBoseDevice != null && boseHostConnected) {
+                boseTransport.setAncMode(domainMode);
             } else if (targetHuaweiDevice != null && isRegisteredHuaweiDevice(targetHuaweiDevice)) {
                 huaweiTransport.setAncMode(domainMode);
             } else if (targetSamsungDevice != null && isRegisteredSamsungDevice(targetSamsungDevice)) {
@@ -978,6 +1042,9 @@ public final class HookModule extends XposedModule {
                 && ensureXiaomiTransport() != null && ensureXiaomiTransport().isConnected()) {
             pendingAncMode = null;
             ensureXiaomiTransport().setAncMode(domainMode);
+        } else if (targetBoseDevice != null && boseHostConnected) {
+            pendingAncMode = null;
+            boseTransport.setAncMode(domainMode);
         } else if (targetHuaweiDevice != null && isRegisteredHuaweiDevice(targetHuaweiDevice)
                 && huaweiTransport.isConnected()) {
             pendingAncMode = null;
@@ -1121,7 +1188,8 @@ public final class HookModule extends XposedModule {
         return (targetSonyDevice != null && isRegisteredSonyName(targetSonyDevice.getName()))
                 || (targetSamsungDevice != null && isRegisteredSamsungDevice(targetSamsungDevice))
                 || (targetHuaweiDevice != null && isRegisteredHuaweiDevice(targetHuaweiDevice))
-                || (targetXiaomiDevice != null && isRegisteredXiaomiDevice(targetXiaomiDevice));
+                || (targetXiaomiDevice != null && isRegisteredXiaomiDevice(targetXiaomiDevice))
+                || (targetBoseDevice != null && boseHostConnected);
     }
 
     private synchronized void registerXiaomiBatteryReceiver(Application application) {
@@ -1548,7 +1616,8 @@ public final class HookModule extends XposedModule {
     private boolean isTargetDevice(BluetoothDevice device) {
         try {
             return isRegisteredSonyName(device.getName()) || isRegisteredSamsungDevice(device)
-                    || isRegisteredHuaweiDevice(device) || isRegisteredXiaomiDevice(device);
+                    || isRegisteredHuaweiDevice(device) || isRegisteredXiaomiDevice(device)
+                    || isRegisteredBoseName(device.getName());
         } catch (Throwable ignored) {
             return false;
         }
@@ -1606,12 +1675,36 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    private boolean isRegisteredBoseName(String bluetoothName) {
+        return BoseDeviceConfig.INSTANCE.matches(bluetoothName);
+    }
+
+    private void writeSharedBoseState() {
+        if (!isPrimaryProcess() || targetAddress == null || targetBoseDevice == null) return;
+        File file = sharedStateFile();
+        if (file == null) return;
+        int mode = MelodyStateBridge.INSTANCE.ancModeIndex(boseSessionState.getAnc());
+        if (MelodySharedStateStore.writeState(file, targetAddress, android.os.Process.myPid(), mode, null, null)) {
+            log(Log.INFO, TAG, event("shared Bose state published addressHash="
+                    + Integer.toHexString(targetAddress.hashCode()) + " mode=" + mode));
+        } else {
+            log(Log.WARN, TAG, "shared Bose state write failed");
+        }
+    }
+
+    private void clearBoseSessionState() {
+        boseSessionState.clear();
+        boseHostConnected = false;
+        targetBoseDevice = null;
+    }
+
     private boolean isSonyConnected() {
         return targetAddress != null && (sonyTransport.isConnected()
                 || samsungTransport.isConnected()
                 || huaweiTransport.isConnected()
                 || (xiaomiTransport != null && xiaomiTransport.isConnected())
                 || (targetXiaomiDevice != null && xiaomiHostConnected)
+                || (targetBoseDevice != null && boseHostConnected)
                 || targetAddress.equalsIgnoreCase(readSharedSonyAddress()));
     }
 
@@ -1762,10 +1855,12 @@ public final class HookModule extends XposedModule {
         samsungTransport.disconnect();
         huaweiTransport.disconnect();
         if (xiaomiTransport != null) xiaomiTransport.disconnect();
+        boseTransport.disconnect();
         targetSamsungDevice = null;
         targetHuaweiDevice = null;
         targetXiaomiDevice = null;
         xiaomiHostConnected = false;
+        clearBoseSessionState();
         refreshTargetRepository(reason);
     }
 
@@ -1843,6 +1938,10 @@ public final class HookModule extends XposedModule {
         if (address == null) address = readSharedSonyAddress();
         if (!isTargetAddress(address)) return;
         if (isPrimaryProcess()) {
+            if (targetBoseDevice != null && boseHostConnected) {
+                boseTransport.refreshBattery();
+                return;
+            }
             if (sonyTransport.isConnected()) {
                 sonyTransport.refreshBattery();
             } else {
@@ -2652,6 +2751,10 @@ public final class HookModule extends XposedModule {
         lastSonyBatteryCommandNonce = command.nonce;
         if (!isTargetAddress(command.address)) {
             log(Log.WARN, TAG, event("ignored Sony battery refresh for a different device"));
+            return;
+        }
+        if (targetBoseDevice != null && boseHostConnected) {
+            boseTransport.refreshBattery();
             return;
         }
         sonyTransport.refreshBattery();

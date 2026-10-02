@@ -14,6 +14,9 @@ object BoseDeviceConfig {
     /** BMAP RFCOMM service UUID advertised by Bose head products. */
     const val BMAP_UUID = "00000000-deca-fade-deca-deafdecacaff"
 
+    /** Field-verified: BMAP answers on RFCOMM channel 2 (insecure socket only). */
+    const val RFCOMM_CHANNEL = 2
+
     /** ColorOS-facing mode constants verified on the device. */
     const val MODE_QUIET = 0
     const val MODE_AWARE = 1
