@@ -11,7 +11,7 @@ class BoseVendorAdapter : VendorAdapter {
     override val vendor: Vendor = Vendor.BOSE
 
     override fun match(identity: DeviceIdentity): DeviceMatch? {
-        if (!BoseDeviceConfig.matches(identity.bluetoothName)) return null
+        if (!BoseDeviceConfig.matches(identity.bluetoothName, identity.address)) return null
         return DeviceMatch(Vendor.BOSE, BoseDeviceConfig.PROFILE_ID, 90)
     }
 }

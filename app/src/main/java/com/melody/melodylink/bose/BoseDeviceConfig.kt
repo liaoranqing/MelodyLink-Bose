@@ -17,6 +17,29 @@ object BoseDeviceConfig {
     /** Field-verified: BMAP answers on RFCOMM channel 2 (insecure socket only). */
     const val RFCOMM_CHANNEL = 2
 
+    /**
+     * MACs of known Bose units whose Bluetooth name was changed by the owner
+     * (name-prefix matching alone would miss them). Ported from the verified
+     * v1.x module.
+     */
+    val KNOWN_MACS: Set<String> = setOf("68:F2:1F:3D:41:D7")
+
+    /** True when the name looks like a factory Bose product name. */
+    fun matchesName(bluetoothName: String?): Boolean {
+        if (bluetoothName.isNullOrBlank()) return false
+        return bluetoothName.lowercase().startsWith("bose")
+    }
+
+    fun matchesAddress(address: String?): Boolean {
+        if (address.isNullOrBlank()) return false
+        return KNOWN_MACS.any { it.equals(address, ignoreCase = true) }
+    }
+
+    fun matches(bluetoothName: String?): Boolean = matchesName(bluetoothName)
+
+    fun matches(bluetoothName: String?, address: String?): Boolean =
+        matchesName(bluetoothName) || matchesAddress(address)
+
     /** ColorOS-facing mode constants verified on the device. */
     const val MODE_QUIET = 0
     const val MODE_AWARE = 1

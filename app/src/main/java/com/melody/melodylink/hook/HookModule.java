@@ -764,7 +764,9 @@ public final class HookModule extends XposedModule {
                             && (isRegisteredSonyName((String) deviceName)
                             || isRegisteredHuaweiName((String) deviceName)
                             || isRegisteredXiaomiName((String) deviceName)
-                            || isRegisteredBoseName((String) deviceName))) {
+                            || isRegisteredBoseName((String) deviceName)
+                            || isBoseAddressArg(chain.getArg(0))
+                            || isBoseAddressArg(chain.getArg(1)))) {
                         activeSonyImageProfile = findSonyProfileByName((String) deviceName);
                         activeHuaweiImageProfile = findHuaweiProfileByName((String) deviceName);
                         activeXiaomiImageProfile = findXiaomiProfileByName((String) deviceName);
@@ -904,7 +906,7 @@ public final class HookModule extends XposedModule {
                 transport.connect((BluetoothDevice) device);
                 return true;
             }
-            if (isRegisteredBoseName(((BluetoothDevice) device).getName())) {
+            if (isBoseDevice((BluetoothDevice) device)) {
                 targetBoseDevice = (BluetoothDevice) device;
                 boseHostConnected = true;
                 rememberTargetAddress((String) address);
@@ -1617,7 +1619,7 @@ public final class HookModule extends XposedModule {
         try {
             return isRegisteredSonyName(device.getName()) || isRegisteredSamsungDevice(device)
                     || isRegisteredHuaweiDevice(device) || isRegisteredXiaomiDevice(device)
-                    || isRegisteredBoseName(device.getName());
+                    || isBoseDevice(device);
         } catch (Throwable ignored) {
             return false;
         }
@@ -1676,7 +1678,21 @@ public final class HookModule extends XposedModule {
     }
 
     private boolean isRegisteredBoseName(String bluetoothName) {
-        return BoseDeviceConfig.INSTANCE.matches(bluetoothName);
+        return BoseDeviceConfig.INSTANCE.matchesName(bluetoothName);
+    }
+
+    @SuppressLint("MissingPermission")
+    private boolean isBoseDevice(BluetoothDevice device) {
+        try {
+            return BoseDeviceConfig.INSTANCE.matches(device.getName(), device.getAddress());
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Matches a known Bose MAC in any whitelist argument position. */
+    private boolean isBoseAddressArg(Object value) {
+        return value instanceof String && BoseDeviceConfig.INSTANCE.matchesAddress((String) value);
     }
 
     private void writeSharedBoseState() {
