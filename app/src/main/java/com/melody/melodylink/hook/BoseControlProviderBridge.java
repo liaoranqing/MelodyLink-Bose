@@ -56,6 +56,7 @@ final class BoseControlProviderBridge {
     private static final int NOISE_TRANSPARENT = 2;
     private static final String SUPPORTS = "[1,5,2]";
 
+    private static final int FLAG_CONNECT = 0x100;
     private static final int FLAG_NOISE = 0x200;
     private static final int FLAG_WEAR = 0x500;
 
@@ -158,6 +159,19 @@ final class BoseControlProviderBridge {
         int tileMode = toTileMode(cb.currentMode());
         if (tileMode < 0 || tileMode == lastNotifiedMode) return;
         lastNotifiedMode = tileMode;
+        notifyChange(ctx, FLAG_NOISE);
+    }
+
+    /**
+     * Push a spatial-audio change to the volume panel. SystemUI's observer only
+     * decodes high-byte flags 0x100 (connection) / 0x200 (mode) / 0x500 (wear);
+     * there is no spatial-specific flag, so re-announce the connection state —
+     * that makes SystemUI re-query every path including spatial.
+     */
+    static void refreshSpatialTile() {
+        Context ctx = appContext;
+        if (!installed || ctx == null) return;
+        notifyChange(ctx, FLAG_CONNECT);
         notifyChange(ctx, FLAG_NOISE);
     }
 

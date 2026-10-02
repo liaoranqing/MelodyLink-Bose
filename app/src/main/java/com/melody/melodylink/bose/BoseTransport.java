@@ -89,6 +89,15 @@ public final class BoseTransport {
         return spatialType;
     }
 
+    /**
+     * Optimistically seed the spatial cache right before a tile-triggered write,
+     * so the notifyChange-driven re-query already reports the new value instead
+     * of the stale one (the BMAP SETGET confirmation re-syncs the real state).
+     */
+    public void cacheSpatialType(int value) {
+        spatialType = value;
+    }
+
     // ---------------------------------------------------------------- session
 
     @SuppressLint("MissingPermission")

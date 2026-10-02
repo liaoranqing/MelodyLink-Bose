@@ -1876,7 +1876,21 @@ public final class HookModule extends XposedModule {
                     @Override public boolean requestMode(AncMode mode) {
                         BluetoothDevice device = resolveBoseForTile();
                         if (device == null) return false;
+                        // Same optimistic chain as the detail-page click: mirror the
+                        // mode into both session states, refresh the Melody repository
+                        // (the tile's type column is read from the stock Enco X3 row),
+                        // then push notifyChange(0x200) so SystemUI re-queries. Without
+                        // this the tile's displayed state stays stale and its cycle
+                        // logic re-computes the same "next mode" on every click.
+                        EarbudsState optimistic = new EarbudsState(
+                                com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
+                                mode, new java.util.HashMap<>());
+                        boseSessionState.acceptAnc(optimistic);
+                        sonySessionState.acceptAnc(optimistic);
+                        writeSharedBoseState();
                         boseTransport.setAncMode(mode);
+                        refreshTargetRepository("Bose tile ANC");
+                        BoseControlProviderBridge.refreshTile();
                         return true;
                     }
                     @Override public int spatialType() {
@@ -1886,8 +1900,13 @@ public final class HookModule extends XposedModule {
                     @Override public boolean requestSpatial(int type) {
                         BluetoothDevice device = resolveBoseForTile();
                         if (device == null) return false;
-                        boseTransport.writeSetting(
-                                BoseDeviceConfig.SETTING_SPATIAL, Math.max(0, Math.min(2, type)));
+                        int clamped = Math.max(0, Math.min(2, type));
+                        // Optimistic cache update so the immediately following spatial
+                        // query (triggered by our notifyChange) already reports the new
+                        // value; the BMAP SETGET confirmation re-syncs the real state.
+                        boseTransport.cacheSpatialType(clamped);
+                        boseTransport.writeSetting(BoseDeviceConfig.SETTING_SPATIAL, clamped);
+                        BoseControlProviderBridge.refreshSpatialTile();
                         return true;
                     }
                     @Override public String deviceName() {
