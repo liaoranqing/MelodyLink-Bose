@@ -138,7 +138,7 @@ public final class BoseTransport {
         }
         linkDead = false;
         try {
-            Thread.sleep(POST_WRITE_DELAY_MS + 100L);
+            sleepQuietly(POST_WRITE_DELAY_MS + 100L);
             drainStartup(current);
             startReader(current);
             BoseBmap.Frame mode = command(BoseBmap.BLOCK_AUDIO_MODES,
@@ -220,7 +220,7 @@ public final class BoseTransport {
         linkDead = false;
         startReader(current);
         try {
-            Thread.sleep(POST_WRITE_DELAY_MS + 100L);
+            sleepQuietly(POST_WRITE_DELAY_MS + 100L);
             drainStartup(current);
             BoseBmap.Frame answer = command(BoseBmap.BLOCK_AUDIO_MODES,
                     BoseBmap.FUNC_CURRENT_MODE, BoseBmap.OP_START,
@@ -300,7 +300,7 @@ public final class BoseTransport {
         linkDead = false;
         startReader(current);
         try {
-            Thread.sleep(POST_WRITE_DELAY_MS + 100L);
+            sleepQuietly(POST_WRITE_DELAY_MS + 100L);
             drainStartup(current);
             BoseBmap.Frame battery = command(BoseBmap.BLOCK_BATTERY,
                     BoseBmap.FUNC_BATTERY, BoseBmap.OP_GET, null);
@@ -546,6 +546,14 @@ public final class BoseTransport {
         listenerOnUi(new Runnable() {
             @Override public void run() { listener.onAncWriteResult(ok, finalState, finalReason); }
         });
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void listenerOnUi(Runnable action) {
