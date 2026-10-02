@@ -40,11 +40,8 @@ class BoseEarbudsFacade(
                 "bose settings " + settings.joinToString(" ") { (it.toInt() and 0xff).toString(16) },
             )
         }
-        override fun onSettingWriteResult(id: SonyAdvancedSettingId, success: Boolean, value: Boolean?, reason: String) =
-            listener.onSettingWriteResult(id, success, value, reason)
         override fun onAncWriteResult(success: Boolean, state: EarbudsState?, reason: String) =
             listener.onAncWriteResult(success, state, reason)
-        override fun onCommandSessionFinished(reason: String) = listener.onCommandSessionFinished(reason)
         override fun onDisconnected() = listener.onDisconnected()
         override fun onFailed(reason: String) = listener.onFailed(reason)
         override fun onLog(message: String) = listener.onLog(message)
