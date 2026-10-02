@@ -172,6 +172,14 @@ final class BoseControlProviderBridge {
                 + " args=" + java.util.Arrays.toString(args)
                 + " stockRows=" + (result == null ? "null" : result.getCount())
                 + (result != null && result.getCount() > 0 ? " stock=" + dumpCursor(result) : ""), null);
+        // v1.x rule: the wear hint broadcast must fire for every SystemUI poll
+        // while the buds are present — including polls the stock provider answers
+        // itself (0.2.7 passthrough regression: the broadcast sat behind the
+        // takeover branch and never fired once the Enco X3 mask made stock rows
+        // available, so the noise tile stayed hidden).
+        if (PATH_ACTIVE.equals(path) || PATH_NOISE.equals(path) || PATH_SPATIAL.equals(path)) {
+            if (cb.isBoseActive() || boseBonded(cb)) ensureWearAnnounced();
+        }
         // Native rows win: once the Enco X3 mask registers the device in Melody's
         // repository the stock provider answers with real whitelist-backed columns,
         // which SystemUI trusts more than our synthesized row.
@@ -242,6 +250,7 @@ final class BoseControlProviderBridge {
         if (worn) return;
         worn = true;
         Context ctx = appContext;
+        diag("wear hint broadcast 0x500|1 (noise tile prerequisite)", null);
         if (ctx != null) notifyChange(ctx, FLAG_WEAR | 0x01);
     }
 
