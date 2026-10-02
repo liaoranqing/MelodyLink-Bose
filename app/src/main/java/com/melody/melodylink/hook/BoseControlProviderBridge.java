@@ -244,12 +244,12 @@ final class BoseControlProviderBridge {
             if (args != null && args.length > 0 && args[0] != null
                     && !args[0].equalsIgnoreCase(address)) return null;
             closeCursor(result);
-            // Column shape copied from the stock query dispatcher:
-            // name/address/type(=spatialType)/supports(=1 int flag).
+            // SystemUI parses supports as a JSON int list (stock row format is
+            // supports=[0,1,2]); an integer 1 here hid the spatial tile entirely.
             MatrixCursor cursor = new MatrixCursor(
                     new String[]{"name", "address", "type", "supports"});
             cursor.addRow(new Object[]{cb.deviceName(), address,
-                    Integer.valueOf(cb.spatialType()), Integer.valueOf(1)});
+                    Integer.valueOf(cb.spatialType()), "[0,1,2]"});
             return cursor;
         }
         return null;
