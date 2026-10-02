@@ -2902,7 +2902,7 @@ public final class HookModule extends XposedModule {
                         "com.oplus.melody.model.repository.earphone.V$a", false, loader);
             } catch (ClassNotFoundException renamed) {
                 batteryStatusClass = Class.forName(
-                        "com.oplus.melody.model.repository.earphone.K", false, loader);
+                        "com.oplus.melody.model.repository.earphone.K$a", false, loader);
             }
             Constructor<?> constructor = batteryStatusClass.getConstructor(int.class, boolean.class);
             boolean updated = false;
