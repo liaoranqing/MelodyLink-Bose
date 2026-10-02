@@ -719,6 +719,7 @@ public final class HookModule extends XposedModule {
                         Object result = chain.proceed();
                         projectSonyAncModeIntoDto(chain.getArg(0), result);
                         projectBoseBatteryIntoDto(chain.getArg(0), result);
+                        projectBoseSpatialIntoDto(chain.getArg(0), result);
                         return result;
                     }
                     if ("melodyEarphoneLiveDataResponse".equals(label)
@@ -1906,6 +1907,10 @@ public final class HookModule extends XposedModule {
                         // value; the BMAP SETGET confirmation re-syncs the real state.
                         boseTransport.cacheSpatialType(clamped);
                         boseTransport.writeSetting(BoseDeviceConfig.SETTING_SPATIAL, clamped);
+                        // The tile's type column comes from the stock DTO, so the DTO
+                        // must be rebuilt with the new spatial value before SystemUI
+                        // re-queries — same chain the ANC click uses.
+                        refreshTargetRepository("Bose tile spatial");
                         BoseControlProviderBridge.refreshSpatialTile();
                         return true;
                     }
@@ -3283,6 +3288,24 @@ public final class HookModule extends XposedModule {
         if (!updated) return;
         writeBooleanField(dto, "isBatteryInfoReceived", true);
         log(Log.INFO, TAG, event("projected Bose battery into Melody EarphoneDTO"));
+    }
+
+    /**
+     * The volume-panel spatial tile reads its type from the stock EarphoneDTO
+     * (spatialSoundStatus), not from our synthesized provider row — so mirror the
+     * live Bose [31.10] byte 2 into the DTO. Values coincide: 0=off,
+     * 1=fixed-to-room, 2=fixed-to-head, exactly what the tile cycles through.
+     */
+    private void projectBoseSpatialIntoDto(Object address, Object dto) {
+        if (targetBoseDevice == null) return;
+        if (!isTargetAddress(address) || dto == null) return;
+        int type = boseTransport.getSpatialType();
+        if (type < 0) return;
+        boolean updated = writeIntField(dto, "spatialSoundStatus", type);
+        updated |= writeIntField(dto, "headsetSpatialType", type);
+        if (updated) {
+            log(Log.INFO, TAG, event("projected Bose spatial type=" + type + " into Melody EarphoneDTO"));
+        }
     }
 
     private static boolean writeBooleanField(Object object, String fieldName, boolean value) {

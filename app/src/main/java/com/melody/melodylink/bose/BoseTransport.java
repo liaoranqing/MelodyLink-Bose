@@ -129,6 +129,7 @@ public final class BoseTransport {
      * open would starve the Bose Music app and later writes).
      */
     private void openSession(int myGen) {
+        if (myGen != generation.get()) return; // superseded before the socket handshake
         listenerOnUi(new Runnable() {
             @Override public void run() { listener.onConnecting(); }
         });
@@ -221,6 +222,9 @@ public final class BoseTransport {
     }
 
     private void runAncWrite(int myGen, int modeValue, Integer ancValue, AncMode domainMode) {
+        // Superseded by a newer click while queued: skip the whole 2-3s RFCOMM
+        // handshake instead of only noticing after it (rapid-tap responsiveness).
+        if (myGen != generation.get()) return;
         BluetoothSocket opened = null;
         try {
             opened = openSocket();
@@ -307,6 +311,7 @@ public final class BoseTransport {
     }
 
     private void runSettingWrite(int myGen, int index, int value) {
+        if (myGen != generation.get()) return; // superseded before the socket handshake
         BluetoothSocket opened = null;
         try {
             opened = openSocket();
@@ -333,6 +338,7 @@ public final class BoseTransport {
     }
 
     private void runBatteryRead(int myGen) {
+        if (myGen != generation.get()) return; // superseded before the socket handshake
         BluetoothSocket opened = null;
         try {
             opened = openSocket();
