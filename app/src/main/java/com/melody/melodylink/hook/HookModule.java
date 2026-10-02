@@ -509,7 +509,9 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "i", 1, "sonyCardImage");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onBindViewHolder", 1, "sonyCardBind");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onShowAnimationEnd", 0, "sonyCardLoading");
-            hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "c", 1, "sonyDetailImage");
+            hookAny(loader, "sonyDetailImage",
+                    "com.oplus.melody.ui.widget.MelodyDetailModelView#c#1",
+                    "com.oplus.melody.ui.widget.MelodyDetailModelView#b#1");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "d", 0, "sonyDetailPlaceholder");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "onFinishInflate", 0, "sonyDetailInflated");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "setViewModel", 1, "sonyDetailViewModel");
@@ -520,7 +522,9 @@ public final class HookModule extends XposedModule {
             hookAny(loader, "repositoryGet",
                     "com.oplus.melody.model.repository.earphone.U#y#1",
                     "com.oplus.melody.model.repository.earphone.J#y#1");
-            hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "g1", 1, "repositoryDtoBuild");
+            hookAny(loader, "repositoryDtoBuild",
+                    "com.oplus.melody.model.repository.earphone.U#g1#1",
+                    "com.oplus.melody.model.repository.earphone.J#k1#1");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "getConnectionState", 0, "dtoConnectionState");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "getAclConnectionState", 0, "dtoAclState");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "isSupportSpp", 0, "dtoSupportSpp");
@@ -555,8 +559,12 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "C7.b", "k", 1, "socketFailureBranch");
             hookNamed(loader, "D7.a", "f", 2, "connectionFailureReport");
             hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "m0", 1, "receiveEvent");
-            hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "L0", 3, "noiseWrite");
-            hookNamed(loader, "com.oplus.melody.model.repository.earphone.U", "s0", 2, "noiseModeWrite");
+            hookAny(loader, "noiseWrite",
+                    "com.oplus.melody.model.repository.earphone.U#L0#3",
+                    "com.oplus.melody.model.repository.earphone.J#o0#3");
+            hookAny(loader, "noiseModeWrite",
+                    "com.oplus.melody.model.repository.earphone.U#s0#2",
+                    "com.oplus.melody.model.repository.earphone.J#v0#2");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneRepositoryClientImpl", "s0", 2, "noiseModeWriteClient");
             hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneRepositoryClientImpl", "z", 1, "repositoryClientObserve");
             hookNamed(loader, "V7.v", "g", 0, "melodyEarphoneLiveDataRequest");
