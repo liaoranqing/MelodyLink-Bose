@@ -220,12 +220,16 @@ public final class HookModule extends XposedModule {
         @Override public void onConnecting() { log(Log.INFO, TAG, event("Bose BMAP connecting")); }
         @Override public void onConnected(EarbudsState state) {
             boseSessionState.acceptAnc(state);
+            // The native detail UI reads ANC/battery through sonySessionState (the
+            // Enco X3 mask we map Bose onto), so mirror the state there too.
+            sonySessionState.acceptAnc(state);
             writeSharedBoseState();
             refreshTargetRepository("Bose connected");
             log(Log.INFO, TAG, event("Bose BMAP session done; ANC state=" + state.getAncMode()));
         }
         @Override public void onBatteryState(EarbudsState state) {
             boseSessionState.acceptBattery(state);
+            sonySessionState.acceptBattery(state);
             publishBatteryState(state, "Bose battery read");
             refreshTargetRepository("Bose battery read");
             log(Log.INFO, TAG, event("Bose battery state received"));
@@ -238,6 +242,7 @@ public final class HookModule extends XposedModule {
             if (success) {
                 if (state != null) {
                     boseSessionState.acceptAnc(state);
+                    sonySessionState.acceptAnc(state);
                     writeSharedBoseState();
                     refreshTargetRepository("Bose ANC write");
                 }
@@ -710,6 +715,7 @@ public final class HookModule extends XposedModule {
                     if ("repositoryDtoBuild".equals(label)) {
                         Object result = chain.proceed();
                         projectSonyAncModeIntoDto(chain.getArg(0), result);
+                        projectBoseBatteryIntoDto(chain.getArg(0), result);
                         return result;
                     }
                     if ("melodyEarphoneLiveDataResponse".equals(label)
@@ -3115,6 +3121,46 @@ public final class HookModule extends XposedModule {
             log(Log.WARN, TAG, event("Melody DTO ANC projection failed old="
                     + compact(previous) + " requested=" + mode));
         }
+    }
+
+    /**
+     * Melody 17.6.3 keeps battery levels on EarphoneDTO (leftBattery/rightBattery/
+     * boxBattery + isBatteryInfoReceived) instead of the old per-address V map, so
+     * publish through the DTO build hook.
+     */
+    private void projectBoseBatteryIntoDto(Object address, Object dto) {
+        if (targetBoseDevice == null || !boseHostConnected) return;
+        if (!isTargetAddress(address) || dto == null) return;
+        EarbudsState battery = boseSessionState.getBattery();
+        if (battery == null || battery.getBattery().isEmpty()) return;
+        boolean updated = false;
+        com.melody.melodylink.domain.BatteryValue left = battery.getBattery().get(BatteryPart.LEFT);
+        com.melody.melodylink.domain.BatteryValue right = battery.getBattery().get(BatteryPart.RIGHT);
+        com.melody.melodylink.domain.BatteryValue box = battery.getBattery().get(BatteryPart.CASE);
+        if (left != null) updated |= writeIntField(dto, "leftBattery", left.getPercent());
+        if (right != null) updated |= writeIntField(dto, "rightBattery", right.getPercent());
+        if (box != null) updated |= writeIntField(dto, "boxBattery", box.getPercent());
+        if (!updated) return;
+        writeBooleanField(dto, "isBatteryInfoReceived", true);
+        log(Log.INFO, TAG, event("projected Bose battery into Melody EarphoneDTO"));
+    }
+
+    private static boolean writeBooleanField(Object object, String fieldName, boolean value) {
+        if (object == null) return false;
+        Class<?> type = object.getClass();
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                field.setBoolean(object, value);
+                return true;
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private static boolean writeIntField(Object object, String fieldName, int value) {
