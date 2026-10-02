@@ -223,15 +223,50 @@ public final class BoseTransport {
                 });
                 return;
         }
-        int myGen = generation.incrementAndGet();
+        // Coalesce rather than cancel: rapid tile taps each carry a distinct
+        // target SystemUI computed from its own cycle, so dropping every but the
+        // last (the old per-call generation bump) made intermediate modes vanish.
+        // Store the latest target and let the single worker drain it; a queued
+        // session for an older target is superseded by the newest at its start,
+        // but a target never yet started is always executed.
         active = true;
         linkDead = false;
-        final int modeValue = boseMode;
-        final Integer ancValue = anc;
-        final AncMode domainMode = mode;
+        synchronized (ancLock) {
+            ancModeValue = boseMode;
+            ancByteValue = anc;
+            ancDomainMode = mode;
+            ancDirty = true;
+            if (ancWorkerRunning) return;
+            ancWorkerRunning = true;
+        }
         post(new Runnable() {
-            @Override public void run() { runAncWrite(myGen, modeValue, ancValue, domainMode); }
+            @Override public void run() { ancWorker(); }
         });
+    }
+
+    private final Object ancLock = new Object();
+    private int ancModeValue;
+    private Integer ancByteValue;
+    private AncMode ancDomainMode;
+    private boolean ancDirty;
+    private boolean ancWorkerRunning;
+
+    private void ancWorker() {
+        while (true) {
+            int modeValue;
+            Integer ancValue;
+            AncMode domainMode;
+            int myGen;
+            synchronized (ancLock) {
+                if (!ancDirty) { ancWorkerRunning = false; return; }
+                ancDirty = false;
+                modeValue = ancModeValue;
+                ancValue = ancByteValue;
+                domainMode = ancDomainMode;
+                myGen = generation.incrementAndGet();
+            }
+            runAncWrite(myGen, modeValue, ancValue, domainMode);
+        }
     }
 
     private void runAncWrite(int myGen, int modeValue, Integer ancValue, AncMode domainMode) {

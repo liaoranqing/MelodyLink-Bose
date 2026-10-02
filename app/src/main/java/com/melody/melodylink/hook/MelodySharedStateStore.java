@@ -13,6 +13,8 @@ final class MelodySharedStateStore {
     static final String COMMAND_FILE = ".melodylink_sony_anc_command";
     static final String BATTERY_COMMAND_FILE = ".melodylink_sony_battery_command";
     static final String SETTING_COMMAND_FILE = ".melodylink_sony_setting_command";
+    static final String BOSE_CNC_STATE_FILE = ".melodylink_bose_cnc_state";
+    static final String BOSE_CNC_COMMAND_FILE = ".melodylink_bose_cnc_command";
 
     private final File directory;
 
@@ -38,6 +40,14 @@ final class MelodySharedStateStore {
 
     File settingCommandFile() {
         return new File(directory, SETTING_COMMAND_FILE);
+    }
+
+    File boseCncStateFile() {
+        return new File(directory, BOSE_CNC_STATE_FILE);
+    }
+
+    File boseCncCommandFile() {
+        return new File(directory, BOSE_CNC_COMMAND_FILE);
     }
 
     static SharedState readState(File file) {
@@ -92,6 +102,41 @@ final class MelodySharedStateStore {
 
     static boolean writeSettingCommand(File file, String address, String settingId, boolean value, String nonce) {
         return write(file, address + "\n" + settingId + "\n" + (value ? "1" : "0") + "\n" + nonce + "\n");
+    }
+
+    /** Bose CNC state: address + confirmed level (0..10, -1 = unknown). */
+    static boolean writeBoseCncState(File file, String address, int level) {
+        return write(file, address + "\n" + level + "\n");
+    }
+
+    static int[] readBoseCncState(File file) {
+        String[] lines = readLines(file, 2);
+        if (lines == null) return null;
+        try {
+            return new int[]{1, Integer.parseInt(lines[1].trim())};
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    static String readBoseCncAddress(File file) {
+        String[] lines = readLines(file, 2);
+        return lines == null ? null : lines[0].trim();
+    }
+
+    /** Bose CNC command: address + requested level + nonce. */
+    static boolean writeBoseCncCommand(File file, String address, int level, String nonce) {
+        return write(file, address + "\n" + level + "\n" + nonce + "\n");
+    }
+
+    static SharedBoseCncCommand readBoseCncCommand(File file) {
+        String[] lines = readLines(file, 3);
+        if (lines == null) return null;
+        try {
+            return new SharedBoseCncCommand(lines[0].trim(), Integer.parseInt(lines[1].trim()), lines[2].trim());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     static boolean delete(File file) {
@@ -180,6 +225,18 @@ final class MelodySharedStateStore {
             this.address = address;
             this.settingId = settingId;
             this.value = value;
+            this.nonce = nonce;
+        }
+    }
+
+    static final class SharedBoseCncCommand {
+        final String address;
+        final int level;
+        final String nonce;
+
+        SharedBoseCncCommand(String address, int level, String nonce) {
+            this.address = address;
+            this.level = level;
             this.nonce = nonce;
         }
     }

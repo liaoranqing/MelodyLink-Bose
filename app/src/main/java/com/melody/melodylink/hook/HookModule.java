@@ -115,6 +115,7 @@ public final class HookModule extends XposedModule {
     private volatile String lastSonyCommandFingerprint;
     private volatile String lastSonyBatteryCommandNonce;
     private volatile String lastSonySettingCommandNonce;
+    private volatile String lastBoseCncCommandNonce;
     private volatile boolean sonyConfigInitialized;
     private final MelodyDeviceBridge deviceBridge = new MelodyDeviceBridge();
     private volatile AssetManager sonyModuleAssets;
@@ -1771,6 +1772,11 @@ public final class HookModule extends XposedModule {
         } else {
             log(Log.WARN, TAG, "shared Bose state write failed");
         }
+        // Publish the confirmed CNC level too, so the :fg detail slider can read it.
+        int cnc = boseTransport.getCncLevel();
+        if (cnc >= 0) {
+            MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), targetAddress, cnc);
+        }
     }
 
     private void clearBoseSessionState() {
@@ -1879,29 +1885,14 @@ public final class HookModule extends XposedModule {
                     @Override public boolean requestMode(AncMode requested) {
                         BluetoothDevice device = resolveBoseForTile();
                         if (device == null) return false;
-                        // The tile is a cycle button. SystemUI computes "next mode"
-                        // from its own cached display, which lags a re-query after a
-                        // notifyChange — so rapid taps all send the SAME target and
-                        // only the first took effect. Ignore the requested value and
-                        // advance one step from our authoritative optimistic state
-                        // instead: N taps = N cycle steps, always in sync with what
-                        // we answer on the next query. Cold state (no session yet):
-                        // trust SystemUI's requested mode.
-                        AncMode current = null;
-                        EarbudsState anc = boseSessionState.getAnc();
-                        if (anc != null) current = anc.getAncMode();
-                        AncMode mode;
-                        if (current == null) {
-                            mode = requested;
-                        } else {
-                            switch (current) {
-                                case OFF: mode = AncMode.NOISE_CANCELING; break;
-                                case NOISE_CANCELING: mode = AncMode.TRANSPARENCY; break;
-                                case TRANSPARENCY:
-                                case AMBIENT_SOUND: mode = AncMode.OFF; break;
-                                default: mode = requested;
-                            }
-                        }
+                        // The 0.4.0 log disproved the "SystemUI sends a stale target"
+                        // theory: it actually sends a correct OFF→ANC→TRANSP cycle. The
+                        // real bug was BoseTransport dropping every queued-but-unsent
+                        // ANC session on a rapid tap (per-call generation bump), so only
+                        // the last landed. That is now fixed with a coalescing worker, so
+                        // we honour SystemUI's requested target directly. Mirroring it
+                        // into both session states keeps the detail UI and tile in sync.
+                        AncMode mode = requested;
                         EarbudsState optimistic = new EarbudsState(
                                 com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
                                 mode, new java.util.HashMap<>());
@@ -1972,6 +1963,31 @@ public final class HookModule extends XposedModule {
     private static File sharedSettingCommandFile() {
         Application application = currentApplication();
         return application == null ? null : MelodySharedStateStore.from(application).settingCommandFile();
+    }
+
+    private static File boseCncStateFile() {
+        Application application = currentApplication();
+        return application == null ? null : MelodySharedStateStore.from(application).boseCncStateFile();
+    }
+
+    private static File boseCncCommandFile() {
+        Application application = currentApplication();
+        return application == null ? null : MelodySharedStateStore.from(application).boseCncCommandFile();
+    }
+
+    /** Cross-process Bose presence: any known MAC bonded (works in :fg too). */
+    @SuppressLint("MissingPermission")
+    private static boolean boseBonded() {
+        try {
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            if (adapter == null || !adapter.isEnabled()) return false;
+            for (String mac : com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getKNOWN_MACS()) {
+                BluetoothDevice device = adapter.getRemoteDevice(mac);
+                if (device != null && device.getBondState() == BluetoothDevice.BOND_BONDED) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private void writeSharedSonyState() {
@@ -2418,8 +2434,10 @@ public final class HookModule extends XposedModule {
                 && !activeSonyImageProfile.getAdvancedSettings().isEmpty();
         boolean hasHuaweiLowLatency = activeHuaweiImageProfile != null
                 && activeHuaweiImageProfile.getSupportsLowLatency();
-        // Bose: expose the 10-level CNC slider in the detail page.
-        boolean hasBoseCnc = targetBoseDevice != null || boseHostConnected;
+        // Bose: expose the 10-level CNC slider in the detail page. The detail
+        // fragment binds in the :fg process where targetBoseDevice is never set,
+        // so presence must be the cross-process bond probe, not in-memory state.
+        boolean hasBoseCnc = boseBonded();
         if (!hasSonySettings && !hasHuaweiLowLatency && !hasBoseCnc) return;
         try {
             ClassLoader loader = fragment.getClass().getClassLoader();
@@ -2743,6 +2761,12 @@ public final class HookModule extends XposedModule {
         setIntField(seek, "mSeekbarIncrement", 1);
         setBooleanField(seek, "mShowSeekBarValue", true);
         int level = boseTransport.getCncLevel();
+        if (level < 0) {
+            // :fg has no BMAP session; read the last published level from the
+            // shared state file written by the primary process.
+            int[] shared = MelodySharedStateStore.readBoseCncState(boseCncStateFile());
+            if (shared != null) level = shared[1];
+        }
         if (level < 0) level = 3;
         invokeInt(seek, "setProgress", level);
         setPreferenceValue(seek, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + level + "/10");
@@ -2753,14 +2777,21 @@ public final class HookModule extends XposedModule {
     }
 
     /** Re-sync the injected slider when a BMAP session reports the real CNC level. */
+    private volatile int lastCncSliderLevel = -2;
     private void updateBoseCncSlider() {
         Object slider = boseCncPreference;
         if (slider == null) return;
         int level = boseTransport.getCncLevel();
-        if (level < 0) return;
+        if (level < 0) {
+            int[] shared = MelodySharedStateStore.readBoseCncState(boseCncStateFile());
+            if (shared != null) level = shared[1];
+        }
+        if (level < 0 || level == lastCncSliderLevel) return;
+        lastCncSliderLevel = level;
+        final int value = level;
         mainHandler.post(() -> {
-            invokeInt(slider, "setProgress", level);
-            setPreferenceValue(slider, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + level + "/10");
+            invokeInt(slider, "setProgress", value);
+            setPreferenceValue(slider, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + value + "/10");
         });
     }
 
@@ -2796,19 +2827,26 @@ public final class HookModule extends XposedModule {
                         return Boolean.TRUE;
                     }
                     int value = Math.max(0, Math.min(10, ((Number) args[1]).intValue()));
-                    boseTransport.cacheCncLevel(value);
                     setPreferenceValue(preference, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + value + "/10");
                     if (isPrimaryProcess()) {
-                        if (boseTransport.getCncLevel() >= 0 && boseHostConnected) {
+                        BluetoothDevice device = resolveBoseForTile();
+                        if (device != null) {
+                            boseTransport.cacheCncLevel(value);
                             boseTransport.writeSetting(
                                     com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, value);
-                        } else {
-                            BluetoothDevice device = resolveBoseForTile();
-                            if (device != null) {
-                                boseTransport.writeSetting(
-                                        com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, value);
-                            }
                         }
+                    } else {
+                        // Detail UI lives in :fg; the BMAP session is in the main
+                        // process. Hand the level over through the command file.
+                        String address = targetAddress == null
+                                ? MelodySharedStateStore.readBoseCncAddress(boseCncStateFile())
+                                : targetAddress;
+                        if (address == null) {
+                            address = com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
+                                    .getKNOWN_MACS().iterator().next();
+                        }
+                        MelodySharedStateStore.writeBoseCncCommand(boseCncCommandFile(),
+                                address, value, java.util.UUID.randomUUID().toString());
                     }
                     return Boolean.TRUE;
                 });
@@ -3100,6 +3138,7 @@ public final class HookModule extends XposedModule {
             observeSharedSonyCommand();
             observeSharedSonyBatteryCommand();
             observeSharedSonySettingCommand();
+            observeSharedBoseCncCommand();
         }
         MelodySharedStateStore.SharedState state = readSharedSonyState();
         String fingerprint = state == null
@@ -3112,11 +3151,42 @@ public final class HookModule extends XposedModule {
         lastForegroundStateFingerprint = fingerprint;
         if (state != null) {
             rememberTargetAddress(state.address);
-            if (!isPrimaryProcess()) applySharedAdvancedSettings(state);
+            if (!isPrimaryProcess()) {
+                applySharedAdvancedSettings(state);
+                updateBoseCncSlider();
+            }
         }
         log(Log.INFO, TAG, event("foreground Sony state changed; requesting native Melody LiveData refresh"
                 + " mode=" + (state == null ? -1 : state.modeIndex)));
         refreshTargetRepository("foreground shared Sony state changed");
+    }
+
+    private void observeSharedBoseCncCommand() {
+        MelodySharedStateStore.SharedBoseCncCommand command =
+                MelodySharedStateStore.readBoseCncCommand(boseCncCommandFile());
+        if (command == null || command.nonce.equals(lastBoseCncCommandNonce)) return;
+        lastBoseCncCommandNonce = command.nonce;
+        if (!isTargetAddress(command.address)) {
+            String mac = com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getKNOWN_MACS()
+                    .isEmpty() ? null
+                    : com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getKNOWN_MACS().iterator().next();
+            if (mac == null || !mac.equalsIgnoreCase(command.address)) {
+                log(Log.WARN, TAG, event("ignored Bose CNC command for a different device"));
+                return;
+            }
+        }
+        BluetoothDevice device = resolveBoseForTile();
+        if (device == null) {
+            log(Log.WARN, TAG, event("Bose CNC command skipped: device unavailable"));
+            return;
+        }
+        int level = Math.max(0, Math.min(10, command.level));
+        log(Log.INFO, TAG, event("executing forwarded Bose CNC level write level=" + level));
+        boseTransport.cacheCncLevel(level);
+        boseTransport.writeSetting(
+                com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, level);
+        String publishedAddress = targetAddress == null ? command.address : targetAddress;
+        MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), publishedAddress, level);
     }
 
     private void observeSharedSonyCommand() {
