@@ -24,22 +24,6 @@ object BoseDeviceConfig {
      */
     val KNOWN_MACS: Set<String> = setOf("68:F2:1F:3D:41:D7")
 
-    /** True when the name looks like a factory Bose product name. */
-    fun matchesName(bluetoothName: String?): Boolean {
-        if (bluetoothName.isNullOrBlank()) return false
-        return bluetoothName.lowercase().startsWith("bose")
-    }
-
-    fun matchesAddress(address: String?): Boolean {
-        if (address.isNullOrBlank()) return false
-        return KNOWN_MACS.any { it.equals(address, ignoreCase = true) }
-    }
-
-    fun matches(bluetoothName: String?): Boolean = matchesName(bluetoothName)
-
-    fun matches(bluetoothName: String?, address: String?): Boolean =
-        matchesName(bluetoothName) || matchesAddress(address)
-
     /** ColorOS-facing mode constants verified on the device. */
     const val MODE_QUIET = 0
     const val MODE_AWARE = 1
@@ -61,11 +45,21 @@ object BoseDeviceConfig {
         supportsAmbientLevel = true,
     )
 
-    fun matches(bluetoothName: String?): Boolean {
+    /** True when the name looks like a factory Bose product name. */
+    fun matchesName(bluetoothName: String?): Boolean {
         if (bluetoothName.isNullOrBlank()) return false
-        val name = bluetoothName.lowercase()
-        return name.startsWith("bose")
+        return bluetoothName.lowercase().startsWith("bose")
     }
+
+    fun matchesAddress(address: String?): Boolean {
+        if (address.isNullOrBlank()) return false
+        return KNOWN_MACS.any { it.equals(address, ignoreCase = true) }
+    }
+
+    fun matches(bluetoothName: String?): Boolean = matchesName(bluetoothName)
+
+    fun matches(bluetoothName: String?, address: String?): Boolean =
+        matchesName(bluetoothName) || matchesAddress(address)
 
     fun profile(): DeviceProfile = DeviceProfile(
         vendor = com.melody.melodylink.domain.Vendor.BOSE,
@@ -77,5 +71,9 @@ object BoseDeviceConfig {
 
 class BoseDeviceCatalog : DeviceCatalog {
     override fun findBest(identity: DeviceIdentity): DeviceProfile? =
-        if (BoseDeviceConfig.matches(identity.bluetoothName)) BoseDeviceConfig.profile() else null
+        if (BoseDeviceConfig.matches(identity.bluetoothName, identity.address)) {
+            BoseDeviceConfig.profile()
+        } else {
+            null
+        }
 }
