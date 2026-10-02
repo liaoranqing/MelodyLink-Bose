@@ -122,6 +122,7 @@ final class BoseControlProviderBridge {
                         Object result = chain.proceed();
                         try {
                             Cursor patched = patchQuery((Uri) chain.getArg(0),
+                                    (String) chain.getArg(2),
                                     (String[]) chain.getArg(3), (Cursor) result);
                             if (patched != null) return patched;
                         } catch (Throwable ignored) {
@@ -162,11 +163,18 @@ final class BoseControlProviderBridge {
 
     // ------------------------------------------------------------------ logic
 
-    private static Cursor patchQuery(Uri uri, String[] args, Cursor result) {
+    private static Cursor patchQuery(Uri uri, String selection, String[] args, Cursor result) {
         Callbacks cb = callbacks;
         if (cb == null) return null;
         String path = uri == null ? null : uri.getPath();
         if (path == null) return null;
+        diag("query path=" + path + " selection=" + selection
+                + " args=" + java.util.Arrays.toString(args)
+                + " stockRows=" + (result == null ? "null" : result.getCount()), null);
+        // Wear/spatial takeover is disabled until the exact SystemUI contract is
+        // captured from these logs: guessed ear_left/ear_right values made the
+        // whole device card grey out (0.2.5 regression).
+        if (PATH_WEAR.equals(path) || PATH_SPATIAL.equals(path)) return null;
         // SystemUI queries this provider on its own schedule, often while the
         // Melody UI never ran a session — so presence is a bond-state probe
         // (same rule the verified v1.x module used), not the in-app flag.
@@ -244,10 +252,9 @@ final class BoseControlProviderBridge {
             return accepted;
         }
         if (METHOD_SPATIAL.equals(method)) {
-            int type = extras.getInt("type", 0);
-            boolean accepted = cb.requestSpatial(type);
-            diag("volume-panel spatial toggle type=" + type + " accepted=" + accepted, null);
-            return accepted;
+            // Disabled pending the captured SystemUI contract (see patchQuery).
+            diag("volume-panel spatial toggle ignored (contract pending)", null);
+            return false;
         }
         if (METHOD_WEAR.equals(method)) return true;
         return false;
