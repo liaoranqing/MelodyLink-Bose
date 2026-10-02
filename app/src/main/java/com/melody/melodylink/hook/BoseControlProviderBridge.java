@@ -194,13 +194,55 @@ final class BoseControlProviderBridge {
         if (PATH_ACTIVE.equals(path) || PATH_NOISE.equals(path) || PATH_SPATIAL.equals(path)) {
             if (cb.isBoseActive() || boseBonded(cb)) ensureWearAnnounced();
         }
-        // Native rows win: once the Enco X3 mask registers the device in Melody's
-        // repository the stock provider answers with real whitelist-backed columns,
-        // which SystemUI trusts more than our synthesized row.
+        // Spatial is the one path we must ALWAYS override, even when the stock
+        // provider returns a row: that row reflects OPPO's own spatial-audio
+        // state (always 0 for a masked Enco X3 with OPPO spatial off), so passing
+        // it through pinned the tile to "off" no matter what Bose reported. We
+        // replace it with Bose's real [31.10] byte2 (0=off/1=room/2=head) using
+        // the exact 4-column shape + JSON supports list the stock row uses.
+        if (PATH_SPATIAL.equals(path)) {
+            if (cb.isBoseActive() || boseBonded(cb)) {
+                String spAddress = cb.deviceAddress();
+                if (spAddress != null && (args == null || args.length == 0
+                        || args[0] == null || args[0].equalsIgnoreCase(spAddress))) {
+                    closeCursor(result);
+                    MatrixCursor cursor = new MatrixCursor(
+                            new String[]{"name", "address", "type", "supports"});
+                    cursor.addRow(new Object[]{cb.deviceName(), spAddress,
+                            Integer.valueOf(cb.spatialType()), "[0,1,2]"});
+                    return cursor;
+                }
+            }
+            return null;
+        }
+        // Noise is the other path we always override while Bose is present: the
+        // stock row's type lags behind a tap (the DTO rebuild is async), so rapid
+        // taps all read the same stale mode and SystemUI's [1,5,10,2] cycle keeps
+        // re-computing the same "next mode" — only the first tap of a burst took
+        // effect. Reporting our own optimistic currentMode() makes every tap
+        // advance the cycle immediately.
+        if (PATH_NOISE.equals(path)) {
+            if (cb.isBoseActive() || boseBonded(cb)) {
+                String nAddress = cb.deviceAddress();
+                if (nAddress != null && (args == null || args.length == 0
+                        || args[0] == null || args[0].equalsIgnoreCase(nAddress))) {
+                    closeCursor(result);
+                    MatrixCursor cursor = new MatrixCursor(
+                            new String[]{"name", "address", "type", "supports"});
+                    int mode = toTileMode(cb.currentMode());
+                    cursor.addRow(new Object[]{cb.deviceName(), nAddress,
+                            Integer.valueOf(mode < 0 ? NOISE_TRANSPARENT : mode), SUPPORTS});
+                    return cursor;
+                }
+            }
+            return null;
+        }
+        // Native rows win for every other path: once the Enco X3 mask registers
+        // the device in Melody's repository the stock provider answers with real
+        // whitelist-backed columns, which SystemUI trusts more than our synthesized row.
         if (result != null && result.getCount() > 0) return null;
         // Wear takeover stays off (SystemUI never queries it — confirmed from
-        // the captured panel-open sequence). Spatial answers only when the stock
-        // provider has no row, with the exact 4-column shape read from its smali.
+        // the captured panel-open sequence).
         if (PATH_WEAR.equals(path)) return null;
         // SystemUI queries this provider on its own schedule, often while the
         // Melody UI never ran a session — so presence is a bond-state probe
@@ -215,43 +257,7 @@ final class BoseControlProviderBridge {
             cursor.addRow(new Object[]{cb.deviceName(), address});
             return cursor;
         }
-        if (PATH_NOISE.equals(path)) {
-            if (args != null && args.length > 0 && args[0] != null
-                    && !args[0].equalsIgnoreCase(address)) return null;
-            ensureWearAnnounced();
-            closeCursor(result);
-            MatrixCursor cursor = new MatrixCursor(
-                    new String[]{"name", "address", "type", "supports"});
-            int mode = toTileMode(cb.currentMode());
-            cursor.addRow(new Object[]{cb.deviceName(), address,
-                    Integer.valueOf(mode < 0 ? NOISE_TRANSPARENT : mode), SUPPORTS});
-            return cursor;
-        }
-        if (PATH_WEAR.equals(path)) {
-            // SystemUI hides the noise tile unless wear state != 0. BMAP has no
-            // live sensor; the ACL/bond presence that got us here is the best
-            // proxy (same rule the verified v1.x module shipped).
-            if (args != null && args.length > 0 && args[0] != null
-                    && !args[0].equalsIgnoreCase(address)) return null;
-            closeCursor(result);
-            MatrixCursor cursor = new MatrixCursor(
-                    new String[]{"name", "address", "ear_left", "ear_right"});
-            cursor.addRow(new Object[]{cb.deviceName(), address,
-                    Integer.valueOf(2), Integer.valueOf(2)});
-            return cursor;
-        }
-        if (PATH_SPATIAL.equals(path)) {
-            if (args != null && args.length > 0 && args[0] != null
-                    && !args[0].equalsIgnoreCase(address)) return null;
-            closeCursor(result);
-            // SystemUI parses supports as a JSON int list (stock row format is
-            // supports=[0,1,2]); an integer 1 here hid the spatial tile entirely.
-            MatrixCursor cursor = new MatrixCursor(
-                    new String[]{"name", "address", "type", "supports"});
-            cursor.addRow(new Object[]{cb.deviceName(), address,
-                    Integer.valueOf(cb.spatialType()), "[0,1,2]"});
-            return cursor;
-        }
+        // Noise, spatial and wear are all answered above; anything else defers to stock.
         return null;
     }
 
