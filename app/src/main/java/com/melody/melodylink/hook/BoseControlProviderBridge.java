@@ -170,7 +170,12 @@ final class BoseControlProviderBridge {
         if (path == null) return null;
         diag("query path=" + path + " selection=" + selection
                 + " args=" + java.util.Arrays.toString(args)
-                + " stockRows=" + (result == null ? "null" : result.getCount()), null);
+                + " stockRows=" + (result == null ? "null" : result.getCount())
+                + (result != null && result.getCount() > 0 ? " stock=" + dumpCursor(result) : ""), null);
+        // Native rows win: once the Enco X3 mask registers the device in Melody's
+        // repository the stock provider answers with real whitelist-backed columns,
+        // which SystemUI trusts more than our synthesized row.
+        if (result != null && result.getCount() > 0) return null;
         // Wear/spatial takeover is disabled until the exact SystemUI contract is
         // captured from these logs: guessed ear_left/ear_right values made the
         // whole device card grey out (0.2.5 regression).
@@ -223,6 +228,26 @@ final class BoseControlProviderBridge {
             return cursor;
         }
         return null;
+    }
+
+    private static String dumpCursor(Cursor cursor) {
+        StringBuilder builder = new StringBuilder();
+        try {
+            String[] columns = cursor.getColumnNames();
+            if (cursor.moveToFirst()) {
+                for (String column : columns) {
+                    if (builder.length() > 0) builder.append(',');
+                    int index = cursor.getColumnIndex(column);
+                    builder.append(column).append('=')
+                            .append(index >= 0 ? cursor.getString(index) : "?");
+                }
+            }
+            builder.append(" rows=").append(cursor.getCount());
+            cursor.moveToPosition(-1);
+        } catch (Throwable t) {
+            builder.append("dump-failed:").append(t);
+        }
+        return builder.toString();
     }
 
     private static boolean boseBonded(Callbacks cb) {
