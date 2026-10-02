@@ -63,6 +63,8 @@ public final class BoseTransport {
     private volatile BluetoothDevice device;
     private volatile boolean linkDead;
     private volatile boolean active;
+    /** [31.10] byte 2 cache: 0=off, 1=room, 2=head (-1 = never read). */
+    private volatile int spatialType = -1;
     /** Bumped without ioLock so UI-thread callers never block behind a long session. */
     private final java.util.concurrent.atomic.AtomicInteger generation =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -80,6 +82,11 @@ public final class BoseTransport {
     /** True only while a BMAP session is actually open; the host link uses boseHostConnected. */
     public boolean isConnected() {
         return socket != null && !linkDead;
+    }
+
+    /** Cached [31.10] spatial byte; -1 until the first session read it. */
+    public int getSpatialType() {
+        return spatialType;
     }
 
     // ---------------------------------------------------------------- session
@@ -145,6 +152,9 @@ public final class BoseTransport {
                     BoseBmap.FUNC_CURRENT_MODE, BoseBmap.OP_GET, null);
             BoseBmap.Frame settings = command(BoseBmap.BLOCK_AUDIO_MODES,
                     BoseBmap.FUNC_AUDIO_SETTINGS, BoseBmap.OP_GET, null);
+            if (settings != null && settings.payload.length > BoseDeviceConfig.SETTING_SPATIAL) {
+                spatialType = settings.payload[BoseDeviceConfig.SETTING_SPATIAL] & 0xff;
+            }
             BoseBmap.Frame battery = command(BoseBmap.BLOCK_BATTERY,
                     BoseBmap.FUNC_BATTERY, BoseBmap.OP_GET, null);
             if (mode != null || settings != null) {
@@ -257,8 +267,10 @@ public final class BoseTransport {
         if (answer == null || answer.operator == BoseBmap.OP_ERROR) return false;
         BoseBmap.Frame confirmed = command(BoseBmap.BLOCK_AUDIO_MODES,
                 BoseBmap.FUNC_AUDIO_SETTINGS, BoseBmap.OP_GET, null);
-        return confirmed != null && confirmed.payload.length >= 5
+        boolean ok = confirmed != null && confirmed.payload.length >= 5
                 && (confirmed.payload[index] & 0xff) == value;
+        if (ok && index == BoseDeviceConfig.SETTING_SPATIAL) spatialType = value;
+        return ok;
     }
 
     // --------------------------------------------------------------- battery
@@ -273,6 +285,42 @@ public final class BoseTransport {
         post(new Runnable() {
             @Override public void run() { runBatteryRead(myGen); }
         });
+    }
+
+    /** Write one [31.10] settings byte (e.g. SETTING_SPATIAL) via a short session. */
+    public void writeSetting(int index, int value) {
+        int myGen = generation.incrementAndGet();
+        active = true;
+        linkDead = false;
+        post(new Runnable() {
+            @Override public void run() { runSettingWrite(myGen, index, value); }
+        });
+    }
+
+    private void runSettingWrite(int myGen, int index, int value) {
+        BluetoothSocket opened = null;
+        try {
+            opened = openSocket();
+        } catch (Throwable error) {
+            return;
+        }
+        final BluetoothSocket current = opened;
+        synchronized (ioLock) {
+            if (myGen != generation.get()) {
+                closeQuietly(current);
+                return;
+            }
+            socket = current;
+        }
+        linkDead = false;
+        startReader(current);
+        try {
+            sleepQuietly(POST_WRITE_DELAY_MS + 100L);
+            drainStartup(current);
+            writeSettingsLocked(myGen, index, value);
+        } finally {
+            closeSocket();
+        }
     }
 
     private void runBatteryRead(int myGen) {

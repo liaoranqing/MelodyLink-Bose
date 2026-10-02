@@ -1835,6 +1835,31 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    /**
+     * Resolve the Bose device for a volume-panel tile action, cold-starting the
+     * session from the known MAC when no in-app session has run yet.
+     */
+    @SuppressLint("MissingPermission")
+    private BluetoothDevice resolveBoseForTile() {
+        BluetoothDevice device = targetBoseDevice;
+        if (device != null && boseHostConnected) return device;
+        String mac = BoseDeviceConfig.INSTANCE.getKNOWN_MACS().isEmpty()
+                ? null : BoseDeviceConfig.INSTANCE.getKNOWN_MACS().iterator().next();
+        if (mac == null) return null;
+        try {
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            device = adapter == null ? null : adapter.getRemoteDevice(mac);
+        } catch (Throwable ignored) {
+            device = null;
+        }
+        if (device == null) return null;
+        targetBoseDevice = device;
+        boseHostConnected = true;
+        rememberTargetAddress(mac);
+        writeSharedBoseState();
+        return device;
+    }
+
     private boolean tryInstallBridge(ClassLoader loader, Context context) {
         if (context == null) return false;
         BoseControlProviderBridge.setLogSink((level, message, error) ->
@@ -1849,26 +1874,20 @@ public final class HookModule extends XposedModule {
                         return state == null ? null : state.getAncMode();
                     }
                     @Override public boolean requestMode(AncMode mode) {
-                        BluetoothDevice device = targetBoseDevice;
-                        if (device == null) {
-                            // Tile clicked before any in-app session: bind the
-                            // known MAC and open the first BMAP session now.
-                            String mac = BoseDeviceConfig.INSTANCE.getKNOWN_MACS().isEmpty()
-                                    ? null : BoseDeviceConfig.INSTANCE.getKNOWN_MACS().iterator().next();
-                            if (mac == null) return false;
-                            try {
-                                BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-                                device = adapter == null ? null : adapter.getRemoteDevice(mac);
-                            } catch (Throwable ignored) {
-                                device = null;
-                            }
-                            if (device == null) return false;
-                            targetBoseDevice = device;
-                            boseHostConnected = true;
-                            rememberTargetAddress(mac);
-                            writeSharedBoseState();
-                        }
+                        BluetoothDevice device = resolveBoseForTile();
+                        if (device == null) return false;
                         boseTransport.setAncMode(mode);
+                        return true;
+                    }
+                    @Override public int spatialType() {
+                        int type = boseTransport.getSpatialType();
+                        return type < 0 ? 0 : type;
+                    }
+                    @Override public boolean requestSpatial(int type) {
+                        BluetoothDevice device = resolveBoseForTile();
+                        if (device == null) return false;
+                        boseTransport.writeSetting(
+                                BoseDeviceConfig.SETTING_SPATIAL, Math.max(0, Math.min(2, type)));
                         return true;
                     }
                     @Override public String deviceName() {

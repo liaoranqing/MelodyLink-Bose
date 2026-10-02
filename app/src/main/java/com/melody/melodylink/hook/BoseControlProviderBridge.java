@@ -44,8 +44,11 @@ final class BoseControlProviderBridge {
     private static final String BASE_URI = "content://" + PROVIDER;
     private static final String PATH_ACTIVE = "/melody_method_active_device";
     private static final String PATH_NOISE = "/melody_method_noise_reduction";
+    private static final String PATH_WEAR = "/melody_method_control_wear";
+    private static final String PATH_SPATIAL = "/melody_method_spatial";
     private static final String METHOD_NOISE = "melody_method_noise_reduction";
     private static final String METHOD_WEAR = "melody_method_control_wear";
+    private static final String METHOD_SPATIAL = "melody_method_spatial";
 
     /** ColorOS noise tile mode contract (verified on v1.x). */
     private static final int NOISE_OFF = 1;
@@ -65,6 +68,12 @@ final class BoseControlProviderBridge {
 
         /** A tile click requests this mode; returns false when it cannot proceed. */
         boolean requestMode(AncMode mode);
+
+        /** Current [31.10] spatial byte (0=off, 1=room, 2=head). */
+        int spatialType();
+
+        /** Tile toggle for spatial audio; returns false when unavailable. */
+        boolean requestSpatial(int type);
 
         String deviceName();
 
@@ -181,6 +190,30 @@ final class BoseControlProviderBridge {
                     Integer.valueOf(mode < 0 ? NOISE_TRANSPARENT : mode), SUPPORTS});
             return cursor;
         }
+        if (PATH_WEAR.equals(path)) {
+            // SystemUI hides the noise tile unless wear state != 0. BMAP has no
+            // live sensor; the ACL/bond presence that got us here is the best
+            // proxy (same rule the verified v1.x module shipped).
+            if (args != null && args.length > 0 && args[0] != null
+                    && !args[0].equalsIgnoreCase(address)) return null;
+            closeCursor(result);
+            MatrixCursor cursor = new MatrixCursor(
+                    new String[]{"name", "address", "ear_left", "ear_right"});
+            cursor.addRow(new Object[]{cb.deviceName(), address,
+                    Integer.valueOf(2), Integer.valueOf(2)});
+            return cursor;
+        }
+        if (PATH_SPATIAL.equals(path)) {
+            if (args != null && args.length > 0 && args[0] != null
+                    && !args[0].equalsIgnoreCase(address)) return null;
+            closeCursor(result);
+            // Stock row: name/address/type(=spatialType)/supports(=isSupport flag)
+            MatrixCursor cursor = new MatrixCursor(
+                    new String[]{"name", "address", "type", "supports"});
+            cursor.addRow(new Object[]{cb.deviceName(), address,
+                    Integer.valueOf(cb.spatialType()), Integer.valueOf(1)});
+            return cursor;
+        }
         return null;
     }
 
@@ -208,6 +241,12 @@ final class BoseControlProviderBridge {
             AncMode mode = fromTileMode(extras.getInt("type", NOISE_OFF));
             boolean accepted = cb.requestMode(mode);
             diag("volume-panel ANC click mode=" + mode + " accepted=" + accepted, null);
+            return accepted;
+        }
+        if (METHOD_SPATIAL.equals(method)) {
+            int type = extras.getInt("type", 0);
+            boolean accepted = cb.requestSpatial(type);
+            diag("volume-panel spatial toggle type=" + type + " accepted=" + accepted, null);
             return accepted;
         }
         if (METHOD_WEAR.equals(method)) return true;
