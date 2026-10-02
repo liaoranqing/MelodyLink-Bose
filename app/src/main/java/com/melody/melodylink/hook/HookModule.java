@@ -130,6 +130,7 @@ public final class HookModule extends XposedModule {
     private final ThreadLocal<Boolean> detailAncWriteObserved = new ThreadLocal<>();
     private final Map<SonyAdvancedSettingId, Object> advancedPreferences = new ConcurrentHashMap<>();
     private volatile Object huaweiLowLatencyPreference;
+    private volatile Object boseCncPreference;
     private volatile Boolean confirmedHuaweiLowLatency;
     private volatile XiaomiEarbudsFacade xiaomiTransport;
     private volatile boolean xiaomiBatteryReceiverRegistered;
@@ -226,6 +227,7 @@ public final class HookModule extends XposedModule {
             writeSharedBoseState();
             BoseControlProviderBridge.refreshTile();
             refreshTargetRepository("Bose connected");
+            updateBoseCncSlider();
             log(Log.INFO, TAG, event("Bose BMAP session done; ANC state=" + state.getAncMode()));
         }
         @Override public void onBatteryState(EarbudsState state) {
@@ -1874,15 +1876,32 @@ public final class HookModule extends XposedModule {
                         EarbudsState state = boseSessionState.getAnc();
                         return state == null ? null : state.getAncMode();
                     }
-                    @Override public boolean requestMode(AncMode mode) {
+                    @Override public boolean requestMode(AncMode requested) {
                         BluetoothDevice device = resolveBoseForTile();
                         if (device == null) return false;
-                        // Same optimistic chain as the detail-page click: mirror the
-                        // mode into both session states, refresh the Melody repository
-                        // (the tile's type column is read from the stock Enco X3 row),
-                        // then push notifyChange(0x200) so SystemUI re-queries. Without
-                        // this the tile's displayed state stays stale and its cycle
-                        // logic re-computes the same "next mode" on every click.
+                        // The tile is a cycle button. SystemUI computes "next mode"
+                        // from its own cached display, which lags a re-query after a
+                        // notifyChange — so rapid taps all send the SAME target and
+                        // only the first took effect. Ignore the requested value and
+                        // advance one step from our authoritative optimistic state
+                        // instead: N taps = N cycle steps, always in sync with what
+                        // we answer on the next query. Cold state (no session yet):
+                        // trust SystemUI's requested mode.
+                        AncMode current = null;
+                        EarbudsState anc = boseSessionState.getAnc();
+                        if (anc != null) current = anc.getAncMode();
+                        AncMode mode;
+                        if (current == null) {
+                            mode = requested;
+                        } else {
+                            switch (current) {
+                                case OFF: mode = AncMode.NOISE_CANCELING; break;
+                                case NOISE_CANCELING: mode = AncMode.TRANSPARENCY; break;
+                                case TRANSPARENCY:
+                                case AMBIENT_SOUND: mode = AncMode.OFF; break;
+                                default: mode = requested;
+                            }
+                        }
                         EarbudsState optimistic = new EarbudsState(
                                 com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
                                 mode, new java.util.HashMap<>());
@@ -2399,7 +2418,9 @@ public final class HookModule extends XposedModule {
                 && !activeSonyImageProfile.getAdvancedSettings().isEmpty();
         boolean hasHuaweiLowLatency = activeHuaweiImageProfile != null
                 && activeHuaweiImageProfile.getSupportsLowLatency();
-        if (!hasSonySettings && !hasHuaweiLowLatency) return;
+        // Bose: expose the 10-level CNC slider in the detail page.
+        boolean hasBoseCnc = targetBoseDevice != null || boseHostConnected;
+        if (!hasSonySettings && !hasHuaweiLowLatency && !hasBoseCnc) return;
         try {
             ClassLoader loader = fragment.getClass().getClassLoader();
             Class<?> managerType = Class.forName("androidx.preference.g", false, loader);
@@ -2422,9 +2443,17 @@ public final class HookModule extends XposedModule {
             }
             if (screen == null) throw new IllegalStateException("preference screen unavailable");
             Object anchor = findPreferenceByTitle(screen, SOUND_QUALITY_TITLE);
-            if (anchor == null) throw new IllegalStateException("audio quality anchor unavailable");
-            Object parent = invokeNoArg(anchor, "getParent");
-            if (parent == null) throw new IllegalStateException("audio quality parent unavailable");
+            Object parent;
+            if (anchor != null) {
+                parent = invokeNoArg(anchor, "getParent");
+            } else if (hasBoseCnc) {
+                // Bose detail page may not carry the Sony-shaped anchor; append
+                // the category straight under the root screen instead.
+                parent = screen;
+            } else {
+                throw new IllegalStateException("audio quality anchor unavailable");
+            }
+            if (parent == null) throw new IllegalStateException("advanced settings parent unavailable");
             if (findPreference(parent, ADVANCED_CATEGORY_KEY) != null
                     || findPreferenceByKeyRecursive(parent, ADVANCED_CATEGORY_KEY)) return;
             Object category = newPreference(loader,
@@ -2434,11 +2463,16 @@ public final class HookModule extends XposedModule {
             if (category == null) throw new IllegalStateException("category constructor unavailable");
             setPreferenceValue(category, "setTitle", "\u9ad8\u7ea7\u8bbe\u7f6e");
             setPreferenceValue(category, "setKey", ADVANCED_CATEGORY_KEY);
-            Integer order = (Integer) invokeNoArg(anchor, "getOrder");
+            Integer order = anchor == null ? null : (Integer) invokeNoArg(anchor, "getOrder");
             if (order != null) setPreferenceValue(category, "setOrder", order + 1);
             if (!addPreference(parent, category, loader)) throw new IllegalStateException("category add rejected");
             advancedPreferences.clear();
             huaweiLowLatencyPreference = null;
+            if (hasBoseCnc) {
+                addBoseCncPreference(category, loader, activity);
+                log(Log.INFO, TAG, event("installed Bose CNC level slider via preference fragment"));
+                return;
+            }
             if (hasHuaweiLowLatency) {
                 addHuaweiLowLatencyPreference(category, loader, activity, 10);
                 log(Log.INFO, TAG, event("installed Huawei low-latency setting via preference fragment"));
@@ -2687,8 +2721,106 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private void installSettingListener(Object preference, SonyAdvancedSettingId id, ClassLoader loader) {
+    /**
+     * Inject a 0..10 SeekBar preference that drives Bose's [31.10] byte 0 (CNC
+     * noise-cancelling intensity). Uses androidx SeekBarPreference reflectively
+     * (Melody bundles androidx.preference); a dynamic Proxy listens for changes.
+     */
+    private void addBoseCncPreference(Object category, ClassLoader loader, Activity activity) {
+        Object seek = newPreference(loader, "androidx.preference.SeekBarPreference", activity);
+        if (seek == null) {
+            log(Log.WARN, TAG, event("Bose CNC slider unavailable: SeekBarPreference ctor failed"));
+            return;
+        }
+        setPreferenceValue(seek, "setKey", "melodylink.bose.cnc");
+        setPreferenceValue(seek, "setTitle", "\u964d\u566a\u7b49\u7ea7");
+        setPreferenceValue(seek, "setPersistent", false);
+        // Prefer the public setters; fall back to the androidx internal fields.
+        invokeInt(seek, "setMax", 10);
+        setIntField(seek, "mMax", 10);
+        setIntField(seek, "mMin", 0);
+        setIntField(seek, "mInterval", 1);
+        setIntField(seek, "mSeekbarIncrement", 1);
+        setBooleanField(seek, "mShowSeekBarValue", true);
+        int level = boseTransport.getCncLevel();
+        if (level < 0) level = 3;
+        invokeInt(seek, "setProgress", level);
+        setPreferenceValue(seek, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + level + "/10");
+        installBoseCncListener(seek, loader);
+        if (addPreference(category, seek, loader)) {
+            boseCncPreference = seek;
+        }
+    }
+
+    /** Re-sync the injected slider when a BMAP session reports the real CNC level. */
+    private void updateBoseCncSlider() {
+        Object slider = boseCncPreference;
+        if (slider == null) return;
+        int level = boseTransport.getCncLevel();
+        if (level < 0) return;
+        mainHandler.post(() -> {
+            invokeInt(slider, "setProgress", level);
+            setPreferenceValue(slider, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + level + "/10");
+        });
+    }
+
+    private void installBoseCncListener(Object preference, ClassLoader loader) {
         Method listenerSetter = null;
+        for (Method candidate : allMethods(preference.getClass())) {
+            if (candidate.getName().equals("setOnPreferenceChangeListener")
+                    && candidate.getParameterTypes().length == 1) {
+                listenerSetter = candidate;
+                break;
+            }
+        }
+        if (listenerSetter == null || !listenerSetter.getParameterTypes()[0].isInterface()) {
+            log(Log.WARN, TAG, event("Bose CNC listener setter unavailable"));
+            return;
+        }
+        Class<?> listenerType = listenerSetter.getParameterTypes()[0];
+        Method callback = null;
+        for (Method candidate : listenerType.getMethods()) {
+            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
+                callback = candidate;
+                break;
+            }
+        }
+        final Method changeCallback = callback;
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(loader,
+                new Class<?>[]{listenerType}, (proxy, method, args) -> {
+                    if ("toString".equals(method.getName())) return "MelodyLinkBoseCncListener";
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
+                    if (changeCallback == null || !method.getName().equals(changeCallback.getName())
+                            || args == null || args.length < 2 || !(args[1] instanceof Number)) {
+                        return Boolean.TRUE;
+                    }
+                    int value = Math.max(0, Math.min(10, ((Number) args[1]).intValue()));
+                    boseTransport.cacheCncLevel(value);
+                    setPreferenceValue(preference, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + value + "/10");
+                    if (isPrimaryProcess()) {
+                        if (boseTransport.getCncLevel() >= 0 && boseHostConnected) {
+                            boseTransport.writeSetting(
+                                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, value);
+                        } else {
+                            BluetoothDevice device = resolveBoseForTile();
+                            if (device != null) {
+                                boseTransport.writeSetting(
+                                        com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, value);
+                            }
+                        }
+                    }
+                    return Boolean.TRUE;
+                });
+        try {
+            listenerSetter.setAccessible(true);
+            listenerSetter.invoke(preference, listener);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose CNC listener install failed", t);
+        }
+    }
+
+    private void installSettingListener(Object preference, SonyAdvancedSettingId id, ClassLoader loader) {        Method listenerSetter = null;
         for (Method candidate : allMethods(preference.getClass())) {
             if (candidate.getName().equals("setOnPreferenceChangeListener")
                     && candidate.getParameterTypes().length == 1) {
@@ -2842,8 +2974,58 @@ public final class HookModule extends XposedModule {
         return null;
     }
 
-    private static void setPreferenceValue(Object target, String name, Object value) {
+    /** Reflective int field writer (walks superclasses) for androidx SeekBarPreference internals. */
+    private static void setIntField(Object target, String fieldName, int value) {
         if (target == null) return;
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                java.lang.reflect.Field field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                field.setInt(target, value);
+                return;
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            } catch (Throwable ignored) {
+                return;
+            }
+        }
+    }
+
+    private static void setBooleanField(Object target, String fieldName, boolean value) {
+        if (target == null) return;
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                java.lang.reflect.Field field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                field.setBoolean(target, value);
+                return;
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            } catch (Throwable ignored) {
+                return;
+            }
+        }
+    }
+
+    private static void invokeInt(Object target, String methodName, int value) {
+        if (target == null) return;
+        for (Method method : allMethods(target.getClass())) {
+            if (method.getName().equals(methodName) && method.getParameterTypes().length == 1
+                    && (method.getParameterTypes()[0] == Integer.TYPE
+                            || method.getParameterTypes()[0] == Integer.class)) {
+                try {
+                    method.setAccessible(true);
+                    method.invoke(target, value);
+                    return;
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    private static void setPreferenceValue(Object target, String name, Object value) {        if (target == null) return;
         for (Method method : allMethods(target.getClass())) {
             if (method.getName().equals(name) && method.getParameterTypes().length == 1) {
                 try {

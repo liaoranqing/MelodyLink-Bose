@@ -65,6 +65,8 @@ public final class BoseTransport {
     private volatile boolean active;
     /** [31.10] byte 2 cache: 0=off, 1=room, 2=head (-1 = never read). */
     private volatile int spatialType = -1;
+    /** [31.10] byte 0 cache: Bose CNC level 0..10 (-1 = never read). */
+    private volatile int cncLevel = -1;
     /** Bumped without ioLock so UI-thread callers never block behind a long session. */
     private final java.util.concurrent.atomic.AtomicInteger generation =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -87,6 +89,16 @@ public final class BoseTransport {
     /** Cached [31.10] spatial byte; -1 until the first session read it. */
     public int getSpatialType() {
         return spatialType;
+    }
+
+    /** Cached [31.10] CNC level 0..10; -1 until the first session read it. */
+    public int getCncLevel() {
+        return cncLevel;
+    }
+
+    /** Optimistically seed the CNC cache before a slider-triggered write. */
+    public void cacheCncLevel(int value) {
+        cncLevel = value;
     }
 
     /**
@@ -164,6 +176,7 @@ public final class BoseTransport {
                     BoseBmap.FUNC_AUDIO_SETTINGS, BoseBmap.OP_GET, null);
             if (settings != null && settings.payload.length > BoseDeviceConfig.SETTING_SPATIAL) {
                 spatialType = settings.payload[BoseDeviceConfig.SETTING_SPATIAL] & 0xff;
+                cncLevel = settings.payload[BoseDeviceConfig.SETTING_CNC] & 0xff;
             }
             BoseBmap.Frame battery = command(BoseBmap.BLOCK_BATTERY,
                     BoseBmap.FUNC_BATTERY, BoseBmap.OP_GET, null);
@@ -283,6 +296,7 @@ public final class BoseTransport {
         boolean ok = confirmed != null && confirmed.payload.length >= 5
                 && (confirmed.payload[index] & 0xff) == value;
         if (ok && index == BoseDeviceConfig.SETTING_SPATIAL) spatialType = value;
+        if (ok && index == BoseDeviceConfig.SETTING_CNC) cncLevel = value;
         return ok;
     }
 
