@@ -1632,7 +1632,8 @@ public final class HookModule extends XposedModule {
         String packageName = "com.oplus.melody.model.repository.earphone.";
         String[] classNames = {
                 packageName + "SetCommandStateDTO",
-                packageName + "Z"
+                packageName + "Z",
+                packageName + "O"
         };
         Throwable lastFailure = null;
         for (String className : classNames) {
