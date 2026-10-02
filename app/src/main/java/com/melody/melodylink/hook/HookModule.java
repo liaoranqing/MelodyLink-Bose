@@ -1837,6 +1837,8 @@ public final class HookModule extends XposedModule {
 
     private boolean tryInstallBridge(ClassLoader loader, Context context) {
         if (context == null) return false;
+        BoseControlProviderBridge.setLogSink((level, message, error) ->
+                log(level, TAG, event(message)));
         BoseControlProviderBridge.install(this, loader, context,
                 new BoseControlProviderBridge.Callbacks() {
                     @Override public boolean isBoseActive() {
@@ -1847,7 +1849,25 @@ public final class HookModule extends XposedModule {
                         return state == null ? null : state.getAncMode();
                     }
                     @Override public boolean requestMode(AncMode mode) {
-                        if (targetBoseDevice == null || !boseHostConnected) return false;
+                        BluetoothDevice device = targetBoseDevice;
+                        if (device == null) {
+                            // Tile clicked before any in-app session: bind the
+                            // known MAC and open the first BMAP session now.
+                            String mac = BoseDeviceConfig.INSTANCE.getKNOWN_MACS().isEmpty()
+                                    ? null : BoseDeviceConfig.INSTANCE.getKNOWN_MACS().iterator().next();
+                            if (mac == null) return false;
+                            try {
+                                BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+                                device = adapter == null ? null : adapter.getRemoteDevice(mac);
+                            } catch (Throwable ignored) {
+                                device = null;
+                            }
+                            if (device == null) return false;
+                            targetBoseDevice = device;
+                            boseHostConnected = true;
+                            rememberTargetAddress(mac);
+                            writeSharedBoseState();
+                        }
                         boseTransport.setAncMode(mode);
                         return true;
                     }
@@ -1861,7 +1881,12 @@ public final class HookModule extends XposedModule {
                     }
                     @Override public String deviceAddress() {
                         BluetoothDevice device = targetBoseDevice;
-                        return device == null ? null : device.getAddress();
+                        if (device != null) return device.getAddress();
+                        // Fall back to the field-verified MAC so the tile can answer
+                        // SystemUI queries before any in-app session exists.
+                        return BoseDeviceConfig.INSTANCE.getKNOWN_MACS().isEmpty()
+                                ? null
+                                : BoseDeviceConfig.INSTANCE.getKNOWN_MACS().iterator().next();
                     }
                 });
         return true;

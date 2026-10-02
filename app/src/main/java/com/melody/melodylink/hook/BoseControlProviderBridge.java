@@ -70,6 +70,22 @@ final class BoseControlProviderBridge {
         String deviceAddress();
     }
 
+    /** Diagnostic sink (routes into the module's LSPosed file log). */
+    interface LogSink {
+        void log(int level, String message, Throwable error);
+    }
+
+    private static volatile LogSink logSink;
+
+    static void setLogSink(LogSink sink) {
+        logSink = sink;
+    }
+
+    private static void diag(String message, Throwable error) {
+        LogSink sink = logSink;
+        if (sink != null) sink.log(error == null ? Log.INFO : Log.WARN, message, error);
+    }
+
     private static volatile boolean installed;
     private static volatile boolean worn;
     private static volatile int lastNotifiedMode = -1;
@@ -117,9 +133,9 @@ final class BoseControlProviderBridge {
                     });
             registerAclWatcher(context);
             installed = true;
-            Log.i(TAG, "[MelodyLink] bose control provider bridge installed");
+            diag("bose control provider bridge installed", null);
         } catch (Throwable t) {
-            Log.w(TAG, "[MelodyLink] bose control provider bridge failed", t);
+            diag("bose control provider bridge failed: " + t, t);
         }
     }
 
@@ -141,7 +157,10 @@ final class BoseControlProviderBridge {
         if (cb == null) return null;
         String path = uri == null ? null : uri.getPath();
         if (path == null) return null;
-        if (!cb.isBoseActive()) return null;
+        // SystemUI queries this provider on its own schedule, often while the
+        // Melody UI never ran a session — so presence is a bond-state probe
+        // (same rule the verified v1.x module used), not the in-app flag.
+        if (!cb.isBoseActive() && !boseBonded(cb)) return null;
         String address = cb.deviceAddress();
         if (address == null) return null;
         if (PATH_ACTIVE.equals(path)) {
@@ -164,6 +183,21 @@ final class BoseControlProviderBridge {
         return null;
     }
 
+    private static boolean boseBonded(Callbacks cb) {
+        try {
+            Context ctx = appContext;
+            if (ctx == null) return false;
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            if (adapter == null || !adapter.isEnabled()) return false;
+            for (String mac : BoseDeviceConfig.INSTANCE.getKNOWN_MACS()) {
+                BluetoothDevice device = adapter.getRemoteDevice(mac);
+                if (device != null && device.getBondState() == BluetoothDevice.BOND_BONDED) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     private static boolean handleCall(String method, Bundle extras) {
         Callbacks cb = callbacks;
         if (cb == null || extras == null || method == null) return false;
@@ -172,7 +206,7 @@ final class BoseControlProviderBridge {
         if (METHOD_NOISE.equals(method)) {
             AncMode mode = fromTileMode(extras.getInt("type", NOISE_OFF));
             boolean accepted = cb.requestMode(mode);
-            Log.i(TAG, "[MelodyLink] volume-panel ANC click mode=" + mode + " accepted=" + accepted);
+            diag("volume-panel ANC click mode=" + mode + " accepted=" + accepted, null);
             return accepted;
         }
         if (METHOD_WEAR.equals(method)) return true;
