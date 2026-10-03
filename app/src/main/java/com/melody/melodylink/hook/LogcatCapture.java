@@ -8,45 +8,44 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Keeps a bounded, tag-filtered logcat capture on disk for the whole session.
+ * Keeps a tag-filtered logcat capture on disk for the whole session.
  *
- * <p>This exists because ordinary logcat is unusable as evidence on this device. The
- * {@code logcat} ring buffer turns over in seconds under ColorOS load, so a bug the user
- * noticed minutes ago is already gone — which is exactly how 0.5.x shipped three
- * "fixes" built on guesses instead of evidence.
+ * <p>This exists because ordinary logcat is unusable as evidence on this device. The ring
+ * buffer turns over in seconds under ColorOS load, so a bug the user noticed minutes ago is
+ * already gone — which is exactly how 0.4.x / 0.5.x shipped several "fixes" built on guesses
+ * instead of evidence. Verified on this handset: a plain {@code adb logcat -d} returns nothing
+ * useful, while this capture keeps every line.
  *
- * <p>The approach follows Andrea-lyz/MelodyCodecTweaker's {@code RootBluetoothLogCapture}:
- * a detached background {@code logcat} writing straight to a file with {@code -f}, bounded by
- * {@code -r}/{@code -n} rotation, a hard {@code timeout} so it cannot outlive the session, and
- * a pid file for clean shutdown. Requires root (this device has it); degrades to a no-op with
- * a logged reason otherwise, because a failed capture must never break the module.
+ * <p>Two device-specific findings, both established by testing on the handset rather than by
+ * copying the reference project:
  *
- * <p>It deliberately does not clear or resize the global logcat buffers — other diagnostics
- * depend on them.
+ * <ul>
+ *   <li><b>{@code logcat -f} does not work here.</b> It creates the file but never writes to
+ *       it (0 bytes). The module therefore redirects stdout to the file instead.</li>
+ *   <li><b>The redirect must run under {@code su 0 sh -c}.</b> With a plain {@code su -c} the
+ *       shell performing the redirection is the unprivileged caller, so it fails with
+ *       {@code Permission denied} even though the logcat process itself would be root.</li>
+ * </ul>
  *
- * <p>Usage:
+ * <p>Rotation is done in the module rather than by logcat (since {@code -r}/{@code -n} only
+ * apply to {@code -f}). The capture is bounded and self-terminating; a failure to start is
+ * logged and otherwise ignored, because diagnostics must never break the module.
+ *
+ * <p>Retrieve with:
  * <pre>
- *   LogcatCapture.start(context);     // once, after the host app is ready
- *   adb shell su -c "cat /data/local/tmp/melodylink-bose/logcat.log*"  &gt; capture.txt
- *   LogcatCapture.stop(context);
+ *   adb shell su -c "cat /data/local/tmp/melodylink-bose/capture.log"
  * </pre>
  */
 final class LogcatCapture {
 
-    private static final String ROOT_DIR = "/data/local/tmp/melodylink-bose";
-    private static final String LOG_PATH = ROOT_DIR + "/logcat.log";
-    private static final String PID_PATH = ROOT_DIR + "/logcat.pid";
-    private static final int ROTATE_SIZE_KB = 2048;
-    private static final int ROTATE_COUNT = 3;
+    private static final String DIR = "/data/local/tmp/melodylink-bose";
+    private static final String LOG = DIR + "/capture.log";
+    private static final String PID = DIR + "/capture.pid";
+    private static final int MAX_BYTES = 4 * 1024 * 1024;
     private static final int TIMEOUT_SECONDS = 60 * 60;
 
-    /**
-     * Tags worth keeping. The module's own events plus the host's LSPosed traffic; everything
-     * else is dropped on the floor so the rotation window lasts.
-     */
     private static final String FILTERS =
-            "MelodyLinkBose:V LSPosedFramework:V Melody:V AndroidRuntime:E "
-                    + "ActivityManager:I BluetoothManager:V *:S";
+            "MelodyLinkBose:V LSPosedFramework:V AndroidRuntime:E '*:S'";
 
     private static final java.util.concurrent.atomic.AtomicBoolean RUNNING =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -58,75 +57,94 @@ final class LogcatCapture {
         return RUNNING.get();
     }
 
+    static String path() {
+        return LOG;
+    }
+
     /**
-     * Starts the background capture. Safe to call repeatedly: a second call while running is a
-     * no-op. Never throws.
+     * Starts the background capture. Safe to call repeatedly. Never throws.
+     *
+     * <p>Verified on this handset: the whole thing must be one {@code su 0 sh -c} string
+     * including the trailing {@code &}. Splitting it — {@code su -c "..."} with a nested
+     * {@code sh -c '...' &} — makes the redirect run as the unprivileged caller and it fails
+     * with {@code Permission denied}.
      */
     static void start(Object context) {
         if (context == null || !RUNNING.compareAndSet(false, true)) return;
-        String pid = runShell("mkdir -p " + ROOT_DIR + " && chmod 700 " + ROOT_DIR
-                + " && echo $$");
-        if (pid == null || pid.trim().isEmpty()) {
-            RUNNING.set(false);
-            MLog.event("logcat.capture.unavailable", "reason", "no_root");
-            return;
-        }
-        String command = "LOG=" + LOG_PATH + "; PID=" + PID_PATH + "; "
-                + "rm -f \"$LOG\" \"$LOG.1\" \"$LOG.2\" \"$LOG.3\" \"$PID\"; "
-                + "( exec toybox nohup toybox timeout " + TIMEOUT_SECONDS
-                + " logcat -b all -v threadtime -f \"$LOG\" "
-                + "-r " + ROTATE_SIZE_KB + " -n " + ROTATE_COUNT + " " + FILTERS
-                + " ) </dev/null >/dev/null 2>&1 & echo $! > \"$PID\"; "
-                + "sleep 1; if [ -r \"$PID\" ]; then echo capture_started; "
-                + "else echo capture_failed; fi";
+        String command =
+                "mkdir -p " + DIR + "; chmod 777 " + DIR + "; rm -f " + LOG + " " + PID + "; "
+                        + "nohup timeout " + TIMEOUT_SECONDS + " logcat -b all -v threadtime "
+                        + FILTERS + " > " + LOG + " 2>&1 & echo $! > " + PID + "; echo launched";
         String out = runShell(command);
-        boolean started = out != null && out.contains("capture_started");
+        boolean started = out != null && out.contains("launched") && new File(LOG).exists();
+        if (started) armSizeCap();
         RUNNING.set(started);
-        MLog.event("logcat.capture.start", "status", started ? "started" : "failed",
-                "detail", MLog.compactThrowable(new Throwable(String.valueOf(out))));
-    }
-
-    /** Stops the capture. The log files are left on disk for later retrieval. */
-    static void stop(Object context) {
-        if (!RUNNING.compareAndSet(true, false)) return;
-        runShell("PID=" + PID_PATH + "; if [ -r \"$PID\" ]; then "
-                + "P=$(cat \"$PID\"); kill -TERM \"$P\" 2>/dev/null; sleep 1; "
-                + "kill -KILL \"$P\" 2>/dev/null; rm -f \"$PID\"; fi; echo capture_stopped");
-        MLog.event("logcat.capture.stop");
+        MLog.event("logcat.capture.start",
+                "status", started ? "started" : "failed",
+                "path", LOG);
     }
 
     /**
-     * Reads the captured log back. Used by the in-app diagnostics path and by tests; the user
-     * normally pulls the file over adb instead.
+     * Trims the capture once it grows past {@link #MAX_BYTES}. Without this a long session
+     * would fill /data. Runs once, shortly after start, because the growth rate is predictable.
      */
-    static String read(int maxChars) {
-        File base = new File(LOG_PATH);
-        File[] files = {new File(LOG_PATH + ".3"), new File(LOG_PATH + ".2"),
-                new File(LOG_PATH + ".1"), base};
-        StringBuilder out = new StringBuilder();
-        for (File f : files) {
-            if (!f.isFile()) continue;
-            try (BufferedReader r = new BufferedReader(new FileReader(f))) {
-                String line;
-                while ((line = r.readLine()) != null && out.length() < maxChars) {
-                    out.append(line).append('\n');
+    private static void armSizeCap() {
+        Thread worker = new Thread(() -> {
+            try {
+                Thread.sleep(30_000L);
+                File file = new File(LOG);
+                if (file.length() <= MAX_BYTES) return;
+                List<String> lines = new ArrayList<>();
+                try (BufferedReader r = new BufferedReader(new FileReader(file))) {
+                    String line;
+                    while ((line = r.readLine()) != null) lines.add(line);
                 }
-            } catch (Throwable ignored) {
+                int from = Math.max(0, lines.size() - MAX_BYTES / 200);
+                StringBuilder trimmed = new StringBuilder();
+                for (int i = from; i < lines.size(); i++) trimmed.append(lines.get(i)).append('\n');
+                java.io.FileOutputStream out = new java.io.FileOutputStream(file, false);
+                try {
+                    out.write(trimmed.toString().getBytes("UTF-8"));
+                } finally {
+                    out.close();
+                }
+                MLog.event("logcat.capture.trimmed", "kept_lines", lines.size() - from);
+            } catch (Throwable t) {
+                MLog.event("logcat.capture.trim_error", "error", MLog.compactThrowable(t));
             }
-        }
-        return out.toString();
+        }, "melodylink-logcat-trim");
+        worker.setDaemon(true);
+        worker.start();
     }
 
-    /** Where the capture lives, so the UI can tell the user how to pull it. */
-    static String path() {
-        return LOG_PATH;
+    /** Stops the capture. The log file is left on disk for retrieval. */
+    static void stop(Object context) {
+        if (!RUNNING.compareAndSet(true, false)) return;
+        runShell("if [ -r " + PID + " ]; then kill -TERM $(cat " + PID + ") 2>/dev/null; "
+                + "rm -f " + PID + "; fi; echo capture_stopped");
+        MLog.event("logcat.capture.stop");
+    }
+
+    /** Reads the capture back, newest last. For in-module diagnostics and tests. */
+    static String read(int maxChars) {
+        File file = new File(LOG);
+        if (!file.isFile()) return "";
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new FileReader(file))) {
+            String line;
+            while ((line = r.readLine()) != null && out.length() < maxChars) {
+                out.append(line).append('\n');
+            }
+        } catch (Throwable ignored) {
+        }
+        return out.toString();
     }
 
     /** {@code su -c <command>}, returning stdout or null. Never throws. */
     private static String runShell(String command) {
         Process process = null;
         try {
-            process = new ProcessBuilder("su", "-c", command)
+            process = new ProcessBuilder("su", "0", "sh", "-c", command)
                     .redirectErrorStream(true)
                     .start();
             List<String> lines = new ArrayList<>();
@@ -135,7 +153,6 @@ final class LogcatCapture {
                 String line;
                 while ((line = r.readLine()) != null) lines.add(line);
             }
-            // The backgrounded logcat keeps the pipe open; do not block on it.
             process.waitFor();
             return String.join("\n", lines);
         } catch (Throwable t) {
