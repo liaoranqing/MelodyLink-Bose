@@ -786,9 +786,43 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    /**
+     * Loads a class by either name form.
+     *
+     * <p>0.5.35. R8 short names come out of smali as {@code L6/a}, but
+     * {@code Class.forName} on Android rejects a name with no dot: it throws
+     * {@code ClassNotFoundException: Invalid name: L6/a}. Every hook at an obfuscated class
+     * therefore failed silently for the whole project — the WARN was easy to miss among the
+     * working hooks, and the failure looks identical to "method not found".
+     *
+     * <p>So: try the name as given, then with {@code /} turned into {@code .}, then with the
+     * conventional {@code L;} prefix stripped. Fully-qualified names are unaffected.
+     */
+    private static Class<?> loadClass(ClassLoader loader, String className) throws ClassNotFoundException {
+        try {
+            return Class.forName(className, false, loader);
+        } catch (ClassNotFoundException first) {
+            // smali form L6/a -> binary form L6.a
+            if (className.indexOf('/') >= 0) {
+                try {
+                    return Class.forName(className.replace('/', '.'), false, loader);
+                } catch (ClassNotFoundException ignored) {
+                }
+            }
+            // smali descriptor form Lcom/oplus/Foo; -> com.oplus.Foo
+            if (className.length() > 2 && className.charAt(0) == 'L'
+                    && className.endsWith(";")) {
+                return Class.forName(
+                        className.substring(1, className.length() - 1).replace('/', '.'),
+                        false, loader);
+            }
+            throw first;
+        }
+    }
+
     private boolean hookNamed(ClassLoader loader, String className, String methodName, int arity, String label) {
         try {
-            Class<?> type = Class.forName(className, false, loader);
+            Class<?> type = loadClass(loader, className);
             Method selected = null;
             for (Method method : type.getDeclaredMethods()) {
                 if (method.getName().equals(methodName) && method.getParameterTypes().length == arity) {
@@ -3355,7 +3389,7 @@ public final class HookModule extends XposedModule {
         Throwable lastFailure = null;
         for (String className : classNames) {
             try {
-                Class<?> type = Class.forName(className, false, loader);
+                Class<?> type = loadClass(loader, className);
                 Constructor<?> constructor = type.getDeclaredConstructor(String.class, int.class);
                 constructor.setAccessible(true);
                 Object result = constructor.newInstance(targetAddress, status);
