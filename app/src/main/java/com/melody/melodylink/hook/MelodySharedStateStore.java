@@ -104,36 +104,78 @@ final class MelodySharedStateStore {
         return write(file, address + "\n" + settingId + "\n" + (value ? "1" : "0") + "\n" + nonce + "\n");
     }
 
-    /** Bose CNC state: address + confirmed level (0..10, -1 = unknown). */
+    /**
+     * Bose settings state: address + confirmed CNC level (0..10) + wind block.
+     * Returns {0, level, wind}; wind is -1 on files written by older builds.
+     */
     static boolean writeBoseCncState(File file, String address, int level) {
-        return write(file, address + "\n" + level + "\n");
+        return writeBoseCncState(file, address, level, readBoseCncWind(file));
+    }
+
+    static boolean writeBoseCncState(File file, String address, int level, int wind) {
+        return write(file, address + "\n" + level + "\n" + wind + "\n");
     }
 
     static int[] readBoseCncState(File file) {
-        String[] lines = readLines(file, 2);
-        if (lines == null) return null;
+        String[] lines = readLines(file, 3);
+        if (lines == null) {
+            // Legacy two-line file: level only.
+            String[] old = readLines(file, 2);
+            if (old == null) return null;
+            try {
+                return new int[]{0, Integer.parseInt(old[1].trim()), -1};
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
         try {
-            return new int[]{1, Integer.parseInt(lines[1].trim())};
+            return new int[]{0, Integer.parseInt(lines[1].trim()),
+                    Integer.parseInt(lines[2].trim())};
         } catch (NumberFormatException ignored) {
             return null;
         }
     }
 
     static String readBoseCncAddress(File file) {
-        String[] lines = readLines(file, 2);
-        return lines == null ? null : lines[0].trim();
+        String[] lines = readLines(file, 3);
+        if (lines == null) {
+            String[] old = readLines(file, 2);
+            return old == null ? null : old[0].trim();
+        }
+        return lines[0].trim();
     }
 
-    /** Bose CNC command: address + requested level + nonce. */
+    /** Reads just the wind byte, or -1 when absent/legacy. */
+    static int readBoseCncWind(File file) {
+        int[] state = readBoseCncState(file);
+        return state == null ? -1 : state[2];
+    }
+
+    /** Bose command: address + requested level + wind block + nonce. */
     static boolean writeBoseCncCommand(File file, String address, int level, String nonce) {
-        return write(file, address + "\n" + level + "\n" + nonce + "\n");
+        return writeBoseCncCommand(file, address, level, -1, nonce);
+    }
+
+    static boolean writeBoseCncCommand(
+            File file, String address, int level, int wind, String nonce) {
+        return write(file, address + "\n" + level + "\n" + wind + "\n" + nonce + "\n");
     }
 
     static SharedBoseCncCommand readBoseCncCommand(File file) {
-        String[] lines = readLines(file, 3);
-        if (lines == null) return null;
+        String[] lines = readLines(file, 4);
+        if (lines == null) {
+            String[] old = readLines(file, 3);
+            if (old == null) return null;
+            try {
+                return new SharedBoseCncCommand(old[0].trim(),
+                        Integer.parseInt(old[1].trim()), -1, old[2].trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
         try {
-            return new SharedBoseCncCommand(lines[0].trim(), Integer.parseInt(lines[1].trim()), lines[2].trim());
+            return new SharedBoseCncCommand(lines[0].trim(), Integer.parseInt(lines[1].trim()),
+                    Integer.parseInt(lines[2].trim()), lines[3].trim());
         } catch (NumberFormatException ignored) {
             return null;
         }
@@ -232,11 +274,14 @@ final class MelodySharedStateStore {
     static final class SharedBoseCncCommand {
         final String address;
         final int level;
+        /** -1 = leave the earbud's current wind-block state untouched. */
+        final int wind;
         final String nonce;
 
-        SharedBoseCncCommand(String address, int level, String nonce) {
+        SharedBoseCncCommand(String address, int level, int wind, String nonce) {
             this.address = address;
             this.level = level;
+            this.wind = wind;
             this.nonce = nonce;
         }
     }

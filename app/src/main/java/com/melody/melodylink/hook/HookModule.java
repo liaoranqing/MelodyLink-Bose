@@ -87,6 +87,7 @@ public final class HookModule extends XposedModule {
     private static final String HUAWEI_LOW_LATENCY_SETTING_KEY = "melodylink.huawei.low_latency";
     private static final String SOUND_QUALITY_TITLE = "音质音效";
     private static final String BOSE_CNC_KEY = "melodylink.bose.cnc";
+    private static final String BOSE_WIND_KEY = "melodylink.bose.wind";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
     private static final int WF_1000XM3_PRODUCT_ID = 0x067410;
     private volatile int targetAddressHash;
@@ -134,6 +135,13 @@ public final class HookModule extends XposedModule {
     private final Map<SonyAdvancedSettingId, Object> advancedPreferences = new ConcurrentHashMap<>();
     private volatile Object huaweiLowLatencyPreference;
     private volatile Object boseCncPreference;
+
+    /** The "降噪效果" row, captured in detailPreferenceAdd; its parent may be null then. */
+    private volatile Object noiseEffectRow;
+
+    /** Injected "抗风噪" switch, kept for state re-sync. */
+    private volatile Object boseWindPreference;
+    private volatile int lastWindSwitchState = -1;
     private volatile Boolean confirmedHuaweiLowLatency;
     private volatile XiaomiEarbudsFacade xiaomiTransport;
     private volatile boolean xiaomiBatteryReceiverRegistered;
@@ -685,6 +693,7 @@ public final class HookModule extends XposedModule {
                         removeUnsupportedDetailCategory(preference);
                         hideAncStrengthPreference(preference);
                         captureNoiseEffectRow(preference);
+                        keepNoiseEffectRowHidden();
                         return result;
                     }
                     if ("detailActivityCreate".equals(label)) {
@@ -1253,35 +1262,67 @@ public final class HookModule extends XposedModule {
      */
     private void captureNoiseEffectRow(Object preference) {
         if (preference == null || !boseBonded()) return;
-        if (preference.getClass().getName()
+        if (!preference.getClass().getName()
                 .equals("com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem")) {
-            Object parent = invokeNoArg(preference, "getParent");
-            if (parent == null) return;
-            final Object group = parent;
-            final Object row = preference;
-            // addPreference must not run inside the addPreference hook itself —
-            // defer to the next frame, and retry once in case the group is still
-            // being populated.
-            for (int i = 0; i < 2; i++) {
-                mainHandler.postDelayed(() -> installBoseCncUnderNoiseRow(group, row), i == 0 ? 80L : 400L);
-            }
+            return;
+        }
+        // Remember the row instance, not its parent: at this point in
+        // onCreatePreferences the parent is often still null (0.4.4 lost the slider
+        // on exactly the screen where the row got added first). Retrying against
+        // the live row once the tree is assembled is what actually works.
+        noiseEffectRow = preference;
+        for (int i = 0; i < 5; i++) {
+            final long delay = i == 0 ? 100L : (i == 1 ? 300L : (i == 2 ? 700L : (i == 3 ? 1500L : 3000L)));
+            mainHandler.postDelayed(this::installBoseCncUnderNoiseRow, delay);
         }
     }
 
-    private void installBoseCncUnderNoiseRow(Object group, Object noiseRow) {
+    /**
+     * The "降噪效果" card is re-shown by its own onBindViewHolder, so a one-shot
+     * setVisible(false) is not enough. Re-assert it on every addPreference pass
+     * and on a short timer after each bind.
+     */
+    private void keepNoiseEffectRowHidden() {
+        Object noiseRow = noiseEffectRow;
+        if (noiseRow == null || !boseBonded()) return;
+        setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+        mainHandler.postDelayed(() -> {
+            Object row = noiseEffectRow;
+            if (row == null || !boseBonded()) return;
+            setPreferenceValue(row, "setVisible", Boolean.FALSE);
+        }, 220L);
+    }
+
+    private void installBoseCncUnderNoiseRow() {
         try {
-            if (group == null || noiseRow == null) return;
-            if (!boseBonded()) return;
+            Object noiseRow = noiseEffectRow;
+            if (noiseRow == null || !boseBonded()) return;
             ClassLoader loader = noiseRow.getClass().getClassLoader();
             Object context = invokeNoArg(noiseRow, "getContext");
             if (!(context instanceof Context)) return;
             Activity activity = findActivity((Context) context);
             if (activity == null) activity = detailActivity;
             if (activity == null) return;
-            if (findPreferenceByKeyRecursive(group, BOSE_CNC_KEY)) return;
+            // The row is the "降噪效果" card itself — a dead end for Bose (it opens
+            // OPPO's own page, which drives a non-existent SPP channel). Hiding it
+            // also stops the card background from wrapping our slider, so add the
+            // slider to the row's OWN parent (the section list) instead.
+            Object group = invokeNoArg(noiseRow, "getParent");
+            if (group == null) return; // tree not ready yet; a later retry handles it
+            if (findPreferenceByKeyRecursive(group, BOSE_CNC_KEY)) {
+                setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+                return;
+            }
             Integer order = (Integer) invokeNoArg(noiseRow, "getOrder");
-            if (addBoseCncPreference(group, loader, activity, order == null ? -1 : order + 1)) {
-                log(Log.INFO, TAG, event("installed Bose CNC slider under noise-effect row"));
+            int sliderOrder = order == null ? -1 : order + 1;
+            if (addBoseCncPreference(group, loader, activity, sliderOrder)) {
+                addBoseWindSwitch(group, loader, activity, sliderOrder + 1);
+                setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+                for (int i = 0; i < 3; i++) {
+                    mainHandler.postDelayed(this::keepNoiseEffectRowHidden,
+                            i == 0 ? 300L : (i == 1 ? 1200L : 2600L));
+                }
+                log(Log.INFO, TAG, event("installed Bose CNC slider, noise-effect card hidden"));
             }
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose CNC slider install failed", t);
@@ -1381,23 +1422,72 @@ public final class HookModule extends XposedModule {
             return false;
         }
         applyBoseImage(imageView, imageFile, owner, loadingField);
-        // Melody loads its own product art asynchronously (spinner first, generic
-        // earbud photo last) and that late setImageDrawable overwrites ours — the
-        // reason the Bose photo appeared only on some page opens. Re-apply a few
-        // times so our image is the final state; the loading spinner is cancelled
-        // on every pass so it cannot reappear either.
-        final Object imageOwner = owner;
-        for (int i = 0; i < 4; i++) {
-            final long delay = i == 0 ? 250L : (i == 1 ? 900L : (i == 2 ? 2000L : 4000L));
-            mainHandler.postDelayed(() -> {
-                if (imageOwner == null) return;
-                File again = materializeBoseImage();
-                if (again == null) return;
-                applyBoseImage(imageView, again, imageOwner, loadingField);
-            }, delay);
-        }
+        // Remember this exact view: onBindViewHolder recycles one ImageView across
+        // pages, and every later bind re-runs the stock image load, overwriting
+        // whatever we set. Force it back on each pass (see keepBoseImagePinned).
+        pinBoseImageView(imageView);
         log(Log.INFO, TAG, event("replaced Bose " + surface + " product image"));
         return true;
+    }
+
+    /**
+     * Re-asserts our photo on a view Melody keeps recycling. The stock artwork is
+     * fetched asynchronously, so a one-shot setImage loses the race — 0.4.4 saw the
+     * generic earbud photo win seconds later, and the spinner flash before it.
+     * Each re-bind gets several passes, and the last one is also posted on the view
+     * itself so it lands after any layout-triggered rebind.
+     */
+    private void pinBoseImageView(ImageView imageView) {
+        if (imageView == null) return;
+        File file = materializeBoseImage();
+        if (file == null) return;
+        // setTag(Object) is used deliberately: setTag(int,Object) requires a real
+        // resource id and throws otherwise.
+        if (!imageView.getTag().equals(BOSE_IMAGE_TAG)) {
+            imageView.setTag(BOSE_IMAGE_TAG);
+        }
+        for (int i = 0; i < 4; i++) {
+            final long delay = i == 0 ? 200L : (i == 1 ? 800L : (i == 2 ? 1800L : 3500L));
+            mainHandler.postDelayed(() -> {
+                try {
+                    if (!isBoseImagePinned(imageView)) return;
+                    if (imageView.getDrawable() == null) return;
+                    imageView.setImageURI(Uri.fromFile(file));
+                    imageView.setVisibility(View.VISIBLE);
+                } catch (Throwable ignored) {
+                }
+            }, delay);
+        }
+        // Also re-apply once per attach/detach cycle: the stock header rebinds on
+        // every scroll settle, which is exactly when the generic photo returns.
+        try {
+            View.OnAttachStateChangeListener guard = new View.OnAttachStateChangeListener() {
+                @Override public void onViewAttachedToWindow(View v) {
+                    mainHandler.postDelayed(() -> {
+                        try {
+                            if (isBoseImagePinned((ImageView) v)) {
+                                ((ImageView) v).setImageURI(Uri.fromFile(file));
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }, 350L);
+                }
+                @Override public void onViewDetachedFromWindow(View v) { }
+            };
+            imageView.addOnAttachStateChangeListener(guard);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Marker tag identifying a product-image view pinned to the Bose photo. */
+    private static final String BOSE_IMAGE_TAG = "melodylink.bose.image";
+
+    private static boolean isBoseImagePinned(ImageView view) {
+        try {
+            return view != null && BOSE_IMAGE_TAG.equals(view.getTag());
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** Sets the Bose photo and silences the stock loading spinner for that view. */
@@ -1906,7 +1996,8 @@ public final class HookModule extends XposedModule {
         // Publish the confirmed CNC level too, so the :fg detail slider can read it.
         int cnc = boseTransport.getCncLevel();
         if (cnc >= 0) {
-            MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), targetAddress, cnc);
+            MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), targetAddress, cnc,
+                    boseTransport.getWindBlock());
         }
     }
 
@@ -2923,9 +3014,126 @@ public final class HookModule extends XposedModule {
         return true;
     }
 
+    /**
+     * Injects the "抗风噪" switch under the CNC slider. Bose exposes Wind Block on
+     * the same unauthenticated [31.10] register (byte 3) but hides it in the
+     * official app — see bosectl's notes on QC Ultra 2 / edith hardware.
+     *
+     * Audibility caveat: turning wind on masks the CNC DSP path, so the 0-10 level
+     * stops sounding different until wind is switched off again.
+     */
+    private void addBoseWindSwitch(
+            Object group, ClassLoader loader, Activity activity, int order) {
+        Object toggle = newSwitchPreference(loader, activity);
+        if (toggle == null) {
+            log(Log.WARN, TAG, event("Bose wind switch unavailable"));
+            return;
+        }
+        setPreferenceValue(toggle, "setKey", BOSE_WIND_KEY);
+        setPreferenceValue(toggle, "setTitle", "\u6297\u98ce\u566a");
+        setPreferenceValue(toggle, "setSummary",
+                "\u542f\u7528\u540e\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548");
+        setPreferenceValue(toggle, "setPersistent", false);
+        int wind = boseTransport.getWindBlock();
+        if (wind < 0) wind = MelodySharedStateStore.readBoseCncWind(boseCncStateFile());
+        if (wind < 0) wind = 0;
+        setPreferenceValue(toggle, "setChecked", wind != 0);
+        if (order >= 0) setPreferenceValue(toggle, "setOrder", order);
+        installBoseWindListener(toggle, loader);
+        if (!addPreference(group, toggle, loader)) {
+            log(Log.WARN, TAG, event("Bose wind switch add rejected"));
+            return;
+        }
+        boseWindPreference = toggle;
+        lastWindSwitchState = wind;
+    }
+
+    private void installBoseWindListener(Object preference, ClassLoader loader) {
+        Method listenerSetter = null;
+        for (Method candidate : allMethods(preference.getClass())) {
+            if (candidate.getName().equals("setOnPreferenceChangeListener")
+                    && candidate.getParameterTypes().length == 1) {
+                listenerSetter = candidate;
+                break;
+            }
+        }
+        if (listenerSetter == null || !listenerSetter.getParameterTypes()[0].isInterface()) {
+            log(Log.WARN, TAG, event("Bose wind listener setter unavailable"));
+            return;
+        }
+        Class<?> listenerType = listenerSetter.getParameterTypes()[0];
+        Method callback = null;
+        for (Method candidate : listenerType.getMethods()) {
+            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
+                callback = candidate;
+                break;
+            }
+        }
+        final Method changeCallback = callback;
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(loader,
+                new Class<?>[]{listenerType}, (proxy, method, args) -> {
+                    if ("toString".equals(method.getName())) return "MelodyLinkBoseWindListener";
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
+                    if (changeCallback == null || method.getName() != changeCallback.getName()
+                            || args == null || args.length < 2 || !(args[1] instanceof Boolean)) {
+                        return Boolean.TRUE;
+                    }
+                    boolean on = (Boolean) args[1];
+                    int value = on ? 1 : 0;
+                    setPreferenceValue(preference, "setSummary", on
+                            ? "\u5df2\u5f00\u542f\uff0c\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548"
+                            : "\u542f\u7528\u540e\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548");
+                    if (isPrimaryProcess()) {
+                        BluetoothDevice device = resolveBoseForTile();
+                        if (device != null) {
+                            boseTransport.cacheWindBlock(value);
+                            boseTransport.writeSetting(
+                                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND, value);
+                        }
+                    } else {
+                        String address = targetAddress == null
+                                ? MelodySharedStateStore.readBoseCncAddress(boseCncStateFile())
+                                : targetAddress;
+                        if (address == null) {
+                            address = com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
+                                    .getKNOWN_MACS().iterator().next();
+                        }
+                        MelodySharedStateStore.writeBoseCncCommand(boseCncCommandFile(), address,
+                                boseTransport.getCncLevel(), value,
+                                java.util.UUID.randomUUID().toString());
+                    }
+                    return Boolean.TRUE;
+                });
+        try {
+            listenerSetter.setAccessible(true);
+            listenerSetter.invoke(preference, listener);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose wind listener install failed", t);
+        }
+    }
+
+    /** Pushes the earbud's real wind-block state back onto the injected switch. */
+    private void updateBoseWindSwitch() {
+        Object toggle = boseWindPreference;
+        if (toggle == null) return;
+        int wind = boseTransport.getWindBlock();
+        if (wind < 0) wind = MelodySharedStateStore.readBoseCncWind(boseCncStateFile());
+        if (wind < 0 || wind == lastWindSwitchState) return;
+        lastWindSwitchState = wind;
+        final boolean on = wind != 0;
+        mainHandler.post(() -> {
+            setPreferenceValue(toggle, "setChecked", on);
+            setPreferenceValue(toggle, "setSummary", on
+                    ? "\u5df2\u5f00\u542f\uff0c\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548"
+                    : "\u542f\u7528\u540e\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548");
+        });
+    }
+
     /** Re-sync the injected slider when a BMAP session reports the real CNC level. */
     private volatile int lastCncSliderLevel = -2;
     private void updateBoseCncSlider() {
+        updateBoseWindSwitch();
         Object slider = boseCncPreference;
         if (slider == null) return;
         int level = boseTransport.getCncLevel();
@@ -3315,12 +3523,28 @@ public final class HookModule extends XposedModule {
             return;
         }
         int level = Math.max(0, Math.min(10, command.level));
-        log(Log.INFO, TAG, event("executing forwarded Bose CNC level write level=" + level));
-        boseTransport.cacheCncLevel(level);
-        boseTransport.writeSetting(
-                com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, level);
+        if (command.wind >= 0) {
+            // The switch changed: read-modify-write [31.10] so the level we echo
+            // back does not clobber the wind byte on the earbud.
+            int wind = command.wind > 0 ? 1 : 0;
+            log(Log.INFO, TAG, event("executing forwarded Bose wind write value=" + wind));
+            boseTransport.cacheWindBlock(wind);
+            if (boseTransport.writeSetting(
+                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND, wind)) {
+                log(Log.INFO, TAG, event("Bose wind block " + (wind != 0 ? "enabled" : "disabled")));
+            } else {
+                log(Log.WARN, TAG, event("Bose wind block write failed (firmware may ignore it)"));
+            }
+        }
+        if (boseTransport.getCncLevel() != level) {
+            log(Log.INFO, TAG, event("executing forwarded Bose CNC level write level=" + level));
+            boseTransport.cacheCncLevel(level);
+            boseTransport.writeSetting(
+                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, level);
+        }
         String publishedAddress = targetAddress == null ? command.address : targetAddress;
-        MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), publishedAddress, level);
+        MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), publishedAddress, level,
+                boseTransport.getWindBlock());
     }
 
     private void observeSharedSonyCommand() {

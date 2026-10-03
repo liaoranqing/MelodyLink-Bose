@@ -32,7 +32,14 @@ object BoseDeviceConfig {
     const val SETTING_CNC = 0
     const val SETTING_AUTO_CNC = 1
     const val SETTING_SPATIAL = 2
-    const val SETTING_RESERVED = 3
+    /**
+     * Wind Block (0=off, 1=on). Bose hides this in the official app but the
+     * firmware accepts it on the same unauthenticated [31.10] register —
+     * verified by bosectl against QC Ultra 2 / `edith` hardware.
+     * Audibility note: wind masks the CNC DSP path, so the 0-10 level only
+     * sounds different while wind is off.
+     */
+    const val SETTING_WIND = 3
     const val SETTING_ANC = 4
 
     val capabilities = EarbudsCapabilities(
