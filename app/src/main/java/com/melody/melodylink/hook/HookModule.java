@@ -87,8 +87,6 @@ public final class HookModule extends XposedModule {
     private static final String HUAWEI_LOW_LATENCY_SETTING_KEY = "melodylink.huawei.low_latency";
     private static final String SOUND_QUALITY_TITLE = "音质音效";
     private static final String BOSE_CNC_KEY = "melodylink.bose.cnc";
-    private static final String BOSE_WIND_KEY = "melodylink.bose.wind";
-    private static final String BOSE_WIND_CARD_KEY = "melodylink.bose.wind.card";
     private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
     /**
@@ -156,8 +154,6 @@ public final class HookModule extends XposedModule {
     private volatile Object noiseEffectRow;
 
     /** Injected "抗风噪" switch, kept for state re-sync. */
-    private volatile Object boseWindPreference;
-    private volatile int lastWindSwitchState = -1;
 
     /** Injected "音效调节" panel: three EQ sliders, button remaps, mode slots. */
     private final List<Object> boseEqSliders = new ArrayList<>();
@@ -1290,9 +1286,13 @@ public final class HookModule extends XposedModule {
         // onCreatePreferences the parent is often still null (0.4.4 lost the slider
         // on exactly the screen where the row got added first). Retrying against
         // the live row once the tree is assembled is what actually works.
+        if (noiseEffectRow == preference) return; // already captured, do not re-arm
         noiseEffectRow = preference;
-        for (int i = 0; i < 5; i++) {
-            final long delay = i == 0 ? 100L : (i == 1 ? 300L : (i == 2 ? 700L : (i == 3 ? 1500L : 3000L)));
+        for (int i = 0; i < 3; i++) {
+            // Three passes only. 0.5.5 ran five, and because this hook fires for
+            // EVERY preference Melody adds, the queue kept re-entering
+            // installBoseCncUnderNoiseRow while the tree was still being built.
+            final long delay = i == 0 ? 150L : (i == 1 ? 600L : 1800L);
             mainHandler.postDelayed(this::installBoseCncUnderNoiseRow, delay);
         }
     }
@@ -1303,79 +1303,75 @@ public final class HookModule extends XposedModule {
      * and on a short timer after each bind.
      */
     private void keepNoiseEffectRowHidden() {
-        Object noiseRow = noiseEffectRow;
-        if (noiseRow == null || !boseBonded()) return;
-        if (!NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) return;
-        setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
-        mainHandler.postDelayed(() -> {
-            Object row = noiseEffectRow;
-            if (row == null || !boseBonded()) return;
-            if (!NOISE_ROW_CLASS_DETAIL.equals(row.getClass().getName())) return;
-            setPreferenceValue(row, "setVisible", Boolean.FALSE);
-        }, 220L);
+        hideNoiseEffectRow();
+        mainHandler.postDelayed(this::hideNoiseEffectRow, 300L);
+    }
+
+    /**
+     * Hides the "降噪效果" row on the earbud detail page.
+     *
+     * This row is the OPPO/Enco ANC intensity picker — 深度 / 中度 / 轻度 / 智能
+     * 降噪 — which drives an Enco-only protocol. Bose QC Ultra 2 has no such
+     * four-level ANC path, so the control cannot do anything for this device.
+     * setVisible(false) is used rather than removing the preference: the row's
+     * own LiveData observer still calls onBindViewHolder, and a removed-but-
+     * observed preference crashes the page.
+     */
+    private void hideNoiseEffectRow() {
+        try {
+            Object noiseRow = noiseEffectRow;
+            if (noiseRow == null || !boseBonded()) return;
+            if (!NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) return;
+            if (setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE)) {
+                log(Log.INFO, TAG, event("hidden Enco-only 降噪效果 row for Bose"));
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "降噪效果 row hide failed", t);
+        }
     }
 
     private void installBoseCncUnderNoiseRow() {
         try {
             Object noiseRow = noiseEffectRow;
             if (noiseRow == null || !boseBonded()) return;
+            // One-shot per row instance. Every addBoseXxx below is itself guarded
+            // by findPreferenceByKeyRecursive, so re-running is harmless but noisy.
+            if (boseCncInstalledFor == noiseRow) return;
             ClassLoader loader = noiseRow.getClass().getClassLoader();
             Object context = invokeNoArg(noiseRow, "getContext");
             if (!(context instanceof Context)) return;
             Activity activity = findActivity((Context) context);
             if (activity == null) activity = detailActivity;
             if (activity == null) return;
-            // The row is the "降噪效果" card itself — a dead end for Bose (it opens
-            // OPPO's own page, which drives a non-existent SPP channel). Hiding it
-            // also stops the card background from wrapping our slider, so add the
-            // slider to the row's OWN parent (the section list) instead.
             Object group = invokeNoArg(noiseRow, "getParent");
             if (group == null) return; // tree not ready yet; a later retry handles it
-            // On the detail page the row is a dead end (it opens OPPO's own noise
-            // page, which drives a non-existent SPP channel), so it is hidden and
-            // the slider replaces it. "通用设置" renders the same concept as
-            // OneSpaceNoisePreference, and there it *is* the ANC mode switch we
-            // hijack — hiding it would remove a feature the user relies on, so on
-            // that page we only append below it.
-            // IMPORTANT: on the detail page NoiseReductionItem is BOTH the three-state
-            // ANC switch the user wants and an "open OPPO's page" row. Hiding it
-            // removed the ANC modes (reported as "三个耳机状态调节不见了"), so it
-            // stays visible on both pages; the slider is simply added next to it.
+
             boolean detailPage = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
-            boolean hideRow = false;
+            // Hide the Enco-only ANC intensity row on the detail page. The 通用设置
+            // page renders the same concept as OneSpaceNoisePreference and stays.
+            if (detailPage) hideNoiseEffectRow();
+
             if (findPreferenceByKeyRecursive(group, BOSE_CNC_KEY)) {
-                if (hideRow) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+                boseCncInstalledFor = noiseRow;
                 return;
             }
             Integer order = (Integer) invokeNoArg(noiseRow, "getOrder");
-            // COUI renders a rounded card per contiguous run of rows; injecting at
-            // order+1 glued our rows into the neighbouring card (the "items stuck
-            // together" report). A gap of 10 starts a new card, which is what the
-            // stock list uses between sections.
-            // COUI groups consecutive orders into one rounded card. 0.5.0 used
-            // order+10 then +1, which put the slider and the wind switch in the SAME
-            // card (reported as "粘在一起、抗风噪没有圆角"). A stride of 10 gives each
-            // injected row its own card, matching the stock sections.
-            // COUI draws one rounded card per run of consecutive rows, so any two
-            // injected items end up glued together with no gap (0.5.0 report).
-            // Wrapping each item in its own COUIPreferenceCategory is how the stock
-            // settings pages get separate rounded cards — that is the supported way
-            // to control the grouping, and it survives list re-binds.
-            int sliderOrder = order == null ? -1 : order + 10;
-            if (addBoseCncPreference(group, loader, activity, sliderOrder)) {
-                addBoseWindSwitch(group, loader, activity, sliderOrder + 10);
-                // The "Bose 音效" block (EQ + remaps + 6 mode slots + power) is long;
-                // on 通用设置 it duplicated the detail page and made the list
-                // unreadable, so it only goes into the earbud detail page.
-                if (detailPage) addBoseExtraCategory(group, loader, activity, sliderOrder + 20);
-                if (hideRow) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
-                log(Log.INFO, TAG, event("installed Bose CNC slider on "
-                        + (detailPage ? "detail" : "general settings") + " page"));
-            }
+            int base = order == null ? -1 : order + 10;
+            if (!addBoseCncPreference(group, loader, activity, base)) return;
+            boseCncInstalledFor = noiseRow;
+            // EQ / buttons / mode slots / power only belong on the earbud detail
+            // page. On 通用设置 they duplicated the same controls and made the
+            // list unreadable.
+            if (detailPage) addBoseExtraCategory(group, loader, activity, base + 20);
+            log(Log.INFO, TAG, event("installed Bose CNC slider on "
+                    + (detailPage ? "detail" : "general settings") + " page"));
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose CNC slider install failed", t);
         }
     }
+
+    /** The noise row instance the slider was already installed against. */
+    private Object boseCncInstalledFor;
 
     private void hideAncStrengthPreference(Object preference) {
         if (preference == null || !hasMappedDeviceActive()) return;
@@ -1741,7 +1737,8 @@ public final class HookModule extends XposedModule {
         View root = (View) itemView;
         int imageId = root.getResources().getIdentifier("device_image", "id", TARGET);
         View image = imageId == 0 ? null : root.findViewById(imageId);
-        return image instanceof ImageView ? (ImageView) image : null;
+        if (image instanceof ImageView) return (ImageView) image;
+        return largestAttachedImageView(root);
     }
 
     private static void hideLoadingView(Object loadingView) {
@@ -1759,7 +1756,40 @@ public final class HookModule extends XposedModule {
         View root = (View) owner;
         int imageId = root.getResources().getIdentifier("normal_image", "id", TARGET);
         View image = imageId == 0 ? null : root.findViewById(imageId);
-        return image instanceof ImageView ? (ImageView) image : null;
+        if (image instanceof ImageView) return (ImageView) image;
+        // 0.5.5 wrote the PNG, called setImageURI and reported success, yet nothing
+        // appeared: the id lookup resolved to an ImageView that is not on screen
+        // (a freshly inflated template, discarded on the first real bind). Fall
+        // back to the largest attached ImageView in the real tree.
+        return largestAttachedImageView(root);
+    }
+
+    /** The biggest ImageView actually laid out under this root, or null. */
+    private static ImageView largestAttachedImageView(View root) {
+        if (root == null) return null;
+        ImageView best = null;
+        long bestArea = 0L;
+        java.util.ArrayDeque<View> queue = new java.util.ArrayDeque<>();
+        queue.add(root);
+        int guard = 0;
+        while (!queue.isEmpty() && guard++ < 400) {
+            View current = queue.poll();
+            if (current == null) continue;
+            if (current instanceof ImageView && current.isAttachedToWindow()) {
+                long area = (long) current.getWidth() * current.getHeight();
+                if (area > bestArea) {
+                    bestArea = area;
+                    best = (ImageView) current;
+                }
+            }
+            if (current instanceof android.view.ViewGroup) {
+                android.view.ViewGroup group = (android.view.ViewGroup) current;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    queue.add(group.getChildAt(i));
+                }
+            }
+        }
+        return bestArea > 0L ? best : null;
     }
 
     private void replaceSonyDetailImageLater(Object owner) {
@@ -2158,8 +2188,7 @@ public final class HookModule extends XposedModule {
         // Publish the confirmed CNC level too, so the :fg detail slider can read it.
         int cnc = boseTransport.getCncLevel();
         if (cnc >= 0) {
-            MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), targetAddress, cnc,
-                    boseTransport.getWindBlock());
+            MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), targetAddress, cnc);
         }
     }
 
@@ -2838,8 +2867,13 @@ public final class HookModule extends XposedModule {
 
     private void scheduleDirectPreferenceFragmentBinding(Object fragment) {
         if (fragment == null) return;
+        // Sony-only path. For Bose the tree walk below always bails out at
+        // "if (!hasSonySettings && !hasHuaweiLowLatency) return;", so scheduling
+        // five retries just re-entered it for nothing while the page was laying
+        // out. All Bose injection goes through captureNoiseEffectRow instead.
         Object activityValue = invokeNoArg(fragment, "getActivity");
         if (!(activityValue instanceof Activity)) return;
+        if (boseBonded()) return;
         Activity activity = (Activity) activityValue;
         long[] delays = new long[]{0L, 50L, 200L, 500L, 1000L};
         for (int i = 0; i < delays.length; i++) {
@@ -3193,7 +3227,6 @@ public final class HookModule extends XposedModule {
     private boolean addBoseCncPreference(
             Object parent, ClassLoader loader, Activity activity, int order) {
         if (parent == null) return false;
-        // Own COUI category => own rounded card (see addBoseWindSwitch).
         Object card = newPreference(loader,
                 "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
         if (card == null) card = newPreference(loader,
@@ -3234,143 +3267,6 @@ public final class HookModule extends XposedModule {
         return true;
     }
 
-    /**
-     * Injects the "抗风噪" switch under the CNC slider. Bose exposes Wind Block on
-     * the same unauthenticated [31.10] register (byte 3) but hides it in the
-     * official app — see bosectl's notes on QC Ultra 2 / edith hardware.
-     *
-     * Audibility caveat: turning wind on masks the CNC DSP path, so the 0-10 level
-     * stops sounding different until wind is switched off again.
-     */
-    private void addBoseWindSwitch(
-            Object group, ClassLoader loader, Activity activity, int order) {
-        // Own COUI category => its own rounded card. The stock settings pages group
-        // rows into cards by wrapping them in a COUIPreferenceCategory, so this is
-        // the supported way to stop our row from being glued to the neighbour.
-        Object card = newPreference(loader,
-                "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
-        if (card == null) card = newPreference(loader,
-                "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
-        Object host = card != null ? card : group;
-        if (card != null) {
-            setPreferenceValue(card, "setKey", BOSE_WIND_CARD_KEY);
-            if (order >= 0) setPreferenceValue(card, "setOrder", order);
-            if (!addPreference(group, card, loader)) {
-                host = group;
-            }
-        }
-        Object toggle = newSwitchPreference(loader, activity);
-        if (toggle == null) {
-            log(Log.WARN, TAG, event("Bose wind switch unavailable"));
-            return;
-        }
-        setPreferenceValue(toggle, "setKey", BOSE_WIND_KEY);
-        setPreferenceValue(toggle, "setTitle", "\u6297\u98ce\u566a");
-        setPreferenceValue(toggle, "setSummary",
-                "\u542f\u7528\u540e\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548");
-        setPreferenceValue(toggle, "setPersistent", false);
-        int wind = boseTransport.getWindBlock();
-        if (wind < 0) wind = MelodySharedStateStore.readBoseCncWind(boseCncStateFile());
-        if (wind < 0) wind = 0;
-        setPreferenceValue(toggle, "setChecked", wind != 0);
-        if (order >= 0) setPreferenceValue(toggle, "setOrder", 0);
-        installBoseWindListener(toggle, loader);
-        if (!addPreference(host, toggle, loader)) {
-            log(Log.WARN, TAG, event("Bose wind switch add rejected"));
-            return;
-        }
-        boseWindPreference = toggle;
-        lastWindSwitchState = wind;
-    }
-
-    private void installBoseWindListener(Object preference, ClassLoader loader) {
-        Method listenerSetter = null;
-        for (Method candidate : allMethods(preference.getClass())) {
-            if (candidate.getName().equals("setOnPreferenceChangeListener")
-                    && candidate.getParameterTypes().length == 1) {
-                listenerSetter = candidate;
-                break;
-            }
-        }
-        if (listenerSetter == null || !listenerSetter.getParameterTypes()[0].isInterface()) {
-            log(Log.WARN, TAG, event("Bose wind listener setter unavailable"));
-            return;
-        }
-        Class<?> listenerType = listenerSetter.getParameterTypes()[0];
-        // Pick the change callback by its exact shape: (Preference, Object) -> boolean.
-        // Guessing "the first boolean method taking two parameters" is what broke
-        // 0.5.0 — COUISwitchPreference declares several such methods and the host
-        // unboxed null on every tap ("Expected to unbox a 'boolean' ... returned null").
-        Method callback = null;
-        for (Method candidate : listenerType.getMethods()) {
-            Class<?>[] params = candidate.getParameterTypes();
-            if (candidate.getReturnType() == Boolean.TYPE && params.length == 2
-                    && "androidx.preference.Preference".equals(params[0].getName())
-                    && !params[1].isPrimitive()) {
-                callback = candidate;
-                break;
-            }
-        }
-        final Method changeCallback = callback;
-        Object listener = java.lang.reflect.Proxy.newProxyInstance(loader,
-                new Class<?>[]{listenerType}, (proxy, method, args) -> {
-                    if ("toString".equals(method.getName())) return "MelodyLinkBoseWindListener";
-                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
-                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (changeCallback == null || !"onPreferenceChange".equals(method.getName())
-                            || args == null || args.length < 2 || !(args[1] instanceof Boolean)) {
-                        // Any other method on this interface may be unboxed by the host,
-                        // so never answer null.
-                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
-                    }
-                    boolean on = (Boolean) args[1];
-                    int value = on ? 1 : 0;
-                    setPreferenceValue(preference, "setSummary", on
-                            ? "\u5df2\u5f00\u542f\uff0c\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548"
-                            : "\u542f\u7528\u540e\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548");
-                    if (isPrimaryProcess()) {
-                        BluetoothDevice device = resolveBoseForTile();
-                        if (device != null) {
-                            boseTransport.cacheWindBlock(value);
-                            boseTransport.writeSetting(
-                                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND,
-                                    value, (success, index, written) -> {
-                                        if (!success) {
-                                            boseTransport.cacheWindBlock(-1);
-                                            lastWindSwitchState = -1;
-                                            mainHandler.post(() -> {
-                                                setPreferenceValue(preference, "setChecked", !on);
-                                                setPreferenceValue(preference, "setSummary",
-                                                        "\u6297\u98ce\u566a\u672a\u751f\u6548"
-                                                                + "\uff08\u56fa\u4ef6\u53ef\u80fd\u4e0d\u652f\u6301\uff09");
-                                                log(Log.WARN, TAG,
-                                                        "Bose wind block rejected by firmware; switch reverted");
-                                            });
-                                        }
-                                    });
-                        }
-                    } else {
-                        String address = targetAddress == null
-                                ? MelodySharedStateStore.readBoseCncAddress(boseCncStateFile())
-                                : targetAddress;
-                        if (address == null) {
-                            address = com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
-                                    .getKNOWN_MACS().iterator().next();
-                        }
-                        MelodySharedStateStore.writeBoseCncCommand(boseCncCommandFile(), address,
-                                boseTransport.getCncLevel(), value,
-                                java.util.UUID.randomUUID().toString());
-                    }
-                    return Boolean.TRUE;
-                });
-        try {
-            listenerSetter.setAccessible(true);
-            listenerSetter.invoke(preference, listener);
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Bose wind listener install failed", t);
-        }
-    }
-
     // ------------------------------------------------- EQ / buttons / mode slots / power
 
     /** Command kinds mirrored in MelodySharedStateStore. */
@@ -3389,65 +3285,99 @@ public final class HookModule extends XposedModule {
      */
     private void addBoseExtraCategory(
             Object group, ClassLoader loader, Activity activity, int order) {
-        // findPreferenceByKeyRecursive answers a boolean, not an object (0.4.7
-        // compared it to null and failed to compile).
         if (findPreferenceByKeyRecursive(group, BOSE_EXTRA_CATEGORY_KEY)) return;
+        int[] shared = MelodySharedStateStore.readBoseExtraState(boseExtraStateFile());
+
+        // One category per feature. 0.5.5 crammed EQ + buttons + 6 mode slots +
+        // standby + power into a single COUIPreferenceCategory (15 rows) and the
+        // detail page rendered blank. Splitting them keeps every card short
+        // enough for the stock layout to measure, and each one is skipped
+        // independently so a failure in one cannot take the others down.
+        addBoseEqCard(group, loader, activity, order, shared);
+        addBoseButtonCard(group, loader, activity, order + 10, shared);
+        addBoseModeSlotCard(group, loader, activity, order + 20, shared);
+        addBosePowerCard(group, loader, activity, order + 30);
+
+        log(Log.INFO, TAG, event("installed Bose extras as 4 separate cards"));
+    }
+
+    /** Creates the COUI card wrapper every Bose feature below lives in. */
+    private Object newBoseCard(Object parent, ClassLoader loader, Activity activity,
+            String key, String title, int order) {
         Object category = newPreference(loader,
                 "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
         if (category == null) category = newPreference(loader,
                 "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
-        if (category == null) return;
-        setPreferenceValue(category, "setTitle", "Bose \u97f3\u6548");
-        setPreferenceValue(category, "setKey", BOSE_EXTRA_CATEGORY_KEY);
+        if (category == null) return null;
+        setPreferenceValue(category, "setTitle", title);
+        setPreferenceValue(category, "setKey", key);
         if (order >= 0) setPreferenceValue(category, "setOrder", order);
-        if (!addPreference(group, category, loader)) return;
-        boseExtraCategory = category;
+        if (!addPreference(parent, category, loader)) return null;
+        return category;
+    }
 
+    private void addBoseEqCard(Object parent, ClassLoader loader, Activity activity,
+            int order, int[] shared) {
+        if (findPreferenceByKeyRecursive(parent, BOSE_EXTRA_CATEGORY_KEY)) return;
+        Object card = newBoseCard(parent, loader, activity, BOSE_EXTRA_CATEGORY_KEY,
+                "Bose \u97f3\u6548", order);
+        if (card == null) {
+            log(Log.WARN, TAG, event("Bose EQ card unavailable"));
+            return;
+        }
+        boseExtraCategory = card;
         boseEqSliders.clear();
+        int bass = shared != null && shared.length > 0 && shared[0] >= -10 ? shared[0] : 0;
+        int mid = shared != null && shared.length > 1 && shared[1] >= -10 ? shared[1] : 0;
+        int treble = shared != null && shared.length > 2 && shared[2] >= -10 ? shared[2] : 0;
+        addBoseBandSlider(card, loader, activity, 0, "\u4f4e\u9891", 0, bass);
+        addBoseBandSlider(card, loader, activity, 1, "\u4e2d\u9891", 1, mid);
+        addBoseBandSlider(card, loader, activity, 2, "\u9ad8\u9891", 2, treble);
+    }
+
+    private void addBoseButtonCard(Object parent, ClassLoader loader, Activity activity,
+            int order, int[] shared) {
+        String key = BOSE_EXTRA_CATEGORY_KEY + ".button";
+        if (findPreferenceByKeyRecursive(parent, key)) return;
+        Object card = newBoseCard(parent, loader, activity, key,
+                "Bose \u6309\u952e", order);
+        if (card == null) return;
         boseButtonDropdowns.clear();
-        boseModeSlotSliders.clear();
-
-        int[] shared = MelodySharedStateStore.readBoseExtraState(boseExtraStateFile());
-        int eqBass = shared != null && shared.length > 0 && shared[0] >= -10 ? shared[0] : 0;
-        int eqMid = shared != null && shared.length > 1 && shared[1] >= -10 ? shared[1] : 0;
-        int eqTreble = shared != null && shared.length > 2 && shared[2] >= -10 ? shared[2] : 0;
-
-        // --- 3-band EQ. Values are stored signed; the COUI bar is 0..20 offset by 10.
-        addBoseBandSlider(category, loader, activity, order + 1,
-                "\u4f4e\u9891", 0, eqBass);
-        addBoseBandSlider(category, loader, activity, order + 2,
-                "\u4e2d\u9891", 1, eqMid);
-        addBoseBandSlider(category, loader, activity, order + 3,
-                "\u9ad8\u9891", 2, eqTreble);
-
-        // --- Action button remaps: single / long / double press.
         int[] events = {com.melody.melodylink.bose.BoseBmap.EVENT_SINGLE_PRESS,
                 com.melody.melodylink.bose.BoseBmap.EVENT_LONG_PRESS,
                 com.melody.melodylink.bose.BoseBmap.EVENT_DOUBLE_PRESS};
         String[] eventNames = {"\u5355\u51fb", "\u957f\u6309", "\u53cc\u51fb"};
         for (int i = 0; i < events.length; i++) {
             int current = shared != null && shared.length > 3 + i ? shared[3 + i] : 0;
-            addBoseButtonRow(category, loader, activity, order + 4 + i,
-                    eventNames[i], events[i], current);
+            addBoseButtonRow(card, loader, activity, i, eventNames[i], events[i], current);
         }
+    }
 
-        // --- Custom mode slots 5-10. These are stored profiles: each slot keeps a
-        // name plus CNC/spatial/wind/ANC so a single tap can restore that combo.
-        // Writing a slot alone does not switch to it — that needs [31.3] START,
-        // which the volume-panel tile already does for modes 0-4.
-        addBoseModeSlotHint(category, loader, activity, order + 7);
+    private void addBoseModeSlotCard(Object parent, ClassLoader loader, Activity activity,
+            int order, int[] shared) {
+        String key = BOSE_EXTRA_CATEGORY_KEY + ".slot";
+        if (findPreferenceByKeyRecursive(parent, key)) return;
+        Object card = newBoseCard(parent, loader, activity, key,
+                "Bose \u6a21\u5f0f\u69fd\u4f4d", order);
+        if (card == null) return;
+        boseModeSlotSliders.clear();
+        addBoseModeSlotHint(card, loader, activity, 0);
         for (int slot = com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST;
                 slot <= com.melody.melodylink.bose.BoseBmap.MODE_SLOT_LAST; slot++) {
             int offset = 6 + (slot - com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST);
             int level = shared != null && shared.length > offset ? shared[offset] : -1;
-            addBoseModeSlotRow(category, loader, activity, order + 8 + slot, slot, level);
+            addBoseModeSlotRow(card, loader, activity, slot, slot, level);
         }
+    }
 
-        // --- Auto-off timer + power off.
-        addBoseStandbyRow(category, loader, activity, order + 18);
-        addBosePowerRow(category, loader, activity, order + 19);
-
-        log(Log.INFO, TAG, event("installed Bose extras: EQ / buttons / mode slots / standby"));
+    private void addBosePowerCard(Object parent, ClassLoader loader, Activity activity, int order) {
+        String key = BOSE_EXTRA_CATEGORY_KEY + ".power";
+        if (findPreferenceByKeyRecursive(parent, key)) return;
+        Object card = newBoseCard(parent, loader, activity, key,
+                "Bose \u7535\u6e90", order);
+        if (card == null) return;
+        addBoseStandbyRow(card, loader, activity, 0);
+        addBosePowerRow(card, loader, activity, 1);
     }
 
     /** One EQ band slider. The COUI bar counts 0..20; the wire value is -10..10. */
@@ -3851,27 +3781,9 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    /** Pushes the earbud's real wind-block state back onto the injected switch. */
-    private void updateBoseWindSwitch() {
-        Object toggle = boseWindPreference;
-        if (toggle == null) return;
-        int wind = boseTransport.getWindBlock();
-        if (wind < 0) wind = MelodySharedStateStore.readBoseCncWind(boseCncStateFile());
-        if (wind < 0 || wind == lastWindSwitchState) return;
-        lastWindSwitchState = wind;
-        final boolean on = wind != 0;
-        mainHandler.post(() -> {
-            setPreferenceValue(toggle, "setChecked", on);
-            setPreferenceValue(toggle, "setSummary", on
-                    ? "\u5df2\u5f00\u542f\uff0c\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548"
-                    : "\u542f\u7528\u540e\u964d\u566a\u7b49\u7ea7\u6682\u65f6\u5931\u6548");
-        });
-    }
-
     /** Re-sync the injected slider when a BMAP session reports the real CNC level. */
     private volatile int lastCncSliderLevel = -2;
     private void updateBoseCncSlider() {
-        updateBoseWindSwitch();
         Object slider = boseCncPreference;
         if (slider == null) return;
         int level = boseTransport.getCncLevel();
@@ -4143,17 +4055,20 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private static void setPreferenceValue(Object target, String name, Object value) {        if (target == null) return;
+    /** Returns true when the setter was found and invoked. */
+    private static boolean setPreferenceValue(Object target, String name, Object value) {
+        if (target == null) return false;
         for (Method method : allMethods(target.getClass())) {
             if (method.getName().equals(name) && method.getParameterTypes().length == 1) {
                 try {
                     method.setAccessible(true);
                     method.invoke(target, value);
-                    return;
+                    return true;
                 } catch (Throwable ignored) {
                 }
             }
         }
+        return false;
     }
 
     private static MelodySharedStateStore.SharedCommand readSharedSonyCommand() {
@@ -4262,27 +4177,6 @@ public final class HookModule extends XposedModule {
             return;
         }
         int level = Math.max(0, Math.min(10, command.level));
-        if (command.wind >= 0) {
-            // The switch changed: write only the wind byte so the level we echo
-            // back does not clobber it (and vice versa).
-            final int wind = command.wind > 0 ? 1 : 0;
-            log(Log.INFO, TAG, event("executing forwarded Bose wind write value=" + wind));
-            boseTransport.cacheWindBlock(wind);
-            boseTransport.writeSetting(
-                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND, wind,
-                    (success, index, written) -> {
-                        if (success) {
-                            log(Log.INFO, TAG, event("Bose wind block "
-                                    + (written != 0 ? "enabled" : "disabled")));
-                        } else {
-                            // The firmware accepted the frame but may not have a
-                            // wind path on in-true-wireless models; report honestly.
-                            log(Log.WARN, TAG, event("Bose wind block write failed"
-                                    + " (firmware may ignore it on this model)"));
-                            boseTransport.cacheWindBlock(-1);
-                        }
-                    });
-        }
         if (boseTransport.getCncLevel() != level) {
             log(Log.INFO, TAG, event("executing forwarded Bose CNC level write level=" + level));
             boseTransport.cacheCncLevel(level);
@@ -4290,8 +4184,7 @@ public final class HookModule extends XposedModule {
                     com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, level);
         }
         String publishedAddress = targetAddress == null ? command.address : targetAddress;
-        MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), publishedAddress, level,
-                boseTransport.getWindBlock());
+        MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), publishedAddress, level);
     }
 
     private volatile String lastBoseExtraCommandNonce;
@@ -4335,7 +4228,7 @@ public final class HookModule extends XposedModule {
                 break;
             case CMD_MODE_SLOT:
                 boseTransport.writeModeSlot(command.index,
-                        "ML" + command.index, command.value, 0, boseTransport.getWindBlock() > 0 ? 1 : 0,
+                        "ML" + command.index, command.value, 0, 0,
                         (ok, slot) -> {
                             log(Log.INFO, TAG, event("Bose mode slot " + slot
                                     + " cnc=" + command.value + (ok ? " ok" : " failed")));

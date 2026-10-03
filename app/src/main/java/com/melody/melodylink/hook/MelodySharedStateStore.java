@@ -115,77 +115,40 @@ final class MelodySharedStateStore {
     }
 
     /**
-     * Bose settings state: address + confirmed CNC level (0..10) + wind block.
-     * Returns {0, level, wind}; wind is -1 on files written by older builds.
+     * Bose settings state: address + confirmed CNC level (0..10).
+     * Returns {0, level}. Older builds wrote a third wind-block line; it is
+     * still read and ignored so an existing state file keeps working.
      */
     static boolean writeBoseCncState(File file, String address, int level) {
-        return writeBoseCncState(file, address, level, readBoseCncWind(file));
-    }
-
-    static boolean writeBoseCncState(File file, String address, int level, int wind) {
-        return write(file, address + "\n" + level + "\n" + wind + "\n");
+        return write(file, address + "\n" + level + "\n");
     }
 
     static int[] readBoseCncState(File file) {
-        String[] lines = readLines(file, 3);
-        if (lines == null) {
-            // Legacy two-line file: level only.
-            String[] old = readLines(file, 2);
-            if (old == null) return null;
-            try {
-                return new int[]{0, Integer.parseInt(old[1].trim()), -1};
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
-        }
+        String[] lines = readLines(file, 2);
+        if (lines == null) return null;
         try {
-            return new int[]{0, Integer.parseInt(lines[1].trim()),
-                    Integer.parseInt(lines[2].trim())};
+            return new int[]{0, Integer.parseInt(lines[1].trim())};
         } catch (NumberFormatException ignored) {
             return null;
         }
     }
 
     static String readBoseCncAddress(File file) {
-        String[] lines = readLines(file, 3);
-        if (lines == null) {
-            String[] old = readLines(file, 2);
-            return old == null ? null : old[0].trim();
-        }
-        return lines[0].trim();
+        String[] lines = readLines(file, 2);
+        return lines == null ? null : lines[0].trim();
     }
 
-    /** Reads just the wind byte, or -1 when absent/legacy. */
-    static int readBoseCncWind(File file) {
-        int[] state = readBoseCncState(file);
-        return state == null ? -1 : state[2];
-    }
-
-    /** Bose command: address + requested level + wind block + nonce. */
+    /** Bose command: address + requested level + nonce. */
     static boolean writeBoseCncCommand(File file, String address, int level, String nonce) {
-        return writeBoseCncCommand(file, address, level, -1, nonce);
-    }
-
-    static boolean writeBoseCncCommand(
-            File file, String address, int level, int wind, String nonce) {
-        return write(file, address + "\n" + level + "\n" + wind + "\n" + nonce + "\n");
+        return write(file, address + "\n" + level + "\n" + nonce + "\n");
     }
 
     static SharedBoseCncCommand readBoseCncCommand(File file) {
-        String[] lines = readLines(file, 4);
-        if (lines == null) {
-            String[] old = readLines(file, 3);
-            if (old == null) return null;
-            try {
-                return new SharedBoseCncCommand(old[0].trim(),
-                        Integer.parseInt(old[1].trim()), -1, old[2].trim());
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
-        }
+        String[] lines = readLines(file, 3);
+        if (lines == null) return null;
         try {
-            return new SharedBoseCncCommand(lines[0].trim(), Integer.parseInt(lines[1].trim()),
-                    Integer.parseInt(lines[2].trim()), lines[3].trim());
+            return new SharedBoseCncCommand(lines[0].trim(),
+                    Integer.parseInt(lines[1].trim()), lines[2].trim());
         } catch (NumberFormatException ignored) {
             return null;
         }
@@ -363,14 +326,11 @@ final class MelodySharedStateStore {
     static final class SharedBoseCncCommand {
         final String address;
         final int level;
-        /** -1 = leave the earbud's current wind-block state untouched. */
-        final int wind;
         final String nonce;
 
-        SharedBoseCncCommand(String address, int level, int wind, String nonce) {
+        SharedBoseCncCommand(String address, int level, String nonce) {
             this.address = address;
             this.level = level;
-            this.wind = wind;
             this.nonce = nonce;
         }
     }

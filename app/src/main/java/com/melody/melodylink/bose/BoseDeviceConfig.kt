@@ -39,7 +39,6 @@ object BoseDeviceConfig {
      * Audibility note: wind masks the CNC DSP path, so the 0-10 level only
      * sounds different while wind is off.
      */
-    const val SETTING_WIND = 3
     const val SETTING_ANC = 4
 
     val capabilities = EarbudsCapabilities(

@@ -69,7 +69,6 @@ public final class BoseTransport {
     private volatile int cncLevel = -1;
 
     /** [31.10] byte 3 cache: wind block 0=off, 1=on (-1 = never read). */
-    private volatile int windBlock = -1;
 
     /** Cached [1.7] EQ values for bass/mid/treble, in dB-like steps (-10..10). */
     private final byte[] eqBands = new byte[]{0, 0, 0};
@@ -124,15 +123,7 @@ public final class BoseTransport {
 
     /** Cached [31.10] CNC level 0..10; -1 until the first session read it. */
     /** Cached wind-block state; -1 until the first session read it. */
-    public int getWindBlock() {
-        return windBlock;
-    }
-
     /** Optimistic seed so the next query already reports the new value. */
-    public void cacheWindBlock(int value) {
-        windBlock = value;
-    }
-
     public int getCncLevel() {
         return cncLevel;
     }
@@ -217,9 +208,6 @@ public final class BoseTransport {
                     BoseBmap.FUNC_AUDIO_SETTINGS, BoseBmap.OP_GET, null);
             if (settings != null && settings.payload.length > BoseDeviceConfig.SETTING_SPATIAL) {
                 spatialType = settings.payload[BoseDeviceConfig.SETTING_SPATIAL] & 0xff;
-            if (settings.payload.length > BoseDeviceConfig.SETTING_WIND) {
-                windBlock = settings.payload[BoseDeviceConfig.SETTING_WIND] & 0xff;
-            }
                 cncLevel = settings.payload[BoseDeviceConfig.SETTING_CNC] & 0xff;
             }
             BoseBmap.Frame battery = command(BoseBmap.BLOCK_BATTERY,
@@ -393,7 +381,6 @@ public final class BoseTransport {
                 && (confirmed.payload[index] & 0xff) == value;
         if (ok && index == BoseDeviceConfig.SETTING_SPATIAL) spatialType = value;
         if (ok && index == BoseDeviceConfig.SETTING_CNC) cncLevel = value;
-        if (ok && index == BoseDeviceConfig.SETTING_WIND) windBlock = value;
         return ok;
     }
 
