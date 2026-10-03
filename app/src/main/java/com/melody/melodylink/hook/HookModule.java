@@ -103,6 +103,22 @@ public final class HookModule extends XposedModule {
     private static boolean isBoseNoiseRowClass(String className) {
         return NOISE_ROW_CLASS_DETAIL.equals(className) || NOISE_ROW_CLASS_ONESPACE.equals(className);
     }
+
+    /**
+     * True for the "降噪效果" row.
+     *
+     * <p>Accepts either the R8 class name or the preference key. The key is the stable
+     * identifier: Melody stamps it via {@code PreferenceCategory.setKey(cls.getSimpleName())},
+     * and the 17.6.3 smali confirms {@code NoiseReductionItem} uses exactly
+     * {@code "NoiseReductionItem"}. R8 renames the class between releases; the key survives.
+     * This is the same anchoring strategy Andrea-lyz/MelodyCodecTweaker uses.
+     */
+    private static boolean isBoseNoiseRow(Object preference) {
+        if (preference == null) return false;
+        if (isBoseNoiseRowClass(preference.getClass().getName())) return true;
+        String key = PrefRef.getKey(preference);
+        return "NoiseReductionItem".equals(key) || "OneSpaceNoisePreference".equals(key);
+    }
     private static final int WF_1000XM3_PRODUCT_ID = 0x067410;
     private volatile int targetAddressHash;
     private volatile String targetAddress;
@@ -1324,6 +1340,13 @@ public final class HookModule extends XposedModule {
      */
     private void captureNoiseEffectRow(Object preference) {
         if (preference == null || !boseBonded()) return;
+        // 0.5.10 evidence: evt=bose.anchor.captured fired for COUIMenuPreference,
+        // COUIJumpPreference, OneSpaceDisconnectPreference and finally
+        // footer_preference, and the last one won. detailPreferenceAdd runs for EVERY
+        // preference the host adds, so without this guard the anchor ends up being
+        // whichever preference was added last — the page footer, which has no children
+        // (evt=bose.detail.state total=0). The filter was lost in the 0.5.7 rewrite.
+        if (!isBoseNoiseRow(preference)) return;
         if (noiseEffectRow == preference) return;   // same instance, already armed
         noiseEffectRow = preference;
         MLog.event("bose.anchor.captured",
