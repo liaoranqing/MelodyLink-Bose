@@ -623,7 +623,7 @@ public final class HookModule extends XposedModule {
             // is the com.oplus.melody.common.util.E provider that b() reads the catalog
             // from, so replacing that field with a proxy intercepts the catalog without
             // touching any final method.
-            hookNamed(loader, "L6/a", "<init>", 0, "whitelistManagerCtor");
+            hookNamed(loader, "L6/a", "b", 0, "whitelistConfigList");
             hookNamed(loader, "L6/a", "a", 1, "detailWhitelistLookup");
             // The fragment that the callback is supposed to populate. Watching its lifecycle
             // tells us whether it is created at all once the config resolves.
@@ -820,96 +820,8 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    /**
-     * Hooks a constructor by arity.
-     *
-     * <p>0.5.36. {@code getDeclaredMethods()} does not include constructors, so the regular
-     * method path can never match a {@code "<init>"} target — the hook simply never
-     * registers, with only a generic WARN to show for it. This is the path that lets us
-     * interpose on {@code SupportConfigManager}'s catalog provider, which only exists as an
-     * instance field after construction.
-     *
-     * <p>libxposed hooks constructors through the same {@code hook(Method)} entry point, using
-     * the synthetic {@code <init>} method that {@link Constructor#toMethod()} hands back.
-     */
-    private boolean hookConstructor(ClassLoader loader, String className, int arity, String label) {
-        try {
-            Class<?> type = loadClass(loader, className);
-            java.lang.reflect.Constructor<?> selected = null;
-            for (java.lang.reflect.Constructor<?> candidate : type.getDeclaredConstructors()) {
-                if (candidate.getParameterTypes().length == arity) {
-                    selected = candidate;
-                    break;
-                }
-            }
-            if (selected == null) {
-                MLog.event("bose.hook.miss",
-                        "label", label,
-                        "class", className,
-                        "method", "<init>",
-                        "arity", arity,
-                        "available", describeConstructors(type));
-                log(Log.WARN, TAG, label + " constructor not found: " + className + "/" + arity);
-                return false;
-            }
-            Method method = selected.toMethod();
-            // Constructor.toMethod() is package-private in java.lang.reflect, so it needs
-            // setAccessible before it can be called from here.
-            method.setAccessible(true);
-            hook(method)
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(chain -> {
-                        Object thisObject = chain.getThisObject();
-                        // Chain.proceed() runs the constructor body, so the instance is only
-                        // usable afterwards — which is exactly when the field swap has to
-                        // happen.
-                        Object result = chain.proceed();
-                        try {
-                            if (thisObject != null) {
-                                if ("whitelistManagerCtor".equals(label)) {
-                                    wrapCatalogProvider(thisObject);
-                                }
-                            }
-                        } catch (Throwable t) {
-                            log(Log.WARN, TAG, label + " post-construction hook failed", t);
-                        }
-                        return result;
-                    });
-            log(Log.INFO, TAG, event("hooked " + label + " <init> " + className));
-            return true;
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "cannot hook " + label + " constructor in " + className, t);
-            return false;
-        }
-    }
-
-    /** Compact constructor listing used when a constructor target is not found. */
-    private static String describeConstructors(Class<?> type) {
-        try {
-            StringBuilder sb = new StringBuilder();
-            int shown = 0;
-            for (java.lang.reflect.Constructor<?> c : type.getDeclaredConstructors()) {
-                if (shown++ >= 8) {
-                    sb.append("...");
-                    break;
-                }
-                sb.append(c.getParameterTypes().length).append("->void ");
-            }
-            return sb.toString().trim();
-        } catch (Throwable t) {
-            return "err:" + t.getClass().getSimpleName();
-        }
-    }
-
     private boolean hookNamed(ClassLoader loader, String className, String methodName, int arity, String label) {
         try {
-            // 0.5.36: Class.getDeclaredMethods() does NOT include constructors, so a
-            // target of "<init>" could never be found and the hook silently never
-            // registered. Constructors go down a separate path — the catalog swap needs
-            // the instance, and the instance only exists once the constructor has run.
-            if ("<init>".equals(methodName)) {
-                return hookConstructor(loader, className, arity, label);
-            }
             Class<?> type = loadClass(loader, className);
             Method selected = null;
             for (Method method : type.getDeclaredMethods()) {
@@ -1032,10 +944,12 @@ public final class HookModule extends XposedModule {
                             throw t;
                         }
                     }
-                    // whitelistManagerCtor is handled inside hookConstructor: the instance
-                    // only exists once the constructor body has run, and chain.proceed()
-                    // is what runs it.
                     if ("whitelistConfigList".equals(label)) {
+                        // 0.5.37: the constructor path had to be abandoned — libxposed
+                        // wants a Method, and Constructor.toMethod() does not exist on the
+                        // JDK this compiles against. b() is the catalog accessor and it does
+                        // hook (0.5.35 proved it: 41 lookup events, each returning our DTO),
+                        // so the list is augmented right here instead of at the source.
                         Object result = chain.proceed();
                         return boseBonded() ? injectBoseCatalogEntry(result, loader) : result;
                     }
@@ -3820,6 +3734,17 @@ public final class HookModule extends XposedModule {
                     } catch (Throwable ignored) {
                         // getRemoteDevice throws for an unknown MAC; try the next one
                     }
+                }
+                // 0.5.37: the KNOWN_MACS list is a fixed set, but the unit that actually
+                // reports bose=true in the whitelist lookup is whichever MAC isTargetAddress
+                // accepts — on this device 68:F2:1F:3D:41:D7, which is not in that list.
+                // Gating the catalog injection on boseBonded() therefore suppressed it
+                // entirely. Fall back to asking isTargetAddress about the live bonded set,
+                // so both checks agree on what "our device" means.
+                for (BluetoothDevice device : adapter.getBondedDevices()) {
+                    if (device == null) continue;
+                    String address = device.getAddress();
+                    if (address != null && isTargetAddress(address)) return true;
                 }
             }
         } catch (Throwable ignored) {
