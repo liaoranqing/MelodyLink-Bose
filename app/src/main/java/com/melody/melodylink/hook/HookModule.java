@@ -1424,17 +1424,22 @@ public final class HookModule extends XposedModule {
         if (noiseRow == null) return false;
 
         ClassLoader loader = noiseRow.getClass().getClassLoader();
+        // 0.5.11: this used to bail out when no PreferenceScreen had been located yet,
+        // but the screen set was only populated on a successful install — so every
+        // attempt failed at this line and evt=bose.injected never fired. The anchor's
+        // own parent group is all we actually need; the screen is only bookkeeping.
         Object screen = boseInjectedScreens.isEmpty() ? null
                 : boseInjectedScreens.iterator().next();
-        if (screen == null) {
-            // Recover the screen by walking up from the anchor's own context.
-            screen = screenForAnchor(noiseRow);
-            if (screen == null) return false;
-        }
-        boseInjectedScreens.add(screen);
+        if (screen == null) screen = screenForAnchor(noiseRow);
 
         Object parent = PrefRef.getParent(noiseRow);
         if (parent == null) parent = screen;
+        if (parent == null) {
+            MLog.event("bose.inject.no_parent", "attempt_class",
+                    noiseRow.getClass().getSimpleName());
+            return false;
+        }
+        if (screen != null) boseInjectedScreens.add(screen);
         if (PrefRef.findPreferenceRecursive(parent, BOSE_CNC_KEY) != null) return true;
 
         Object context = PrefRef.invokeNoArg(noiseRow, "getContext");
@@ -1453,7 +1458,13 @@ public final class HookModule extends XposedModule {
         PrefRef.shiftPreferenceOrders(parent, target, +40);
 
         boolean ok = addBoseCncPreference(parent, loader, activity, target);
-        if (!ok) return false;
+        if (!ok) {
+            MLog.event("bose.cnc.add_failed",
+                    "parent", parent.getClass().getSimpleName(),
+                    "children", PrefRef.getPreferenceCount(parent),
+                    "order", target);
+            return false;
+        }
         if (detailPage) addBoseExtraCategory(parent, loader, activity, target + 10);
 
         MLog.event("bose.injected",
@@ -1530,10 +1541,17 @@ public final class HookModule extends XposedModule {
             Object noiseRow = noiseEffectRow;
             if (noiseRow == null || !boseBonded()) return;
             if (!NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) return;
-            PrefRef.setVisible(noiseRow, false);
-            MLog.event("bose.anco.row.hidden", "key", PrefRef.getKey(noiseRow));
+            // 0.5.11 evidence: evt=bose.detail.state reported anchor_visible=false on
+            // every attempt while the user still saw a fully blank detail page, and the
+            // 通用设置 page — which shares this anchor path but not the hide — rendered
+            // fine. COUI skips binding a preference whose visible flag is false, so
+            // hiding this row removed the only thing keeping the surrounding section
+            // alive. Restored to visible; the Enco ANC-intensity row stays until we know
+            // how to replace it with something functional.
+            PrefRef.setVisible(noiseRow, true);
+            MLog.event("bose.anco.row.shown", "key", PrefRef.getKey(noiseRow));
         } catch (Throwable t) {
-            MLog.event("bose.anco.row.hide_failed", "error", MLog.compactThrowable(t));
+            MLog.event("bose.anco.row.show_failed", "error", MLog.compactThrowable(t));
         }
     }
 
@@ -1553,9 +1571,16 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.detail.no_anchor", "attempt", attempt);
                 return;
             }
+            // The anchor is a single Preference, so its own child count is always 0.
+            // Walk up to the enclosing group — that is the list the user actually sees.
             Object parent = PrefRef.getParent(row);
             if (parent == null) {
                 MLog.event("bose.detail.anchor_detached", "attempt", attempt);
+                return;
+            }
+            if (PrefRef.getPreferenceCount(parent) == 0) parent = PrefRef.getParent(parent);
+            if (parent == null) {
+                MLog.event("bose.detail.no_group", "attempt", attempt);
                 return;
             }
             StringBuilder keys = new StringBuilder();
