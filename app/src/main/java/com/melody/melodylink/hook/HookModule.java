@@ -100,10 +100,8 @@ public final class HookModule extends XposedModule {
      * roughly a dozen nodes and only runs while the page is actually focused.
      */
     /**
-     * Text handed to MelodyJumpPreference rows that have no summary of their own.
-     * MelodyJumpPreference.a() hides a row whose summary is empty, and with no catalog
-     * entry every Bose row ends up empty. A single space is enough to pass TextUtils
-     * .isEmpty() while adding no visible text; the row itself carries the title.
+     * Text handed to detail rows that have no summary of their own. A single space passes
+     * TextUtils.isEmpty() while adding no visible text — the row carries its own title.
      */
     private static final String PLACEHOLDER_SUMMARY = " ";
     private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
@@ -2019,58 +2017,39 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * Describes the window that currently has input focus, straight from the window manager.
-     *
-     * <p>0.5.23: our container reported attached + visible + populated while the screenshot
-     * showed an empty page. Either the content is occluded by a sibling, or we have been
-     * inspecting a window that is no longer the one on screen. Dumping the focused window's
-     * decor hierarchy answers both in one shot.
-     */
-    /**
-     * Un-hides the detail page's content rows.
-     *
-     * <p>0.5.25 evidence — the decor tree at t+800/2000/5000:
-     * <pre>
-     * CoordinatorLayout#activity_standard_layout_main[4 kids
-     *   FrameLayout#melody_ui_fragment_container[1 kids
-     *     NestedScrollView#melody_ui_detail_scrollview[1 kids
-     *       LinearLayout[2 kids
-     *         ... 1440x1529 HIDDEN(vis=8)
-     *         1440x3168 HIDDEN(vis=8)
-     * </pre>
-     * Every other signal was healthy — window token valid, {@code shown=true}, not
-     * finishing, attached, correct size, and the 1356x1356 model view built. Only the
-     * visibility was off, which is why the page rendered as pure background.
-     *
-     * <p>Bose is absent from Melody's catalog and the page responds by hiding the rows it
-     * cannot populate. This restores them. Only GONE (and alpha==0) nodes are touched, and
-     * only inside the detail container, so the app bar and its own hidden stubs are left
-     * alone. A row with no data renders empty rather than throwing.
-     */
-    /**
      * Gives the detail rows the summary text the host demands before it shows them.
      *
-     * <p>0.5.28 root cause, read off {@code MelodyJumpPreference.a()} in 17.6.3:
+     * <p>Correction to the earlier note: the class first blamed here,
+     * {@code MelodyJumpPreference}, is NOT the detail page's row base class — 0.5.29 matched
+     * zero rows because of it. The real chain, from 17.6.3 smali, is
      * <pre>
-     *   if (TextUtils.isEmpty(q)) {     // q = the summary string
-     *       c.setVisibility(GONE);      // c = mTextContainer
-     *   }
+     *   DeviceInfoItem / AccountInfoItem / ... (all the detail sections)
+     *     extends MelodyUiCOUIJumpPreference
+     *       extends COUIJumpPreference
      * </pre>
-     * {@code a()} is called from {@code onFinishInflate}, so a row is hidden the moment it
-     * is inflated. For Bose every row ends up with an empty summary — the host has no
-     * catalog entry to derive text from — so every row is GONE. That is the real reason the
-     * page rendered as pure background, and the reason 0.5.27's force-reveal showed content
-     * for a moment before the host re-applied its own rule on a later update.
+     * {@code AbsItem} is the item-level base and has no visibility logic of its own.
      *
-     * <p>The fix is to supply the missing text, so the host's own visibility logic keeps
-     * the rows on screen. No polling, no fighting the layout.
+     * <p>Confirmed about {@code MelodyUiCOUIJumpPreference}: its {@code onBindViewHolder}
+     * contains
+     * <pre>
+     *   if (mIsHideJumpView) v = GONE; else v = VISIBLE;
+     *   jumpView.setVisibility(v);
+     * </pre>
+     * so it hides the jump arrow, not the row. Whether an empty summary also collapses the
+     * row is NOT yet established — hence the row-class diagnostic emitted alongside this
+     * call, so the next run reports what is actually in the container instead of what we
+     * expect it to be.
      */
     private void fillDetailRowSummaries(Activity activity) {
         try {
             if (activity == null || activity.isFinishing()) return;
             ViewGroup container = findDetailContainer(activity);
             if (container == null) return;
+            boseRowClasses.clear();
             int filled = fillSummaries(container, 0);
+            MLog.event("bose.detail.row_classes",
+                    "found", boseRowClasses.size(),
+                    "classes", String.valueOf(boseRowClasses));
             if (filled > 0) {
                 MLog.event("bose.detail.summary_filled", "count", filled);
             }
@@ -2079,22 +2058,31 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    /** True when this view is a MelodyJumpPreference row or a subclass of it. */
+    /** True when this view is a MelodyUiCOUIJumpPreference row or a subclass of it. */
     private static boolean isJumpPreferenceRow(Object view) {
         if (view == null) return false;
         for (Class<?> type = view.getClass(); type != null; type = type.getSuperclass()) {
-            if ("com.oplus.melody.ui.widget.MelodyJumpPreference".equals(type.getName())) {
+            if ("com.oplus.melody.ui.widget.MelodyUiCOUIJumpPreference".equals(type.getName())) {
                 return true;
             }
         }
         return false;
     }
 
+    /** 0.5.29 diagnostic: which view classes actually live under the detail container. */
+    private static final java.util.Set<String> boseRowClasses =
+            java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
+
     private static int fillSummaries(View view, int depth) {
         if (view == null || depth > 8) return 0;
         int filled = 0;
+        if (depth <= 4) {
+            boseRowClasses.add(view.getClass().getName());
+        }
         if (isJumpPreferenceRow(view)) {
-            Object summary = readField(view, "q");
+            // androidx Preference stores the summary CharSequence here; the host clears it
+            // for a device it has no catalog entry for, and the row then lays out empty.
+            Object summary = readField(view, "mSummary");
             Object container = readField(view, "c");
             boolean empty = summary == null
                     || (summary instanceof CharSequence && ((CharSequence) summary).length() == 0);
