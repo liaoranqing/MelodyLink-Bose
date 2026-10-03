@@ -607,9 +607,15 @@ public final class HookModule extends XposedModule {
             // so that returns null and the page builds from a null config — which matches
             // the observed symptom exactly: the row attaches (container holds a
             // NestedScrollView) but stays empty.
-            hookAny(loader, "detailWhitelistLookup",
-                    "c9/a#a#1",
-                    "com.oplus.melody.common.util.V#a#3");
+            // 0.5.32: the class hooked here in 0.5.19 ("c9/a") was WRONG — R8 short names
+            // are not unique, and c9/a is a guide fragment. The only method in the whole APK
+            // that returns WhitelistConfigDTO is L6/a.a(String), and the list it matches
+            // against comes from L6/a.b() -> List<WhitelistConfigDTO> (built from
+            // WhitelistContentDO). Hooking b() is the better place anyway: injecting the
+            // entry there means every consumer sees a normal catalog row, instead of
+            // patching one call site.
+            hookNamed(loader, "L6/a", "b", 0, "whitelistConfigList");
+            hookNamed(loader, "L6/a", "a", 1, "detailWhitelistLookup");
             // The fragment that the callback is supposed to populate. Watching its lifecycle
             // tells us whether it is created at all once the config resolves.
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainFragment",
@@ -867,6 +873,13 @@ public final class HookModule extends XposedModule {
                             throw t;
                         }
                     }
+                    if ("whitelistConfigList".equals(label)) {
+                        // The catalog itself. Injecting here (rather than patching a single
+                        // lookup) means every consumer sees Bose as a normal product, so the
+                        // host builds its own detail sections instead of us drawing them.
+                        Object result = chain.proceed();
+                        return boseBonded() ? injectBoseCatalogEntry(result, loader) : result;
+                    }
                     if ("detailWhitelistLookup".equals(label)) {
                         // The decisive call: a null WhitelistConfigDTO means the page has no
                         // product to render, which is the whole blank-page story.
@@ -878,17 +891,15 @@ public final class HookModule extends XposedModule {
                                 "mac", String.valueOf(mac),
                                 "config", result == null ? "NULL" : result.getClass().getSimpleName(),
                                 "bose", isBoseTarget);
+                        if (isBoseTarget) pendingDetailMac = (String) mac;
                         if (result == null && isBoseTarget) {
-                            // Remember it, then supply a synthetic config so the host can
-                            // build its own page instead of us drawing one.
-                            pendingDetailMac = (String) mac;
-                            Object synthetic = buildSyntheticWhitelistConfig(loader, (String) mac);
-                            if (synthetic != null) {
-                                MLog.event("bose.detail.whitelist.synthesized",
-                                        "class", synthetic.getClass().getSimpleName());
-                                return synthetic;
-                            }
-                            MLog.event("bose.detail.whitelist.synth_failed");
+                            // The catalog entry is added in whitelistConfigList. If the match
+                            // still fails, the entry did not satisfy the matcher — report it
+                            // rather than fabricating a DTO here, so the next round tells us
+                            // what the matcher actually compared.
+                            MLog.event("bose.detail.whitelist.still_null",
+                                    "injected", boseCatalogInjected,
+                                    "mac", String.valueOf(mac));
                         }
                         return result;
                     }
@@ -1875,6 +1886,8 @@ public final class HookModule extends XposedModule {
     }
 
     private static volatile String pendingDetailMac;
+    /** One-shot guard so the Bose catalog entry is added exactly once per process. */
+    private static volatile boolean boseCatalogInjected;
 
     /**
      * Builds a minimal {@code WhitelistConfigDTO} so Melody's own detail page has something
@@ -1894,68 +1907,120 @@ public final class HookModule extends XposedModule {
      * <p>If construction fails we return null and the page stays exactly as it is now —
      * this is a best-effort fallback, never a new failure mode.
      */
-    private Object buildSyntheticWhitelistConfig(ClassLoader loader, String mac) {
+    /**
+     * Appends a Bose entry to Melody's product catalog.
+     *
+     * <p>0.5.32. The detail page builds its sections by matching the connected device against
+     * the catalog: {@code L6/a.a(mac)} reads {@code L6/a.b()} — a
+     * {@code List<WhitelistConfigDTO>} built from {@code WhitelistContentDO} — and returns the
+     * matching entry. Bose has no entry, so nothing matches and no section is ever created.
+     * 0.5.31's runtime dump confirmed it: the container held only seven classes, all of them
+     * part of the device-info header, and not a single preference row.
+     *
+     * <p>Rather than fabricate a DTO from its 16-argument constructor (0.5.29, which produced
+     * something the host could not use), this clones a real entry from the list — so all the
+     * fields the host actually reads (function flags, protocol type, Rssi thresholds, brand
+     * colour, version gates) carry the values of a device Melody genuinely supports. Only the
+     * identifying fields are rewritten to Bose. That is what makes the host build its own
+     * sections instead of us drawing them.
+     *
+     * <p>Per the user's steer: target Enco X4, not an older model, so there is no need to
+     * dodge the X3-era obfuscation.
+     */
+    private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
+        if (!(listResult instanceof java.util.List)) return listResult;
+        java.util.List<?> list = (java.util.List<?>) listResult;
         try {
-            Class<?> dtoClass = Class.forName(
-                    "com.oplus.melody.common.data.WhitelistConfigDTO", false, loader);
-            Object dto = null;
-            for (java.lang.reflect.Constructor<?> candidate : dtoClass.getDeclaredConstructors()) {
-                if (candidate.getParameterCount() != 16) continue;
-                candidate.setAccessible(true);
-                Class<?>[] types = candidate.getParameterTypes();
-                Object[] args = new Object[16];
-                for (int i = 0; i < 16; i++) args[i] = defaultFor(types[i]);
-                // The smali signature is
-                //   (String id, String name, List children, String brand, String uuid,
-                //    String type, Rssi, int coreFrom, int defaultColor, Function,
-                //    boolean, boolean, int, int, Integer protocolType, Map)
-                // so the String slots we care about are 0, 1, 3, 4, 5. The int slots stay
-                // at 0, which is a valid default for every one of them.
-                args[0] = mac;
-                args[1] = "Bose QC Ultra 2";
-                args[3] = "Bose";
-                args[4] = mac;
-                args[5] = "0";
-                dto = candidate.newInstance(args);
-                break;
+            if (!boseCatalogInjected) {
+                MLog.event("bose.catalog.probe",
+                        "size", list.size(),
+                        "sample", String.valueOf(list.isEmpty()
+                                ? "empty" : list.get(0).getClass().getName()));
+                if (list.isEmpty()) return listResult;
+                Object clone = cloneCatalogEntry(list.get(list.size() - 1), loader);
+                if (clone == null) {
+                    MLog.event("bose.catalog.clone_failed");
+                    return listResult;
+                }
+                @SuppressWarnings("unchecked")
+                java.util.List<Object> mutable = (java.util.List<Object>) list;
+                mutable.add(clone);
+                boseCatalogInjected = true;
+                MLog.event("bose.catalog.injected",
+                        "new_size", mutable.size(),
+                        "class", clone.getClass().getSimpleName(),
+                        "name", String.valueOf(readField(clone, "name")),
+                        "brand", String.valueOf(readField(clone, "brand")));
             }
-            if (dto == null) {
-                // No 16-arg constructor in this build — fall back to the no-arg one and set
-                // the fields directly.
-                java.lang.reflect.Constructor<?> empty = dtoClass.getDeclaredConstructor();
-                empty.setAccessible(true);
-                dto = empty.newInstance();
-                setIfPresent(dtoClass, dto, "id", mac);
-                setIfPresent(dtoClass, dto, "name", "Bose QC Ultra 2");
-                setIfPresent(dtoClass, dto, "brand", "Bose");
-                setIfPresent(dtoClass, dto, "uuid", mac);
-                setIfPresent(dtoClass, dto, "type", "0");
-            }
-            return dto;
         } catch (Throwable t) {
-            MLog.event("bose.detail.synth_error", "error", MLog.compactThrowable(t));
+            MLog.event("bose.catalog.error", "error", MLog.compactThrowable(t));
+        }
+        return listResult;
+    }
+
+    /**
+     * Copies every field of a catalog entry, then rewrites the identifying ones.
+     * Copies by value so the clone is independent of the original.
+     */
+    private Object cloneCatalogEntry(Object template, ClassLoader loader) {
+        try {
+            Class<?> type = template.getClass();
+            java.lang.reflect.Constructor<?> ctor = null;
+            for (java.lang.reflect.Constructor<?> candidate : type.getDeclaredConstructors()) {
+                if (candidate.getParameterCount() == 0) {
+                    ctor = candidate;
+                    break;
+                }
+            }
+            if (ctor == null) return null;
+            ctor.setAccessible(true);
+            Object copy = ctor.newInstance();
+
+            for (java.lang.reflect.Field field : allFields(type)) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                field.setAccessible(true);
+                try {
+                    Object value = field.get(template);
+                    if (value instanceof android.os.Parcelable) continue; // deep copy is not needed
+                    field.set(copy, value);
+                } catch (Throwable ignored) {
+                }
+            }
+            // Identify as Bose. uid=197609(liaoran) gid=197609 groups=197609 is what the catalog match keys on for some lookups and
+            //  is what the UI shows.
+            setIfPresent(type, copy, "name", "Bose QC Ultra 2");
+            setIfPresent(type, copy, "brand", "Bose");
+            if (pendingDetailMac != null) {
+                setIfPresent(type, copy, "uuid", pendingDetailMac);
+                setIfPresent(type, copy, "id", pendingDetailMac);
+            }
+            return copy;
+        } catch (Throwable t) {
+            MLog.event("bose.catalog.clone_error", "error", MLog.compactThrowable(t));
             return null;
         }
     }
 
-    private static Object defaultFor(Class<?> type) {
-        if (!type.isPrimitive()) return null;
-        if (type == boolean.class) return Boolean.FALSE;
-        if (type == int.class) return 0;
-        if (type == long.class) return 0L;
-        if (type == float.class) return 0f;
-        if (type == double.class) return 0d;
-        if (type == short.class) return (short) 0;
-        if (type == byte.class) return (byte) 0;
-        if (type == char.class) return (char) 0;
-        return null;
-    }
-
+    /**
+     * Sets a field by name, walking up the class chain.
+     *
+     * <p>WhitelistConfigDTO keeps its identity fields on the base class, so
+     * {@code getDeclaredField} on a subclass would not find them. 0.5.32 needs this to
+     * rewrite name/brand/id on a cloned entry whose concrete class is not the DTO itself.
+     */
     private static void setIfPresent(Class<?> type, Object instance, String field, Object value) {
         try {
-            java.lang.reflect.Field f = type.getDeclaredField(field);
-            f.setAccessible(true);
-            f.set(instance, value);
+            for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+                java.lang.reflect.Field f;
+                try {
+                    f = c.getDeclaredField(field);
+                } catch (NoSuchFieldException e) {
+                    continue;
+                }
+                f.setAccessible(true);
+                f.set(instance, value);
+                return;
+            }
         } catch (Throwable ignored) {
         }
     }
