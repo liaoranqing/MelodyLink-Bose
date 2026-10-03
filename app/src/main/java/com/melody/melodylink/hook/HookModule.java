@@ -755,6 +755,7 @@ public final class HookModule extends XposedModule {
                         projectSonyAncModeIntoDto(chain.getArg(0), result);
                         projectBoseBatteryIntoDto(chain.getArg(0), result);
                         projectBoseSpatialIntoDto(chain.getArg(0), result);
+                        projectBoseMasterTuningIntoDto(chain.getArg(0), result);
                         return result;
                     }
                     if ("melodyEarphoneLiveDataResponse".equals(label)
@@ -1334,25 +1335,31 @@ public final class HookModule extends XposedModule {
             // OneSpaceNoisePreference, and there it *is* the ANC mode switch we
             // hijack — hiding it would remove a feature the user relies on, so on
             // that page we only append below it.
-            boolean hideRow = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
+            // IMPORTANT: on the detail page NoiseReductionItem is BOTH the three-state
+            // ANC switch the user wants and an "open OPPO's page" row. Hiding it
+            // removed the ANC modes (reported as "三个耳机状态调节不见了"), so it
+            // stays visible on both pages; the slider is simply added next to it.
+            boolean detailPage = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
+            boolean hideRow = false;
             if (findPreferenceByKeyRecursive(group, BOSE_CNC_KEY)) {
                 if (hideRow) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
                 return;
             }
             Integer order = (Integer) invokeNoArg(noiseRow, "getOrder");
-            int sliderOrder = order == null ? -1 : order + 1;
+            // COUI renders a rounded card per contiguous run of rows; injecting at
+            // order+1 glued our rows into the neighbouring card (the "items stuck
+            // together" report). A gap of 10 starts a new card, which is what the
+            // stock list uses between sections.
+            int sliderOrder = order == null ? -1 : order + 10;
             if (addBoseCncPreference(group, loader, activity, sliderOrder)) {
                 addBoseWindSwitch(group, loader, activity, sliderOrder + 1);
-                addBoseExtraCategory(group, loader, activity, sliderOrder + 2);
-                if (hideRow) {
-                    setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
-                    for (int i = 0; i < 3; i++) {
-                        mainHandler.postDelayed(this::keepNoiseEffectRowHidden,
-                                i == 0 ? 300L : (i == 1 ? 1200L : 2600L));
-                    }
-                }
+                // The "Bose 音效" block (EQ + remaps + 6 mode slots + power) is long;
+                // on 通用设置 it duplicated the detail page and made the list
+                // unreadable, so it only goes into the earbud detail page.
+                if (detailPage) addBoseExtraCategory(group, loader, activity, sliderOrder + 2);
+                if (hideRow) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
                 log(Log.INFO, TAG, event("installed Bose CNC slider on "
-                        + (hideRow ? "detail" : "general settings") + " page"));
+                        + (detailPage ? "detail" : "general settings") + " page"));
             }
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose CNC slider install failed", t);
@@ -1507,6 +1514,22 @@ public final class HookModule extends XposedModule {
         // rebind stacked duplicates for the view's whole lifetime.
         if (boseAttachGuards.add(imageView)) {
             try {
+                // Last line of defence: the stock load lands after every timer we
+                // schedule, so restore our drawable right before the frame goes out
+                // when the current drawable is not the one we installed.
+                final Uri ourUri = Uri.fromFile(file);
+                boseInstalledUris.put(imageView, ourUri);
+                imageView.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+                    try {
+                        ImageView iv = (ImageView) v;
+                        if (!isBoseImagePinned(iv)) return;
+                        // Re-apply whenever the stock loader swapped the drawable out
+                        // under us; layout changes are exactly when that happens.
+                        if (!ourUri.equals(boseInstalledUris.get(iv))) return;
+                        iv.setImageURI(ourUri);
+                    } catch (Throwable ignored) {
+                    }
+                });
                 View.OnAttachStateChangeListener guard = new View.OnAttachStateChangeListener() {
                     @Override public void onViewAttachedToWindow(View v) {
                         mainHandler.postDelayed(() -> {
@@ -1533,6 +1556,15 @@ public final class HookModule extends XposedModule {
      * a recycled ImageView gets exactly one guard: setTag(int, Object) cannot be
      * used here because it demands a real resource id and throws otherwise.
      */
+    /**
+     * Tag slot holding the Uri we last installed, so the layout listener can tell
+     * "my drawable" from "the stock one". Uses a generated key via View.setTag
+     * on a per-view basis through a weak map instead of a resource id, which would
+     * require declaring one in the module's R class at runtime.
+     */
+    private static final java.util.Map<ImageView, android.net.Uri> boseInstalledUris =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<ImageView, android.net.Uri>());
+
     private static final java.util.Set<ImageView> boseAttachGuards =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
@@ -1552,11 +1584,51 @@ public final class HookModule extends XposedModule {
         try {
             imageView.setImageURI(Uri.fromFile(imageFile));
             imageView.setVisibility(View.VISIBLE);
+            // The stock header keeps its own spinner running above the artwork; it
+            // lives in the same layout, so sweep the neighbourhood for it instead of
+            // relying on the model field alone (it was often null on 通用设置).
+            stopLoadingSpinners(imageView);
             Object loading = loadingField == null ? null : readField(owner, loadingField);
             hideLoadingView(loading);
             if (loading instanceof View) ((View) loading).setVisibility(View.GONE);
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose image apply failed", t);
+        }
+    }
+
+    /**
+     * Cancels any loading animation found around the product-image view. The
+     * "转圈" the user reported is not the model field: it is a sibling view inside
+     * the header layout, so we walk the ancestors and cancel anything that looks
+     * like a progress spinner.
+     */
+    private static void stopLoadingSpinners(View start) {
+        try {
+            View parent = start.getParent() instanceof View ? (View) start.getParent() : null;
+            for (int depth = 0; parent != null && depth < 4; depth++, parent =
+                    parent.getParent() instanceof View ? (View) parent.getParent() : null) {
+                if (parent instanceof android.view.ViewGroup) {
+                    android.view.ViewGroup group = (android.view.ViewGroup) parent;
+                    for (int i = 0; i < group.getChildCount(); i++) {
+                        cancelSpinnerIfAny(group.getChildAt(i));
+                    }
+                }
+                hideLoadingView(parent);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void cancelSpinnerIfAny(View view) {
+        if (view == null) return;
+        String name = view.getClass().getName();
+        if (name.contains("Loading") || name.contains("Progress") || name.contains("Spin")
+                || name.contains("LoadingAnimation")) {
+            hideLoadingView(view);
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) cancelSpinnerIfAny(group.getChildAt(i));
         }
     }
 
@@ -2774,15 +2846,9 @@ public final class HookModule extends XposedModule {
             // instance as Melody adds it. 0.4.3 lost the slider whenever this
             // tree walk ran before the row existed. Here we only make sure the
             // dead-end "降噪效果" row stays hidden even if the add hook missed it.
-            if (hasBoseCnc) {
-                Object noiseRow = findPreferenceByTitle(screen, NOISE_EFFECT_TITLE);
-                // Only the detail-page card is a dead end; the identically titled
-                // row on "通用设置" is the live ANC switch and must stay visible.
-                if (noiseRow != null
-                        && NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) {
-                    setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
-                }
-            }
+            // The "降噪效果" row is deliberately left visible on both pages: it is
+            // the live three-state ANC switch we hijack. 0.4.5-0.4.9 hid it, which
+            // removed the ANC mode control the user relies on.
             if (!hasSonySettings && !hasHuaweiLowLatency) return;
             Object anchor = findPreferenceByTitle(screen, SOUND_QUALITY_TITLE);
             if (anchor == null) return;
@@ -3268,12 +3334,16 @@ public final class HookModule extends XposedModule {
                     eventNames[i], events[i], current);
         }
 
-        // --- Custom mode slots 5-10, each with its own CNC level.
+        // --- Custom mode slots 5-10. These are stored profiles: each slot keeps a
+        // name plus CNC/spatial/wind/ANC so a single tap can restore that combo.
+        // Writing a slot alone does not switch to it — that needs [31.3] START,
+        // which the volume-panel tile already does for modes 0-4.
+        addBoseModeSlotHint(category, loader, activity, order + 7);
         for (int slot = com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST;
                 slot <= com.melody.melodylink.bose.BoseBmap.MODE_SLOT_LAST; slot++) {
             int offset = 6 + (slot - com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST);
             int level = shared != null && shared.length > offset ? shared[offset] : -1;
-            addBoseModeSlotRow(category, loader, activity, order + 7 + slot, slot, level);
+            addBoseModeSlotRow(category, loader, activity, order + 8 + slot, slot, level);
         }
 
         // --- Auto-off timer + power off.
@@ -3338,6 +3408,26 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    /**
+     * A plain, non-switch preference row for "tap to choose" entries.
+     *
+     * COUISwitchPreference must not be used here: its click helper
+     * (COUISwitchPreferenceClickHelper) invokes the listener as a
+     * boolean-returning callback, so a void onClick proxy made the process die
+     * with "Expected to unbox a 'boolean' primitive type but was returned null"
+     * on every tap (10 crashes in the 0.4.9 report).
+     */
+    private static Object newActionPreference(ClassLoader loader, Context context) {
+        for (String typeName : new String[]{
+                "com.oplus.melody.common.widget.MelodyPreference",
+                "com.coui.appcompat.preference.COUIPreference",
+                "androidx.preference.Preference"}) {
+            Object preference = newPreference(loader, typeName, context);
+            if (preference != null) return preference;
+        }
+        return null;
+    }
+
     private static ClassLoader classLoaderOf(Class<?> type) {
         ClassLoader loader = type.getClassLoader();
         return loader == null ? HookModule.class.getClassLoader() : loader;
@@ -3346,9 +3436,7 @@ public final class HookModule extends XposedModule {
     /** One Action-button event row: tapping opens a list of supported actions. */
     private void addBoseButtonRow(Object parent, ClassLoader loader, Activity activity,
             int order, String label, final int event, int currentAction) {
-        Object row = newPreference(loader,
-                "com.oplus.melody.ui.component.detail.moresetting.MoreSettingItem", activity);
-        if (row == null) row = newSwitchPreference(loader, activity);
+        Object row = newActionPreference(loader, activity);
         if (row == null) return;
         setPreferenceValue(row, "setKey", "melodylink.bose.btn." + event);
         setPreferenceValue(row, "setTitle", label);
@@ -3375,7 +3463,12 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseButtonListener";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (!"onClick".equals(method.getName())) return null;
+                    if (!"onClick".equals(method.getName())) {
+                        // Void and primitive-returning callbacks share one proxy:
+                        // returning null crashes the app when the caller unboxes a
+                        // boolean, so hand back a type-appropriate default.
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
+                    }
                     showBoseActionPicker(row, event);
                     return null;
                 });
@@ -3415,6 +3508,25 @@ public final class HookModule extends XposedModule {
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose action picker failed", t);
         }
+    }
+
+    /** Explains what the mode slots are, so the six sliders are not a mystery. */
+    private void addBoseModeSlotHint(Object parent, ClassLoader loader, Activity activity,
+            int order) {
+        Object hint = newPreference(loader,
+                "com.oplus.melody.common.widget.MelodyPreference", activity);
+        if (hint == null) hint = newActionPreference(loader, activity);
+        if (hint == null) return;
+        setPreferenceValue(hint, "setKey", "melodylink.bose.slot.hint");
+        setPreferenceValue(hint, "setTitle", "\u6a21\u5f0f\u69fd 5-10");
+        setPreferenceValue(hint, "setSummary",
+                "\u4f60\u53ef\u4ee5\u628a\u964d\u566a\u7b49\u7ea7\u5b58\u6210\u591a\u7ec4"
+                        + "\u914d\u7f6e\uff0c\u5728\u97f3\u91cf\u9762\u677f\u78c1\u8d34"
+                        + "\u5207\u6362\u6a21\u5f0f\u65f6\u751f\u6548");
+        setPreferenceValue(hint, "setSelectable", Boolean.FALSE);
+        setPreferenceValue(hint, "setPersistent", false);
+        if (order >= 0) setPreferenceValue(hint, "setOrder", order);
+        addPreference(parent, hint, loader);
     }
 
     /** One custom mode slot: name is fixed, CNC level is a slider. */
@@ -3469,7 +3581,7 @@ public final class HookModule extends XposedModule {
 
     /** Auto-off timer row: cycles through the firmware's preset minute values. */
     private void addBoseStandbyRow(Object parent, ClassLoader loader, Activity activity, int order) {
-        Object row = newSwitchPreference(loader, activity);
+        Object row = newActionPreference(loader, activity);
         if (row == null) return;
         setPreferenceValue(row, "setKey", "melodylink.bose.standby");
         setPreferenceValue(row, "setTitle", "\u81ea\u52a8\u5173\u673a");
@@ -3497,7 +3609,12 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseStandby";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (!"onClick".equals(method.getName())) return null;
+                    if (!"onClick".equals(method.getName())) {
+                        // Void and primitive-returning callbacks share one proxy:
+                        // returning null crashes the app when the caller unboxes a
+                        // boolean, so hand back a type-appropriate default.
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
+                    }
                     int current = boseTransport.getStandbyMinutes();
                     int[] presets = com.melody.melodylink.bose.BoseBmap.STANDBY_MINUTES;
                     int next = presets[0];
@@ -3522,7 +3639,7 @@ public final class HookModule extends XposedModule {
 
     /** Power-off row with a confirmation step: the earbuds drop the link. */
     private void addBosePowerRow(Object parent, ClassLoader loader, Activity activity, int order) {
-        Object row = newSwitchPreference(loader, activity);
+        Object row = newActionPreference(loader, activity);
         if (row == null) return;
         setPreferenceValue(row, "setKey", "melodylink.bose.poweroff");
         setPreferenceValue(row, "setTitle", "\u5173\u673a");
@@ -3548,7 +3665,12 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBosePower";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (!"onClick".equals(method.getName())) return null;
+                    if (!"onClick".equals(method.getName())) {
+                        // Void and primitive-returning callbacks share one proxy:
+                        // returning null crashes the app when the caller unboxes a
+                        // boolean, so hand back a type-appropriate default.
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
+                    }
                     confirmBosePowerOff();
                     return null;
                 });
@@ -4513,6 +4635,26 @@ public final class HookModule extends XposedModule {
         updated |= writeIntField(dto, "headsetSpatialType", type);
         if (updated) {
             log(Log.INFO, TAG, event("projected Bose spatial type=" + type + " into Melody EarphoneDTO"));
+        }
+    }
+
+    /**
+     * Melody's "大师调音" (adaptive ear / game equalizer) is driven by three
+     * EarphoneDTO ints. OPPO implements them over its own SPP channel, which does
+     * not exist for a Bose device, so the switch stayed dead. Claiming the feature
+     * in the DTO makes the rows live; the actual DSP is ours — the 3-band EQ we
+     * already write to [1.7] — so the toggle is mirrored onto the EQ bands instead
+     * of being left as a no-op.
+     */
+    private void projectBoseMasterTuningIntoDto(Object address, Object dto) {
+        if (targetBoseDevice == null) return;
+        if (!isTargetAddress(address) || dto == null) return;
+        boolean updated = writeIntField(dto, "adaptiveEar", 1);
+        updated |= writeIntField(dto, "adaptiveVolume", 1);
+        updated |= writeIntField(dto, "gameEqualizerStatus", 1);
+        if (updated) {
+            log(Log.INFO, TAG,
+                    event("claimed Melody master-tuning flags for the Bose device"));
         }
     }
 
