@@ -87,6 +87,14 @@ public final class HookModule extends XposedModule {
     private static final String HUAWEI_LOW_LATENCY_SETTING_KEY = "melodylink.huawei.low_latency";
     private static final String SOUND_QUALITY_TITLE = "音质音效";
     private static final String BOSE_CNC_KEY = "melodylink.bose.cnc";
+    /**
+     * Key/tag of the 通用设置 copy of the CNC slider. The detail page uses
+     * {@link #BOSE_CNC_KEY} inside a PreferenceScreen, but the 通用设置 three-state row is a
+     * RecyclerView item, so the slider is attached to the view hierarchy and needs its own
+     * identity to stay idempotent across RecyclerView rebinds.
+     */
+    private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
+    private static final String CNC_ONESPACE_TAG = "bose_cnc_onespace";
     private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
     /**
@@ -165,6 +173,8 @@ public final class HookModule extends XposedModule {
     private final Map<SonyAdvancedSettingId, Object> advancedPreferences = new ConcurrentHashMap<>();
     private volatile Object huaweiLowLatencyPreference;
     private volatile Object boseCncPreference;
+    /** The 通用设置 copy, which lives in the view hierarchy rather than a screen. */
+    private volatile Object boseCncOneSpacePreference;
 
     /** The "降噪效果" row, captured in detailPreferenceAdd; its parent may be null then. */
     private volatile Object noiseEffectRow;
@@ -564,6 +574,12 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "i", 1, "sonyCardImage");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onBindViewHolder", 1, "sonyCardBind");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onShowAnimationEnd", 0, "sonyCardLoading");
+            // 通用设置 ANC three-state row (降噪/关闭/通透). Its onBindViewHolder is the only
+            // place that exposes the DeviceControlWidget in field d, i.e. the row the user
+            // sees; the slider has to be attached to that widget's parent. Unlike the detail
+            // page this row is a plain RecyclerView item, not a Preference, so it can never
+            // be reached through the preference-screen injection path.
+            hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceNoisePreference", "onBindViewHolder", 1, "onespaceNoiseBind");
             // Product image. Confirmed against Melody 17.6.3 smali: b(String) is the
             // 3D-model loader and c()Z is a low-memory check — neither touches the photo,
             // which is why 0.5.x reported a successful replacement that never showed up.
@@ -727,9 +743,20 @@ public final class HookModule extends XposedModule {
                 }
                 try {
                     captureRepository(label, chain);
-                    if ("sonyCardImage".equals(label) && replaceConfiguredProductImage(
-                            chain.getThisObject(), "b", "c", "d", "e", "d", "card")) {
-                        return null;
+                    if ("sonyCardImage".equals(label)) {
+                        // Bose: OneSpaceHeaderPreference.i(Lf9/b;) is the 通用设置 product
+                        // photo loader. 17.6.3 smali shows it reads getDetailImageRes(),
+                        // which is empty for a device with no catalog entry, so the host
+                        // never sets a drawable and the card stays blank. The Sony path
+                        // below only fires when a SonyDeviceConfig exists, so it never
+                        // covers Bose — this branch is what puts our photo there.
+                        if (replaceBoseOneSpaceHeaderImage(chain.getThisObject())) {
+                            return null;
+                        }
+                        if (replaceConfiguredProductImage(
+                                chain.getThisObject(), "b", "c", "d", "e", "d", "card")) {
+                            return null;
+                        }
                     }
                     if ("sonyDetailImage".equals(label)) {
                         // a() issues the Glide load, so the replacement must run after
@@ -758,6 +785,13 @@ public final class HookModule extends XposedModule {
                     if ("sonyCardLoading".equals(label) && activeSonyImageProfile != null) {
                         hideLoadingView(readField(chain.getThisObject(), "d"));
                         return null;
+                    }
+                    if ("onespaceNoiseBind".equals(label)) {
+                        // Runs on every RecyclerView rebind, so the attach is idempotent
+                        // (guarded by a marker tag) and the slider is never duplicated.
+                        Object result = chain.proceed();
+                        attachCncSliderUnderOneSpaceNoise(chain.getThisObject(), chain.getArg(0));
+                        return result;
                     }
                     if ("detailPreferenceAdd".equals(label)) {
                         Object preference = chain.getArg(0);
@@ -1469,7 +1503,10 @@ public final class HookModule extends XposedModule {
         if (activity == null) return false;
 
         boolean detailPage = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
-        if (detailPage) hideNoiseEffectRow();
+        // Hide the Enco-only "降噪效果" row where it is safe to do so. The method itself
+        // filters by class: it hides only the 通用设置 copy and leaves the detail page's
+        // copy visible, because that one anchors the section it lives in.
+        hideNoiseEffectRow();
 
         int anchorOrder = PrefRef.getOrder(noiseRow);
         int target = anchorOrder < 0 ? 0 : anchorOrder + 1;
@@ -1560,18 +1597,17 @@ public final class HookModule extends XposedModule {
         try {
             Object noiseRow = noiseEffectRow;
             if (noiseRow == null || !boseBonded()) return;
-            if (!NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) return;
-            // 0.5.11 evidence: evt=bose.detail.state reported anchor_visible=false on
-            // every attempt while the user still saw a fully blank detail page, and the
-            // 通用设置 page — which shares this anchor path but not the hide — rendered
-            // fine. COUI skips binding a preference whose visible flag is false, so
-            // hiding this row removed the only thing keeping the surrounding section
-            // alive. Restored to visible; the Enco ANC-intensity row stays until we know
-            // how to replace it with something functional.
-            PrefRef.setVisible(noiseRow, true);
-            MLog.event("bose.anco.row.shown", "key", PrefRef.getKey(noiseRow));
+            String className = noiseRow.getClass().getName();
+            // Only the 通用设置 (OneSpace) copy is hidden. The detail page's copy
+            // (NoiseReductionItem) stays visible: on that page this preference is the
+            // anchor the whole surrounding section hangs off, and 0.5.11 measured that
+            // hiding it made the entire section stop binding (see below).
+            if (!NOISE_ROW_CLASS_ONESPACE.equals(className)) return;
+            PrefRef.setVisible(noiseRow, false);
+            MLog.event("bose.anco.row.hidden", "key", PrefRef.getKey(noiseRow),
+                    "class", className);
         } catch (Throwable t) {
-            MLog.event("bose.anco.row.show_failed", "error", MLog.compactThrowable(t));
+            MLog.event("bose.anco.row.hide_failed", "error", MLog.compactThrowable(t));
         }
     }
 
@@ -2054,6 +2090,125 @@ public final class HookModule extends XposedModule {
         applyBoseImage(imageView, file, owner, "e");
         pinBoseImageView(imageView);
         MLog.event("bose.image.applied", "surface", "detail");
+    }
+
+    /**
+     * Puts the Bose product photo into the 通用设置 header card.
+     *
+     * <p>{@code OneSpaceHeaderPreference} (Melody 17.6.3, classes2.dex) holds the photo in
+     * field {@code e} (ImageView) and loads it in {@code i(Lf9/b;)} via
+     * {@code getDetailImageRes()} — a catalog lookup. A device with no catalog entry (which
+     * is every Bose) gets {@code null}, so the host leaves the ImageView empty and the card
+     * renders as a blank circle. This installs our asset instead.
+     *
+     * @return true when the photo was installed, so the caller skips the host's own load.
+     */
+    private boolean replaceBoseOneSpaceHeaderImage(Object owner) {
+        try {
+            if (!boseBonded()) return false;
+            if (!(owner instanceof View)) return false;
+            Object field = readField(owner, "e");
+            if (!(field instanceof ImageView)) {
+                MLog.event("bose.image.skip", "surface", "onespace", "reason", "no_image_view");
+                return false;
+            }
+            File file = materializeBoseImage();
+            if (file == null) {
+                MLog.event("bose.image.skip", "surface", "onespace", "reason", "asset_unavailable");
+                return false;
+            }
+            applyBoseImage((ImageView) field, file, owner, "e");
+            pinBoseImageView((ImageView) field);
+            MLog.event("bose.image.applied", "surface", "onespace");
+            return true;
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose 通用设置 photo install failed", t);
+            return false;
+        }
+    }
+
+    /**
+     * Attaches the Bose CNC (降噪等级) slider directly under the ANC three-state widget in
+     * the 通用设置 page.
+     *
+     * <p>The three-state control (降噪 / 关闭 / 通透) is a {@code DeviceControlWidget} in
+     * field {@code d} of {@code OneSpaceNoisePreference}; the dump of that page shows it as
+     * {@code noise_action_view} sitting above the preference list. It is a plain
+     * RecyclerView row, so the preference-screen injection used on the detail page cannot
+     * reach it — the slider has to be added to the view hierarchy instead.
+     *
+     * <p>Called on every {@code onBindViewHolder}, hence the tag guard: the host re-binds on
+     * scroll and on state changes, and a second slider would be a visible duplicate.
+     */
+    private void attachCncSliderUnderOneSpaceNoise(Object preference, Object holder) {
+        try {
+            if (!boseBonded()) return;
+            Object widgetField = readField(preference, "d");
+            if (!(widgetField instanceof View)) {
+                MLog.event("bose.cnc.onespace.skip", "reason", "no_widget");
+                return;
+            }
+            View widget = (View) widgetField;
+            ViewGroup parent = widget.getParent() instanceof ViewGroup
+                    ? (ViewGroup) widget.getParent() : null;
+            if (parent == null) {
+                MLog.event("bose.cnc.onespace.skip", "reason", "no_parent");
+                return;
+            }
+            if (parent.findViewWithTag(CNC_ONESPACE_TAG) != null) return;
+
+            Context context = widget.getContext();
+            Activity activity = findActivity(context);
+            if (activity == null) activity = detailActivity;
+            if (activity == null) {
+                MLog.event("bose.cnc.onespace.skip", "reason", "no_activity");
+                return;
+            }
+            ClassLoader loader = preference.getClass().getClassLoader();
+
+            Object seek = newPreference(loader,
+                    "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
+            if (seek == null) {
+                log(Log.WARN, TAG, event("Bose 通用设置 slider unavailable: COUI seekbar ctor failed"));
+                return;
+            }
+            setPreferenceValue(seek, "setKey", BOSE_CNC_ONESPACE_KEY);
+            setPreferenceValue(seek, "setTitle", "降噪等级");
+            setPreferenceValue(seek, "setPersistent", false);
+            setPreferenceValue(seek, "setPromptVolumePercent", Boolean.FALSE);
+            invokeInt(seek, "setBarMaxValue", 10);
+
+            int level = boseTransport.getCncLevel();
+            if (level < 0) {
+                int[] shared = MelodySharedStateStore.readBoseCncState(boseCncStateFile());
+                if (shared != null) level = shared[1];
+            }
+            if (level < 0) level = 3;
+            invokeInt(seek, "setProgress", level);
+            setPreferenceValue(seek, "setSummary", "效果强度 " + level + "/10");
+            installBoseCncListener(seek, loader);
+
+            View view = seek instanceof View ? (View) seek : null;
+            if (view == null) {
+                MLog.event("bose.cnc.onespace.skip", "reason", "not_a_view");
+                return;
+            }
+            view.setTag(CNC_ONESPACE_TAG);
+            ViewGroup.LayoutParams lp = view.getLayoutParams();
+            int width = parent.getWidth();
+            if (lp == null) {
+                lp = new ViewGroup.LayoutParams(
+                        width > 0 ? width : ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+            }
+            // Directly after the three-state widget = visually below 降噪/关闭/通透.
+            parent.addView(view, parent.indexOfChild(widget) + 1, lp);
+            boseCncOneSpacePreference = seek;
+            MLog.event("bose.cnc.onespace.attached", "level", level,
+                    "index", parent.indexOfChild(view));
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose 通用设置 slider attach failed", t);
+        }
     }
 
     private ImageView findDetailImageView(Object owner) {
@@ -4090,7 +4245,8 @@ public final class HookModule extends XposedModule {
     private volatile int lastCncSliderLevel = -2;
     private void updateBoseCncSlider() {
         Object slider = boseCncPreference;
-        if (slider == null) return;
+        Object oneSpaceSlider = boseCncOneSpacePreference;
+        if (slider == null && oneSpaceSlider == null) return;
         int level = boseTransport.getCncLevel();
         if (level < 0) {
             int[] shared = MelodySharedStateStore.readBoseCncState(boseCncStateFile());
@@ -4100,8 +4256,13 @@ public final class HookModule extends XposedModule {
         lastCncSliderLevel = level;
         final int value = level;
         mainHandler.post(() -> {
-            invokeInt(slider, "setProgress", value);
-            setPreferenceValue(slider, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + value + "/10");
+            // Both pages can be alive at once (detail is a separate Activity on top of the
+            // 通用设置 bottom sheet), so each copy is updated in its own right.
+            for (Object target : new Object[]{slider, oneSpaceSlider}) {
+                if (target == null) continue;
+                invokeInt(target, "setProgress", value);
+                setPreferenceValue(target, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + value + "/10");
+            }
         });
     }
 
