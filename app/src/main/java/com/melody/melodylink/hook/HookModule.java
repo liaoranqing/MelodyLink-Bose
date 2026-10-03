@@ -2376,36 +2376,39 @@ public final class HookModule extends XposedModule {
         return application == null ? null : MelodySharedStateStore.from(application).boseCncCommandFile();
     }
 
-    /** Cross-process Bose presence: any known MAC bonded (works in :fg too). */
-    @SuppressLint("MissingPermission")
     /**
-     * Is a Bose earbud reachable right now?
+     * Cross-process Bose presence, used from the :fg detail page where no
+     * in-memory device reference exists.
      *
-     * Two things were wrong before: getRemoteDevice() throws for an unknown MAC,
-     * and a single throw aborted the whole loop (0.5.0 report: the detail page
-     * injected nothing at all while another earbud was paired). Now every MAC is
-     * probed independently, and a live A2DP/ACL connection counts as well as a
-     * bond record.
+     * Layer 1 asks BluetoothAdapter. Layer 2 is the fallback that actually kept
+     * the slider alive in 0.4.3-0.4.9: our own state file, which the primary
+     * process writes only after a real BMAP session exists. The UI must never
+     * depend on layer 1 alone — that dependency is why the detail page could
+     * silently inject nothing.
      */
+    @SuppressLint("MissingPermission")
     private static boolean boseBonded() {
         try {
             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter == null || !adapter.isEnabled()) return false;
-            for (String mac : com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getKNOWN_MACS()) {
-                try {
-                    BluetoothDevice device = adapter.getRemoteDevice(mac);
-                    if (device == null) continue;
-                    if (device.getBondState() == BluetoothDevice.BOND_BONDED) return true;
-                    // Connected counts: a live ACL link proves the earbud is here
-                    // even when the bond record lives under a different profile.
-                    if (device.getConnectionState() == BluetoothDevice.STATE_CONNECTED) return true;
-                } catch (Throwable ignored) {
-                    // unknown MAC on this adapter — just try the next one
+            if (adapter != null && adapter.isEnabled()) {
+                for (String mac : com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getKNOWN_MACS()) {
+                    try {
+                        BluetoothDevice device = adapter.getRemoteDevice(mac);
+                        if (device == null) continue;
+                        if (device.getBondState() == BluetoothDevice.BOND_BONDED) return true;
+                        if (device.getConnectionState() == BluetoothDevice.STATE_CONNECTED) return true;
+                    } catch (Throwable ignored) {
+                        // getRemoteDevice throws for an unknown MAC; try the next one
+                    }
                 }
             }
         } catch (Throwable ignored) {
         }
-        return false;
+        try {
+            return MelodySharedStateStore.readBoseCncAddress(boseCncStateFile()) != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private void writeSharedSonyState() {
