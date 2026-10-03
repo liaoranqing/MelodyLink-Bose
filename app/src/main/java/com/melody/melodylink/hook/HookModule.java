@@ -965,6 +965,10 @@ public final class HookModule extends XposedModule {
                         MLog.event("bose.detail.whitelist",
                                 "mac", String.valueOf(mac),
                                 "config", result == null ? "NULL" : result.getClass().getSimpleName(),
+                                // 0.5.41: the lookup returns our entry, yet the page still
+                                // builds no sections. Dump the entry so we can see exactly
+                                // which fields the host would read.
+                                "dump", result == null ? "-" : describeDto(result),
                                 "bose", isBoseTarget);
                         if (isBoseTarget) pendingDetailMac = (String) mac;
                         if (result == null && isBoseTarget) {
@@ -2163,6 +2167,41 @@ public final class HookModule extends XposedModule {
         } catch (Throwable ignored) {
         }
         return false;
+    }
+
+    /**
+     * Field-by-field dump of a catalog entry.
+     *
+     * <p>0.5.41. The host returns our entry from its lookup but builds no sections from it, so
+     * the entry must be missing whatever the page keys on. Printing the entry makes that
+     * visible instead of guessable: collections show their size, so a null list or an empty
+     * one stands out immediately.
+     */
+    private static String describeDto(Object dto) {
+        if (dto == null) return "null";
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (java.lang.reflect.Field f : allFieldsOf(dto.getClass())) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object v = f.get(dto);
+                sb.append(f.getName()).append('=');
+                if (v == null) {
+                    sb.append("null");
+                } else if (v instanceof java.util.Collection) {
+                    sb.append('(').append(((java.util.Collection<?>) v).size()).append(')');
+                } else if (v instanceof java.util.Map) {
+                    sb.append('{').append(((java.util.Map<?, ?>) v).size()).append('}');
+                } else {
+                    sb.append(v);
+                }
+                sb.append(';');
+            }
+            String out = sb.toString();
+            return out.length() > 700 ? out.substring(0, 700) : out;
+        } catch (Throwable t) {
+            return "err:" + t.getClass().getSimpleName();
+        }
     }
 
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
