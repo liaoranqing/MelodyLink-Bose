@@ -3951,14 +3951,9 @@ public final class HookModule extends XposedModule {
             return;
         }
         Class<?> listenerType = listenerSetter.getParameterTypes()[0];
-        // Match the change callback by shape (Preference, Object) -> boolean and never
-        // return null: the host unboxes the result, so a null here kills the process.
         Method callback = null;
         for (Method candidate : listenerType.getMethods()) {
-            Class<?>[] params = candidate.getParameterTypes();
-            if (candidate.getReturnType() == Boolean.TYPE && params.length == 2
-                    && params[0].isAssignableFrom(androidx.preference.Preference.class)
-                    && !params[1].isPrimitive()) {
+            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
                 callback = candidate;
                 break;
             }
@@ -3968,10 +3963,8 @@ public final class HookModule extends XposedModule {
             if ("toString".equals(method.getName())) return "MelodyLinkSettingListener";
             if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
             if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-            if (changeCallback == null || !"onPreferenceChange".equals(method.getName())
-                    || args == null || args.length < 2 || !(args[1] instanceof Boolean)) {
-                return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
-            }
+            if (changeCallback == null || !method.getName().equals(changeCallback.getName())
+                    || args == null || args.length < 2 || !(args[1] instanceof Boolean)) return null;
             Boolean value = (Boolean) args[1];
             setPreferenceValue(preference, "setEnabled", false);
             if (isPrimaryProcess() && sonyTransport.isConnected()) {
