@@ -3,6 +3,19 @@ package com.melody.melodylink.hook;
 import android.util.Log;
 
 /**
+ * Sink installed by {@link HookModule} so events reach the LSPosed log.
+ *
+ * <p>Measured on 0.5.9: {@code android.util.Log} output from this module never appears in
+ * {@code /data/adb/lspd/log/modules_*.log}, while the inherited {@code XposedModule#log}
+ * does. libxposed is a compileOnly dependency supplied by the framework at runtime, so
+ * {@code MLog} cannot reach the framework object itself; instead HookModule — which extends
+ * {@code XposedModule} — hands over its working logger once at install time.
+ */
+interface LogSink {
+    void write(int level, String message);
+}
+
+/**
  * Structured module logging.
  *
  * <p>Two things this adds over a plain {@code Log.i} call, both learned the hard way while
@@ -25,12 +38,18 @@ final class MLog {
 
     static final String TAG = "MelodyLinkBose";
 
+    private static volatile LogSink SINK;
+
     private MLog() {
     }
 
-    /** {@code evt=<name> k=v k=v} — grep with {@code adb logcat -s MelodyLinkBose | grep 'evt='}. */
+    static void installSink(LogSink sink) {
+        SINK = sink;
+    }
+
+    /** {@code evt=<name> k=v k=v} — grep with {@code grep 'evt='} on the LSPosed module log. */
     static void event(String name, Object... kvPairs) {
-        Log.i(TAG, format(name, kvPairs));
+        write(Log.INFO, format(name, kvPairs));
     }
 
     /** Single-token throwable summary suitable as an event value. */
@@ -48,15 +67,29 @@ final class MLog {
     }
 
     static void w(String message) {
-        Log.w(TAG, message);
+        write(Log.WARN, message);
     }
 
     static void w(String message, Throwable t) {
-        Log.w(TAG, message, t);
+        write(Log.WARN, message + " | " + t);
     }
 
     static void e(String message, Throwable t) {
-        Log.e(TAG, message, t);
+        write(Log.ERROR, message + " | " + t);
+    }
+
+    /** Writes to android.util.Log always, and to the LSPosed log when a sink is installed. */
+    private static void write(int level, String message) {
+        try {
+            Log.println(level, TAG, message);
+        } catch (Throwable ignored) {
+        }
+        LogSink sink = SINK;
+        if (sink == null) return;
+        try {
+            sink.write(level, message);
+        } catch (Throwable ignored) {
+        }
     }
 
     private static String format(String name, Object... kvPairs) {

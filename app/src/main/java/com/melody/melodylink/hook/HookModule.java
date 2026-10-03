@@ -643,6 +643,10 @@ public final class HookModule extends XposedModule {
      * <p>Delayed: {@code su} spawns a shell, which must not happen on the hook-setup path.
      */
     private void startPersistentLogCapture() {
+        // Hand MLog the logger that actually reaches the LSPosed log. Measured on 0.5.9:
+        // MLog's own android.util.Log output never showed up in modules_*.log, so every
+        // structured event was invisible and the whole point of adding them was lost.
+        MLog.installSink((level, message) -> log(level, "MelodyLinkBose", message));
         Application application = currentApplication();
         if (application == null) return;
         mainHandler.postDelayed(() -> {
@@ -1347,10 +1351,12 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.inject.error", "error", MLog.compactThrowable(t));
                 return;
             }
+            if (attempt == 2 || attempt == 7) reportDetailPageState(attempt);
             if (attempt < 14) {
                 scheduleBoseInjection(attempt + 1);
             } else {
                 MLog.event("bose.inject.exhausted", "attempts", attempt + 1);
+                reportDetailPageState(attempt);
             }
         }, attempt == 0 ? 200L : 1000L);
     }
@@ -1505,6 +1511,52 @@ public final class HookModule extends XposedModule {
             MLog.event("bose.anco.row.hidden", "key", PrefRef.getKey(noiseRow));
         } catch (Throwable t) {
             MLog.event("bose.anco.row.hide_failed", "error", MLog.compactThrowable(t));
+        }
+    }
+
+    /**
+     * Dumps what the earbud detail page actually ended up rendering.
+     *
+     * <p>Added because 0.5.9 was still reported as a fully blank page while the log showed
+     * the host adding ~50 native preferences (firmware update, find-device, privacy, …).
+     * A tree that is populated but invisible means a rendering / layout-visibility problem,
+     * not an injection problem — the two need completely different fixes, so we log the
+     * actual state instead of assuming.
+     */
+    private void reportDetailPageState(int attempt) {
+        try {
+            Object row = noiseEffectRow;
+            if (row == null) {
+                MLog.event("bose.detail.no_anchor", "attempt", attempt);
+                return;
+            }
+            Object parent = PrefRef.getParent(row);
+            if (parent == null) {
+                MLog.event("bose.detail.anchor_detached", "attempt", attempt);
+                return;
+            }
+            StringBuilder keys = new StringBuilder();
+            int visible = 0;
+            int total = 0;
+            for (int i = 0; i < PrefRef.getPreferenceCount(parent); i++) {
+                Object pref = PrefRef.getPreference(parent, i);
+                if (pref == null) continue;
+                total++;
+                if (PrefRef.isVisible(pref)) visible++;
+                if (keys.length() > 0) keys.append(',');
+                String key = PrefRef.getKey(pref);
+                keys.append(key != null ? key : pref.getClass().getSimpleName());
+            }
+            MLog.event("bose.detail.state",
+                    "attempt", attempt,
+                    "total", total,
+                    "visible", visible,
+                    "anchor", PrefRef.getKey(row),
+                    "anchor_visible", PrefRef.isVisible(row),
+                    "injected", PrefRef.findPreferenceRecursive(parent, BOSE_CNC_KEY) != null,
+                    "keys", keys);
+        } catch (Throwable t) {
+            MLog.event("bose.detail.state_error", "error", MLog.compactThrowable(t));
         }
     }
 
