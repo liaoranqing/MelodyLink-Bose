@@ -1393,14 +1393,21 @@ public final class HookModule extends XposedModule {
             String surface,
             ImageView fallbackImageView
     ) {
-        return replaceSonyProductImage(owner, viewModelField, addressField, nameField,
-                imageField, loadingField, surface, fallbackImageView)
-                || replaceHuaweiProductImage(owner, viewModelField, addressField, nameField,
-                imageField, loadingField, surface, fallbackImageView)
-                || replaceXiaomiProductImage(owner, viewModelField, addressField, nameField,
-                imageField, loadingField, surface, fallbackImageView)
-                || replaceBoseProductImage(owner, viewModelField, addressField, nameField,
-                imageField, loadingField, surface, fallbackImageView);
+        try {
+            return replaceSonyProductImage(owner, viewModelField, addressField, nameField,
+                    imageField, loadingField, surface, fallbackImageView)
+                    || replaceHuaweiProductImage(owner, viewModelField, addressField, nameField,
+                    imageField, loadingField, surface, fallbackImageView)
+                    || replaceXiaomiProductImage(owner, viewModelField, addressField, nameField,
+                    imageField, loadingField, surface, fallbackImageView)
+                    || replaceBoseProductImage(owner, viewModelField, addressField, nameField,
+                    imageField, loadingField, surface, fallbackImageView);
+        } catch (Throwable t) {
+            // Hooks run inside Melody's own call stack: an exception escaping here
+            // takes the whole page process down. Never let that happen.
+            log(Log.WARN, TAG, "product image replacement aborted on " + surface, t);
+            return false;
+        }
     }
 
     /** Show the bundled Bose QC Earbuds Ultra 2 photo on the masked detail/card. */
@@ -1448,10 +1455,16 @@ public final class HookModule extends XposedModule {
         if (imageView == null) return;
         File file = materializeBoseImage();
         if (file == null) return;
-        // setTag(Object) is used deliberately: setTag(int,Object) requires a real
-        // resource id and throws otherwise.
-        if (!imageView.getTag().equals(BOSE_IMAGE_TAG)) {
-            imageView.setTag(BOSE_IMAGE_TAG);
+        // Mark the view. getTag() is null on a fresh view, so the constant must be
+        // on the left of the comparison — 0.4.6 crashed the detail page on
+        // "view.getTag().equals(...)" with an NPE. setTag(Object) is deliberate:
+        // setTag(int,Object) requires a real resource id and throws otherwise.
+        try {
+            Object tag = imageView.getTag();
+            if (!BOSE_IMAGE_TAG.equals(tag)) imageView.setTag(BOSE_IMAGE_TAG);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose image tagging failed", t);
+            return;
         }
         for (int i = 0; i < 4; i++) {
             final long delay = i == 0 ? 200L : (i == 1 ? 800L : (i == 2 ? 1800L : 3500L));
@@ -1465,26 +1478,40 @@ public final class HookModule extends XposedModule {
                 }
             }, delay);
         }
-        // Also re-apply once per attach/detach cycle: the stock header rebinds on
-        // every scroll settle, which is exactly when the generic photo returns.
-        try {
-            View.OnAttachStateChangeListener guard = new View.OnAttachStateChangeListener() {
-                @Override public void onViewAttachedToWindow(View v) {
-                    mainHandler.postDelayed(() -> {
-                        try {
-                            if (isBoseImagePinned((ImageView) v)) {
-                                ((ImageView) v).setImageURI(Uri.fromFile(file));
+        // Re-apply once per attach cycle: the stock header rebinds on every scroll
+        // settle, which is exactly when the generic photo returns. Tracked in a weak
+        // set so the listener lands at most once per view — adding it on every
+        // rebind stacked duplicates for the view's whole lifetime.
+        if (boseAttachGuards.add(imageView)) {
+            try {
+                View.OnAttachStateChangeListener guard = new View.OnAttachStateChangeListener() {
+                    @Override public void onViewAttachedToWindow(View v) {
+                        mainHandler.postDelayed(() -> {
+                            try {
+                                if (!isBoseImagePinned((ImageView) v)) return;
+                                File latest = materializeBoseImage();
+                                if (latest == null) return;
+                                ((ImageView) v).setImageURI(Uri.fromFile(latest));
+                            } catch (Throwable ignored) {
                             }
-                        } catch (Throwable ignored) {
-                        }
-                    }, 350L);
-                }
-                @Override public void onViewDetachedFromWindow(View v) { }
-            };
-            imageView.addOnAttachStateChangeListener(guard);
-        } catch (Throwable ignored) {
+                        }, 350L);
+                    }
+                    @Override public void onViewDetachedFromWindow(View v) { }
+                };
+                imageView.addOnAttachStateChangeListener(guard);
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "Bose image attach guard failed", t);
+            }
         }
     }
+
+    /**
+     * Views that already carry the attach listener. A weak set keyed by view, so
+     * a recycled ImageView gets exactly one guard: setTag(int, Object) cannot be
+     * used here because it demands a real resource id and throws otherwise.
+     */
+    private static final java.util.Set<ImageView> boseAttachGuards =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
     /** Marker tag identifying a product-image view pinned to the Bose photo. */
     private static final String BOSE_IMAGE_TAG = "melodylink.bose.image";
@@ -1619,8 +1646,17 @@ public final class HookModule extends XposedModule {
     private void replaceSonyDetailImageLater(Object owner) {
         if (!(owner instanceof View)) return;
         View view = (View) owner;
-        view.post(() -> replaceConfiguredProductImage(owner, "g", "b", "c", "d", "e", "detail",
-                findDetailImageView(owner)));
+        // The page can be gone by the time this runs (0.4.6 crashed the detail page
+        // from here), so every step is guarded and nothing propagates.
+        view.post(() -> {
+            try {
+                if (!view.isAttachedToWindow()) return;
+                replaceConfiguredProductImage(owner, "g", "b", "c", "d", "e", "detail",
+                        findDetailImageView(owner));
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "Bose detail image replacement skipped", t);
+            }
+        });
     }
 
     private SonyDeviceConfig findSonyImageProfile(String address, String name) {
