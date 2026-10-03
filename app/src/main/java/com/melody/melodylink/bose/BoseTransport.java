@@ -396,15 +396,34 @@ public final class BoseTransport {
 
     /** Write one [31.10] settings byte (e.g. SETTING_SPATIAL) via a short session. */
     public void writeSetting(int index, int value) {
+        writeSetting(index, value, null);
+    }
+
+    /**
+     * Settings writes run on the worker thread, so the outcome is only known
+     * later. Callers that must report success (e.g. the injected wind-block
+     * switch) pass a callback; it is invoked on the main thread with the
+     * SETGET-confirmed result.
+     */
+    public void writeSetting(int index, int value, final SettingResult callback) {
         int myGen = generation.incrementAndGet();
         active = true;
         linkDead = false;
         post(new Runnable() {
-            @Override public void run() { runSettingWrite(myGen, index, value); }
+            @Override public void run() { runSettingWrite(myGen, index, value, callback); }
         });
     }
 
+    /** Result callback for asynchronous settings writes. */
+    public interface SettingResult {
+        void onResult(boolean success, int index, int value);
+    }
+
     private void runSettingWrite(int myGen, int index, int value) {
+        runSettingWrite(myGen, index, value, null);
+    }
+
+    private void runSettingWrite(int myGen, int index, int value, final SettingResult callback) {
         if (myGen != generation.get()) return; // superseded before the socket handshake
         BluetoothSocket opened = null;
         try {
@@ -414,6 +433,7 @@ public final class BoseTransport {
             listenerOnUi(new Runnable() {
                 @Override public void run() { listener.onLog(reason); }
             });
+            notifySettingResult(callback, false, index, value);
             return;
         }
         final BluetoothSocket current = opened;
@@ -435,9 +455,18 @@ public final class BoseTransport {
             listenerOnUi(new Runnable() {
                 @Override public void run() { listener.onLog(result); }
             });
+            notifySettingResult(callback, ok, index, value);
         } finally {
             closeSocket();
         }
+    }
+
+    private void notifySettingResult(
+            final SettingResult callback, final boolean ok, final int index, final int value) {
+        if (callback == null) return;
+        listenerOnUi(new Runnable() {
+            @Override public void run() { callback.onResult(ok, index, value); }
+        });
     }
 
     private void runBatteryRead(int myGen) {

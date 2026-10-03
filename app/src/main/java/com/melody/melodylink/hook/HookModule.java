@@ -3089,7 +3089,21 @@ public final class HookModule extends XposedModule {
                         if (device != null) {
                             boseTransport.cacheWindBlock(value);
                             boseTransport.writeSetting(
-                                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND, value);
+                                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND,
+                                    value, (success, index, written) -> {
+                                        if (!success) {
+                                            boseTransport.cacheWindBlock(-1);
+                                            lastWindSwitchState = -1;
+                                            mainHandler.post(() -> {
+                                                setPreferenceValue(preference, "setChecked", !on);
+                                                setPreferenceValue(preference, "setSummary",
+                                                        "\u6297\u98ce\u566a\u672a\u751f\u6548"
+                                                                + "\uff08\u56fa\u4ef6\u53ef\u80fd\u4e0d\u652f\u6301\uff09");
+                                                log(Log.WARN, TAG,
+                                                        "Bose wind block rejected by firmware; switch reverted");
+                                            });
+                                        }
+                                    });
                         }
                     } else {
                         String address = targetAddress == null
@@ -3524,17 +3538,25 @@ public final class HookModule extends XposedModule {
         }
         int level = Math.max(0, Math.min(10, command.level));
         if (command.wind >= 0) {
-            // The switch changed: read-modify-write [31.10] so the level we echo
-            // back does not clobber the wind byte on the earbud.
-            int wind = command.wind > 0 ? 1 : 0;
+            // The switch changed: write only the wind byte so the level we echo
+            // back does not clobber it (and vice versa).
+            final int wind = command.wind > 0 ? 1 : 0;
             log(Log.INFO, TAG, event("executing forwarded Bose wind write value=" + wind));
             boseTransport.cacheWindBlock(wind);
-            if (boseTransport.writeSetting(
-                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND, wind)) {
-                log(Log.INFO, TAG, event("Bose wind block " + (wind != 0 ? "enabled" : "disabled")));
-            } else {
-                log(Log.WARN, TAG, event("Bose wind block write failed (firmware may ignore it)"));
-            }
+            boseTransport.writeSetting(
+                    com.melody.melodylink.bose.BoseDeviceConfig.SETTING_WIND, wind,
+                    (success, index, written) -> {
+                        if (success) {
+                            log(Log.INFO, TAG, event("Bose wind block "
+                                    + (written != 0 ? "enabled" : "disabled")));
+                        } else {
+                            // The firmware accepted the frame but may not have a
+                            // wind path on in-true-wireless models; report honestly.
+                            log(Log.WARN, TAG, event("Bose wind block write failed"
+                                    + " (firmware may ignore it on this model)"));
+                            boseTransport.cacheWindBlock(-1);
+                        }
+                    });
         }
         if (boseTransport.getCncLevel() != level) {
             log(Log.INFO, TAG, event("executing forwarded Bose CNC level write level=" + level));
