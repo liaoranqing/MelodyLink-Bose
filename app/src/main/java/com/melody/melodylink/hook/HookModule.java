@@ -4739,24 +4739,94 @@ public final class HookModule extends XposedModule {
                 batteryStatusClass = Class.forName(
                         "com.oplus.melody.model.repository.earphone.K$a", false, loader);
             }
-            Constructor<?> constructor = batteryStatusClass.getConstructor(int.class, boolean.class);
-            boolean updated = false;
-            updated |= setBatteryStatus(status, "setLeftBatteryStatus", constructor, state.getBattery().get(BatteryPart.LEFT));
-            updated |= setBatteryStatus(status, "setRightBatteryStatus", constructor, state.getBattery().get(BatteryPart.RIGHT));
-            updated |= setBatteryStatus(status, "setBoxBatteryStatus", constructor, state.getBattery().get(BatteryPart.CASE));
-            if (!updated) {
-                log(Log.INFO, TAG, event("Sony battery publish retained previous Melody values (" + reason + ")"));
-                return;
-            }
-            Method notifyChanged = null;
-            for (String candidate : new String[]{"x1", "B1"}) {
+            // Melody 17.6.3: the per-part battery model is K$a with a single
+            // `int battery` field and a `setBattery(I)` setter. The older
+            // setLeftBatteryStatus / setRightBatteryStatus / setBoxBatteryStatus trio this
+            // code used no longer exists — every publish threw
+            // NoSuchMethodException, and because the throw escaped publishBatteryState the
+            // repository was never notified. Verified in the 17.6.3 smali:
+            //   .method public constructor <init>(IZ)V
+            //   .method public final setBattery(I)V
+            // Constructors are tried in order; the first that exists wins.
+            Constructor<?> constructor = null;
+            for (Class<?>[] signature : new Class<?>[][]{
+                    {int.class, boolean.class}, {int.class}, {}}) {
                 try {
-                    notifyChanged = repository.getClass().getDeclaredMethod(candidate, String.class);
+                    constructor = batteryStatusClass.getConstructor(signature);
                     break;
                 } catch (NoSuchMethodException ignored) {
                 }
             }
-            if (notifyChanged == null) throw new NoSuchMethodException("battery notify (x1/B1)");
+            if (constructor == null) {
+                log(Log.WARN, TAG, event("battery status constructor unavailable on "
+                        + batteryStatusClass.getName()));
+                return;
+            }
+            Class<?>[] signature = constructor.getParameterTypes();
+            boolean updated = false;
+            // One part per publish is enough: the earbud detail page shows a single
+            // battery figure for this device class, and a failure on one part must not
+            // abort the whole publish.
+            BatteryValue[] parts = {state.getBattery().get(BatteryPart.LEFT),
+                    state.getBattery().get(BatteryPart.RIGHT),
+                    state.getBattery().get(BatteryPart.CASE)};
+            for (BatteryValue part : parts) {
+                if (part == null) continue;
+                try {
+                    Object batteryStatus = signature.length == 0
+                            ? constructor.newInstance()
+                            : (signature.length == 1
+                            ? constructor.newInstance(part.getPercent())
+                            : constructor.newInstance(part.getPercent(), part.getCharging()));
+                    Method setter = findBatterySetter(batteryStatusClass);
+                    if (setter == null) {
+                        log(Log.WARN, TAG, event("no setBattery on " + batteryStatusClass.getName()));
+                        return;
+                    }
+                    setter.invoke(batteryStatus, part.getPercent());
+                    Method outer = null;
+                    for (Method candidate : allMethods(status.getClass())) {
+                        if (candidate.getName().equals("setBatteryStatus")
+                                && candidate.getParameterTypes().length == 1
+                                && candidate.getParameterTypes()[0].isInstance(batteryStatus)) {
+                            outer = candidate;
+                            break;
+                        }
+                    }
+                    if (outer == null) {
+                        log(Log.WARN, TAG, event("no setBatteryStatus on "
+                                + status.getClass().getName()));
+                        return;
+                    }
+                    outer.invoke(status, batteryStatus);
+                    updated = true;
+                    break;   // one successful part is enough to notify
+                } catch (Throwable t) {
+                    log(Log.WARN, TAG, "battery part publish failed", t);
+                }
+            }
+            if (!updated) {
+                log(Log.INFO, TAG, event("Sony battery publish retained previous Melody values (" + reason + ")"));
+                return;
+            }
+
+            Method notifyChanged = null;
+            for (String notifyName : new String[]{"x1", "B1"}) {
+                for (Method candidate : allMethods(repository.getClass())) {
+                    if (candidate.getName().equals(notifyName)
+                            && candidate.getParameterTypes().length == 1
+                            && candidate.getParameterTypes()[0] == String.class) {
+                        notifyChanged = candidate;
+                        break;
+                    }
+                }
+                if (notifyChanged != null) break;
+            }
+            if (notifyChanged == null) {
+                log(Log.WARN, TAG, event("battery notify method missing on "
+                        + repository.getClass().getName()));
+                return;
+            }
             notifyChanged.setAccessible(true);
             notifyChanged.invoke(repository, address);
             log(Log.INFO, TAG, event("published Sony battery through Melody V/U.x1 (" + reason + ")"));
@@ -4765,17 +4835,15 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private static boolean setBatteryStatus(
-            Object status,
-            String setterName,
-            Constructor<?> constructor,
-            BatteryValue battery
-    ) throws Exception {
-        if (battery == null) return false;
-        Object batteryStatus = constructor.newInstance(battery.getPercent(), battery.getCharging());
-        Method setter = status.getClass().getMethod(setterName, batteryStatus.getClass());
-        setter.invoke(status, batteryStatus);
-        return true;
+    /** The {@code setBattery(I)} setter on a K$a style battery holder. */
+    private static Method findBatterySetter(Class<?> batteryStatusClass) {
+        for (Method m : allMethods(batteryStatusClass)) {
+            if (m.getName().equals("setBattery") && m.getParameterTypes().length == 1
+                    && m.getParameterTypes()[0] == int.class) {
+                return m;
+            }
+        }
+        return null;
     }
 
     private static Object findProfile(Object value, String id, String name) {
