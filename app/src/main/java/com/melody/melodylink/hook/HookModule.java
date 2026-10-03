@@ -1834,7 +1834,16 @@ public final class HookModule extends XposedModule {
                 if (group.getChildCount() > shown) sb.append(" +more");
             }
             sb.append(' ').append(view.getWidth()).append('x').append(view.getHeight());
-            if (view.getVisibility() != View.VISIBLE) sb.append(" HIDDEN");
+            if (view.getVisibility() != View.VISIBLE) {
+                sb.append(" HIDDEN(vis=").append(view.getVisibility()).append(')');
+            }
+            // 0.5.21: the tree reported a fully populated NestedScrollView while the
+            // screen stayed blank and uiautomator saw zero children. That combination
+            // means the views belong to a hierarchy that is no longer in the window, so
+            // the attach state and the owning context are the discriminating facts.
+            if (!view.isAttachedToWindow()) sb.append(" DETACHED");
+            float alpha = view.getAlpha();
+            if (alpha <= 0.01f) sb.append(" ALPHA=").append(alpha);
             sb.append(']');
         } catch (Throwable t) {
             sb.append("[unreadable: ").append(t.getClass().getSimpleName()).append(']');
@@ -1942,6 +1951,13 @@ public final class HookModule extends XposedModule {
             }
             MLog.event("bose.container.state",
                     "stage", stage,
+                    // 0.5.21: children=1 with a populated tree but a blank screen means the
+                    // container we are measuring is not the one the user is looking at. The
+                    // activity class and window token settle that immediately.
+                    "activity", activity.getClass().getSimpleName(),
+                    "token", String.valueOf(activity.getWindowToken()),
+                    "shown", activity.getWindow().getDecorView().isShown(),
+                    "finishing", activity.isFinishing(),
                     "children", container.getChildCount(),
                     "visible", container.getVisibility(),
                     "size", container.getWidth() + "x" + container.getHeight(),
