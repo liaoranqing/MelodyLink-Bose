@@ -548,10 +548,14 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "i", 1, "sonyCardImage");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onBindViewHolder", 1, "sonyCardBind");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onShowAnimationEnd", 0, "sonyCardLoading");
-            hookAny(loader, "sonyDetailImage",
-                    "com.oplus.melody.ui.widget.MelodyDetailModelView#c#1",
-                    "com.oplus.melody.ui.widget.MelodyDetailModelView#b#1");
-            hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "d", 0, "sonyDetailPlaceholder");
+            // Product image. Confirmed against Melody 17.6.3 smali: b(String) is the
+            // 3D-model loader and c()Z is a low-memory check — neither touches the photo,
+            // which is why 0.5.x reported a successful replacement that never showed up.
+            // The Glide call lives in a() (void), and e() — the branch taken when the
+            // product has no detail source, i.e. every non-catalog device like Bose —
+            // invokes a(). So a() is the one place that always runs.
+            hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "a", 0, "sonyDetailImage");
+            hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "d", 1, "sonyDetailPlaceholder");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "onFinishInflate", 0, "sonyDetailInflated");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "setViewModel", 1, "sonyDetailViewModel");
             hookNamed(loader, "androidx.preference.PreferenceGroup", "f", 1, "detailPreferenceAdd");
@@ -707,15 +711,18 @@ public final class HookModule extends XposedModule {
                             chain.getThisObject(), "b", "c", "d", "e", "d", "card")) {
                         return null;
                     }
-                    if ("sonyDetailImage".equals(label) && replaceConfiguredProductImage(
-                            chain.getThisObject(), "g", "b", "c", "d", "e", "detail",
-                            findDetailImageView(chain.getThisObject()))) {
-                        return null;
+                    if ("sonyDetailImage".equals(label)) {
+                        // a() issues the Glide load, so the replacement must run after
+                        // proceed() or Glide overwrites it. This is the path a non-catalog
+                        // device always takes, because e() calls a() directly.
+                        Object result = chain.proceed();
+                        replaceBoseDetailImageNow(chain.getThisObject());
+                        return result;
                     }
-                    if ("sonyDetailPlaceholder".equals(label) && replaceConfiguredProductImage(
-                            chain.getThisObject(), "g", "b", "c", "d", "e", "detail",
-                            findDetailImageView(chain.getThisObject()))) {
-                        return null;
+                    if ("sonyDetailPlaceholder".equals(label)) {
+                        Object result = chain.proceed();
+                        replaceBoseDetailImageNow(chain.getThisObject());
+                        return result;
                     }
                     if ("sonyDetailInflated".equals(label) || "sonyDetailViewModel".equals(label)) {
                         Object result = chain.proceed();
@@ -1877,6 +1884,42 @@ public final class HookModule extends XposedModule {
         } catch (Throwable ignored) {
         }
         if (loadingView instanceof View) ((View) loadingView).setVisibility(View.GONE);
+    }
+
+    /**
+     * Replaces the product photo on the earbud detail header.
+     *
+     * <p>Field {@code d} on MelodyDetailModelView is the ImageView that actually shows the
+     * product photo — confirmed in the 17.6.3 smali. The earlier implementation resolved the
+     * view through resource ids and hooked {@code b}/{@code c}, which turned out to be the 3D
+     * model loader and a low-memory check respectively; that is why the log kept reporting a
+     * successful replacement while nothing appeared.
+     *
+     * <p>Glide loads into that view asynchronously, so the assignment is re-asserted several
+     * times after the host settles.
+     */
+    private void replaceBoseDetailImageNow(Object owner) {
+        if (!(owner instanceof View)) return;
+        Object viewModel = readField(owner, "g");
+        String address = asString(readField(viewModel, "b"));
+        if (!com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(address)) {
+            return;
+        }
+        File file = materializeBoseImage();
+        if (file == null) {
+            MLog.event("bose.image.skip", "reason", "asset_unavailable");
+            return;
+        }
+        Object field = readField(owner, "d");
+        ImageView imageView = field instanceof ImageView ? (ImageView) field
+                : findDetailImageView(owner);
+        if (imageView == null) {
+            MLog.event("bose.image.skip", "reason", "no_image_view");
+            return;
+        }
+        applyBoseImage(imageView, file, owner, "e");
+        pinBoseImageView(imageView);
+        MLog.event("bose.image.applied", "surface", "detail");
     }
 
     private ImageView findDetailImageView(Object owner) {
