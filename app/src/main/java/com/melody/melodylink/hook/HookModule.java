@@ -175,8 +175,19 @@ public final class HookModule extends XposedModule {
     /** The 通用设置 copy, which lives in the view hierarchy rather than a screen. */
     private volatile Object boseCncOneSpacePreference;
 
-    /** The "降噪效果" row, captured in detailPreferenceAdd; its parent may be null then. */
+    /**
+     * The "降噪效果" row, captured in detailPreferenceAdd; its parent may be null then.
+     *
+     * <p>0.5.20 evidence: keeping one shared field for both pages made them corrupt each
+     * other. The 通用设置 page and the detail page each add their own copy, and whichever
+     * ran last overwrote the reference — so a 通用设置 retry tick could fire with the
+     * detail page's anchor in hand and inject into the wrong tree, and vice versa. The
+     * symptom was a page that rendered correctly for a second (t+800 had a populated
+     * NestedScrollView with the device-info block and the 1356x1356 model view) and then
+     * went empty at t+2000. One field per page removes the interference.
+     */
     private volatile Object noiseEffectRow;
+    private volatile Object oneSpaceNoiseEffectRow;
 
     /** Injected "抗风噪" switch, kept for state re-sync. */
 
@@ -825,7 +836,7 @@ public final class HookModule extends XposedModule {
                         removeUnsupportedDetailCategory(preference);
                         hideAncStrengthPreference(preference);
                         captureNoiseEffectRow(preference);
-                        hideNoiseEffectRow();
+                        hideNoiseEffectRow(preference);
                         return result;
                     }
                     if ("detailPipelineStart".equals(label)) {
@@ -1474,7 +1485,11 @@ public final class HookModule extends XposedModule {
         // stopping after the very first tick, so a page whose row was captured before
         // the loop was armed never got another chance. Re-arming is cheap — every
         // install path is guarded by findPreferenceByKeyRecursive.
-        noiseEffectRow = preference;
+        if (NOISE_ROW_CLASS_ONESPACE.equals(preference.getClass().getName())) {
+            oneSpaceNoiseEffectRow = preference;
+        } else {
+            noiseEffectRow = preference;
+        }
         MLog.event("bose.anchor.captured",
                 "class", preference.getClass().getSimpleName(),
                 "key", PrefRef.getKey(preference),
@@ -1548,11 +1563,15 @@ public final class HookModule extends XposedModule {
     /** The PreferenceScreen of the fragment currently hosting our anchor. */
     private Object boseLiveScreen() {
         try {
-            if (boseInjectedScreens.isEmpty()) return null;
-            Object screen = boseInjectedScreens.iterator().next();
-            if (screen == null) return null;
-            if (PrefRef.getPreferenceCount(screen) <= 0) return null;
-            return screen;
+            // Scan the whole set: it holds screens from both pages, and picking
+            // iterator().next() would report "already injected" for the detail page just
+            // because 通用设置 was injected first.
+            for (Object screen : boseInjectedScreens) {
+                if (screen == null) continue;
+                if (PrefRef.getPreferenceCount(screen) <= 0) continue;
+                return screen;
+            }
+            return null;
         } catch (Throwable t) {
             return null;
         }
@@ -1562,8 +1581,36 @@ public final class HookModule extends XposedModule {
      * Performs the actual insertion against a live tree. Returns false when the tree is not
      * ready yet so the caller can retry.
      */
+    /**
+     * Chooses the anchor to inject against: the first one still attached to a window.
+     *
+     * <p>0.5.20 traced the blank page to this. A single shared anchor field let the two
+     * pages overwrite each other's reference, so a retry tick armed by 通用设置 could fire
+     * while holding the detail page's row and write into the wrong tree. The observed
+     * signature was a page that rendered for about a second (populated NestedScrollView
+     * with the device-info block and the 1356x1356 model view) and then went back to an
+     * empty container.
+     */
+    private Object pickLiveAnchor() {
+        for (Object candidate : new Object[]{noiseEffectRow, oneSpaceNoiseEffectRow}) {
+            if (candidate == null) continue;
+            try {
+                Object context = PrefRef.invokeNoArg(candidate, "getContext");
+                if (!(context instanceof View)) continue;
+                View view = (View) context;
+                if (view.isAttachedToWindow()) return candidate;
+            } catch (Throwable ignored) {
+            }
+        }
+        return noiseEffectRow != null ? noiseEffectRow : oneSpaceNoiseEffectRow;
+    }
+
     private boolean installBoseIntoLiveScreen() {
-        Object noiseRow = noiseEffectRow;
+        // Pick the anchor that is actually attached to a live window. Both pages keep
+        // their own copy now, and the detail page is the one with a fragment that can
+        // disappear mid-flight, so prefer whichever is still showing; fall back to the
+        // detail anchor because that is the page that renders nothing without us.
+        Object noiseRow = pickLiveAnchor();
         if (noiseRow == null) return false;
 
         ClassLoader loader = noiseRow.getClass().getClassLoader();
@@ -1571,9 +1618,11 @@ public final class HookModule extends XposedModule {
         // but the screen set was only populated on a successful install — so every
         // attempt failed at this line and evt=bose.injected never fired. The anchor's
         // own parent group is all we actually need; the screen is only bookkeeping.
-        Object screen = boseInjectedScreens.isEmpty() ? null
-                : boseInjectedScreens.iterator().next();
-        if (screen == null) screen = screenForAnchor(noiseRow);
+        // Resolve the screen from THIS anchor rather than from the shared set, which
+        // holds entries from both pages and whose iterator().next() could hand back the
+        // other page's screen. The screen is bookkeeping only — the anchor's own parent
+        // group is what we insert into.
+        Object screen = screenForAnchor(noiseRow);
 
         Object parent = PrefRef.getParent(noiseRow);
         if (parent == null) parent = screen;
@@ -1595,7 +1644,7 @@ public final class HookModule extends XposedModule {
         // Hide the Enco-only "降噪效果" row where it is safe to do so. The method itself
         // filters by class: it hides only the 通用设置 copy and leaves the detail page's
         // copy visible, because that one anchors the section it lives in.
-        hideNoiseEffectRow();
+        hideNoiseEffectRow(noiseRow);
 
         int anchorOrder = PrefRef.getOrder(noiseRow);
         int target = anchorOrder < 0 ? 0 : anchorOrder + 1;
@@ -1689,9 +1738,8 @@ public final class HookModule extends XposedModule {
      * removing the preference: the row's own LiveData observer still calls
      * {@code onBindViewHolder}, and a removed-but-observed preference crashes the page.
      */
-    private void hideNoiseEffectRow() {
+    private void hideNoiseEffectRow(Object noiseRow) {
         try {
-            Object noiseRow = noiseEffectRow;
             if (noiseRow == null || !boseBonded()) return;
             String className = noiseRow.getClass().getName();
             // Only the 通用设置 (OneSpace) copy is hidden. The detail page's copy
