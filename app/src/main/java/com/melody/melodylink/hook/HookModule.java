@@ -3305,7 +3305,7 @@ public final class HookModule extends XposedModule {
         for (Method candidate : listenerType.getMethods()) {
             Class<?>[] params = candidate.getParameterTypes();
             if (candidate.getReturnType() == Boolean.TYPE && params.length == 2
-                    && params[0].isAssignableFrom(androidx.preference.Preference.class)
+                    && "androidx.preference.Preference".equals(params[0].getName())
                     && !params[1].isPrimitive()) {
                 callback = candidate;
                 break;
