@@ -977,7 +977,6 @@ public final class HookModule extends XposedModule {
                             // rather than fabricating a DTO here, so the next round tells us
                             // what the matcher actually compared.
                             MLog.event("bose.detail.whitelist.still_null",
-                                    "injected", boseCatalogInjected,
                                     "mac", String.valueOf(mac));
                         }
                         return result;
@@ -1965,8 +1964,6 @@ public final class HookModule extends XposedModule {
     }
 
     private static volatile String pendingDetailMac;
-    /** One-shot guard so the Bose catalog entry is added exactly once per process. */
-    private static volatile boolean boseCatalogInjected;
 
     /**
      * Builds a minimal {@code WhitelistConfigDTO} so Melody's own detail page has something
@@ -2021,194 +2018,20 @@ public final class HookModule extends XposedModule {
      * augments. If anything about the provider shape is unexpected it silently passes
      * through, so the worst case is the behaviour before this change.
      */
-    private void wrapCatalogProvider(Object manager) {
-        if (manager == null || boseCatalogInjected) return;
-        try {
-            java.lang.reflect.Field field = null;
-            for (Class<?> c = manager.getClass(); c != null && field == null; c = c.getSuperclass()) {
-                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
-                    if (f.getType().getName().equals("com.oplus.melody.common.util.E")) {
-                        field = f;
-                        break;
-                    }
-                }
-            }
-            if (field == null) {
-                MLog.event("bose.catalog.no_provider", "class", manager.getClass().getName());
-                return;
-            }
-            field.setAccessible(true);
-            Object provider = field.get(manager);
-            if (provider == null) {
-                MLog.event("bose.catalog.provider_null");
-                return;
-            }
-            if (java.lang.reflect.Proxy.isProxyClass(provider.getClass())) return;
-
-            Object proxy = java.lang.reflect.Proxy.newProxyInstance(
-                    provider.getClass().getClassLoader(),
-                    new Class<?>[]{provider.getClass()},
-                    (p, method, args) -> {
-                        Object result = method.invoke(provider, args);
-                        // b() calls E.b() and gets a WhitelistContentDO; the DTO list is
-                        // derived from it. Appending here means the DTO we added is present
-                        // before any conversion or matching happens.
-                        if (result != null && isCatalogContent(result)) {
-                            Object augmented = appendToCatalogContent(result);
-                            if (augmented != null) return augmented;
-                        }
-                        return result;
-                    });
-            field.set(manager, proxy);
-            MLog.event("bose.catalog.provider_wrapped",
-                    "interface", provider.getClass().getName());
-        } catch (Throwable t) {
-            MLog.event("bose.catalog.wrap_error", "error", MLog.compactThrowable(t));
-        }
-    }
-
-    /** True for the {@code WhitelistContentDO} the provider hands back. */
-    private static boolean isCatalogContent(Object value) {
-        if (value == null) return false;
-        String name = value.getClass().getName();
-        return name.endsWith("WhitelistContentDO");
-    }
-
-    /**
-     * Appends a Bose entry to a {@code WhitelistContentDO}.
-     *
-     * <p>Returns null when the shape is not what we expect, in which case the caller keeps
-     * the original object. The clone is made from an existing entry so every field the host
-     * reads — function flags, protocol type, Rssi thresholds, version gates — carries values
-     * of a device Melody genuinely supports.
-     */
-    private Object appendToCatalogContent(Object content) {
-        try {
-            if (boseCatalogInjected) return null;
-            // The DTO list lives inside the content object under some field; find the first
-            // List<WhitelistConfigDTO>-shaped one and work on that instead of guessing a name.
-            for (java.lang.reflect.Field f : allFieldsOf(content.getClass())) {
-                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
-                f.setAccessible(true);
-                Object value = f.get(content);
-                if (!(value instanceof java.util.List)) continue;
-                @SuppressWarnings("unchecked")
-                java.util.List<Object> list = (java.util.List<Object>) value;
-                if (list.isEmpty()) continue;
-                if (!(list.get(0).getClass().getName().endsWith("WhitelistConfigDTO"))) continue;
-
-                Object clone = cloneCatalogEntry(list.get(list.size() - 1), null);
-                if (clone == null) continue;
-                list.add(clone);
-                boseCatalogInjected = true;
-                MLog.event("bose.catalog.injected",
-                        "field", f.getName(),
-                        "new_size", list.size(),
-                        "class", clone.getClass().getSimpleName());
-                return content;
-            }
-            MLog.event("bose.catalog.no_list_field",
-                    "class", content.getClass().getName());
-        } catch (Throwable t) {
-            MLog.event("bose.catalog.append_error", "error", MLog.compactThrowable(t));
-        }
-        return null;
-    }
-
-    /**
-     * Counts the control entries on a catalog row.
-     *
-     * <p>0.5.39. Which sections the detail page shows is driven by the row's
-     * Control / ControlList sub-objects. A row whose controls are empty contributes nothing
-     * visible, which is why cloning an arbitrary entry produced a catalog entry that the host
-     * happily returned from its lookup and then ignored.
-     */
-    private static int countControls(Object dto) {
-        if (dto == null) return 0;
-        int total = 0;
-        try {
-            for (java.lang.reflect.Field f : allFieldsOf(dto.getClass())) {
-                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
-                f.setAccessible(true);
-                Object value = f.get(dto);
-                if (value instanceof java.util.Collection) {
-                    total += ((java.util.Collection<?>) value).size();
-                } else if (value instanceof java.util.Map) {
-                    total += ((java.util.Map<?, ?>) value).size();
-                } else if (value != null
-                        && value.getClass().getName().contains("WhitelistConfigDTO$")) {
-                    // A populated sub-object counts once: it means the row declares support.
-                    total++;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return total;
-    }
-
-    /**
-     * True when this list already holds an entry we injected.
-     *
-     * <p>0.5.40. The one-shot {@code boseCatalogInjected} flag was unreliable: an exception
-     * thrown before the assignment left it false forever, and the catalog then grew on every
-     * call (94 to 214 in one session, each entry a full DTO clone). Checking the list itself
-     * is idempotent no matter what happened on a previous attempt.
-     */
-    private static boolean containsBoseEntry(java.util.List<?> list) {
-        try {
-            for (Object entry : list) {
-                Object name = readField(entry, "name");
-                if (name instanceof String && ((String) name).startsWith(BOSE_ENTRY_PREFIX)) {
-                    return true;
-                }
-                Object brand = readField(entry, "brand");
-                if (brand instanceof String && "Bose".equals(brand)) return true;
-            }
-        } catch (Throwable ignored) {
-        }
-        return false;
-    }
-
-    /**
-     * Field-by-field dump of a catalog entry.
-     *
-     * <p>0.5.41. The host returns our entry from its lookup but builds no sections from it, so
-     * the entry must be missing whatever the page keys on. Printing the entry makes that
-     * visible instead of guessable: collections show their size, so a null list or an empty
-     * one stands out immediately.
-     */
-    private static String describeDto(Object dto) {
-        if (dto == null) return "null";
-        try {
-            StringBuilder sb = new StringBuilder();
-            for (java.lang.reflect.Field f : allFieldsOf(dto.getClass())) {
-                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
-                f.setAccessible(true);
-                Object v = f.get(dto);
-                sb.append(f.getName()).append('=');
-                if (v == null) {
-                    sb.append("null");
-                } else if (v instanceof java.util.Collection) {
-                    sb.append('(').append(((java.util.Collection<?>) v).size()).append(')');
-                } else if (v instanceof java.util.Map) {
-                    sb.append('{').append(((java.util.Map<?, ?>) v).size()).append('}');
-                } else {
-                    sb.append(v);
-                }
-                sb.append(';');
-            }
-            String out = sb.toString();
-            return out.length() > 700 ? out.substring(0, 700) : out;
-        } catch (Throwable t) {
-            return "err:" + t.getClass().getSimpleName();
-        }
-    }
-
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
         if (!(listResult instanceof java.util.List)) return listResult;
         java.util.List<?> list = (java.util.List<?>) listResult;
         try {
-            if (boseCatalogInjected) return listResult;
+            // 0.5.42: the boolean guard that used to sit here was the reason the entry never
+            // reached the page. L6/a.b() builds and returns a FRESH list on every call, so a
+            // one-shot flag true after the first call made every later call return a list that
+            // had no Bose entry in it at all — which is why the lookup reported
+            // config=NULL for our MAC even though injection had "succeeded" once.
+            //
+            // Correctness now rests entirely on containsBoseEntry(): this exact list either
+            // has the entry or it does not, so the check is idempotent per list instead of
+            // once per process.
+            if (containsBoseEntry(list)) return listResult;
             // Profile the catalog before touching it: how many entries carry controls, and
             // what the richest one looks like. That tells us what the host uses to decide
             // which sections exist, without another guess-and-check round.
@@ -2245,7 +2068,7 @@ public final class HookModule extends XposedModule {
             // field inspection, not by product name, so it survives catalog reordering.
             // 0.5.40: the previous version added to the list while iterating it, which
             // throws ConcurrentModificationException inside the try. The catch swallowed it,
-            // so boseCatalogInjected was never set and the catalog grew on every single call
+            // so the completed marker was never set and the catalog grew on every call
             // (94 -> 214 in one session). Two fixes:
             //
             // 1. Collect the templates first, add afterwards. Never mutate while iterating.
@@ -2272,7 +2095,6 @@ public final class HookModule extends XposedModule {
                 mutable.add(clone);
                 added++;
             }
-            boseCatalogInjected = true;
             MLog.event("bose.catalog.injected",
                     "new_size", mutable.size(),
                     "added", added);
