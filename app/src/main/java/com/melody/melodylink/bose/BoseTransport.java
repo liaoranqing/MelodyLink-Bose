@@ -620,8 +620,8 @@ public final class BoseTransport {
     }
 
     private static int clampBand(int bandId) {
-        if (bandId == BoseBmap.EQ_BASS) return 0;
-        if (bandId == BoseBmap.EQ_BASS + 2) return 2;
+        if (bandId == BoseBmap.EQ_BAND_BASS) return 0;
+        if (bandId == BoseBmap.EQ_BAND_TREBLE) return 2;
         return 1;
     }
 
@@ -630,8 +630,8 @@ public final class BoseTransport {
         if (payload == null) return;
         for (int i = 0; i + 3 < payload.length; i += 4) {
             int bandId = payload[i + 3] & 0xff;
-            int index = bandId == BoseBmap.EQ_BASS ? 0 : (bandId == BoseBmap.EQ_BASS + 2 ? 2 : 1);
-            if (bandId > BoseBmap.EQ_BASS + 2) continue;
+            int index = bandId == BoseBmap.EQ_BAND_BASS ? 0 : (bandId == BoseBmap.EQ_BAND_TREBLE ? 2 : 1);
+            if (bandId > BoseBmap.EQ_BAND_TREBLE) continue;
             eqBands[index] = (byte) payload[i + 2];
         }
     }

@@ -89,6 +89,20 @@ public final class HookModule extends XposedModule {
     private static final String BOSE_CNC_KEY = "melodylink.bose.cnc";
     private static final String BOSE_WIND_KEY = "melodylink.bose.wind";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
+    /**
+     * Both the earbud detail page and the "通用设置" page expose a noise row, but
+     * under different classes. 0.4.3 injected into both via the "音质音效" anchor;
+     * 0.4.5 narrowed it to NoiseReductionItem only and silently dropped 通用设置
+     * (log evidence: that page adds OneSpaceNoisePreference, never NoiseReductionItem).
+     */
+    private static final String NOISE_ROW_CLASS_DETAIL =
+            "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem";
+    private static final String NOISE_ROW_CLASS_ONESPACE =
+            "com.oplus.melody.onespace.items.OneSpaceNoisePreference";
+
+    private static boolean isBoseNoiseRowClass(String className) {
+        return NOISE_ROW_CLASS_DETAIL.equals(className) || NOISE_ROW_CLASS_ONESPACE.equals(className);
+    }
     private static final int WF_1000XM3_PRODUCT_ID = 0x067410;
     private volatile int targetAddressHash;
     private volatile String targetAddress;
@@ -1268,10 +1282,7 @@ public final class HookModule extends XposedModule {
      */
     private void captureNoiseEffectRow(Object preference) {
         if (preference == null || !boseBonded()) return;
-        if (!preference.getClass().getName()
-                .equals("com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem")) {
-            return;
-        }
+        if (!isBoseNoiseRowClass(preference.getClass().getName())) return;
         // Remember the row instance, not its parent: at this point in
         // onCreatePreferences the parent is often still null (0.4.4 lost the slider
         // on exactly the screen where the row got added first). Retrying against
@@ -1291,10 +1302,12 @@ public final class HookModule extends XposedModule {
     private void keepNoiseEffectRowHidden() {
         Object noiseRow = noiseEffectRow;
         if (noiseRow == null || !boseBonded()) return;
+        if (!NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) return;
         setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
         mainHandler.postDelayed(() -> {
             Object row = noiseEffectRow;
             if (row == null || !boseBonded()) return;
+            if (!NOISE_ROW_CLASS_DETAIL.equals(row.getClass().getName())) return;
             setPreferenceValue(row, "setVisible", Boolean.FALSE);
         }, 220L);
     }
@@ -1315,8 +1328,15 @@ public final class HookModule extends XposedModule {
             // slider to the row's OWN parent (the section list) instead.
             Object group = invokeNoArg(noiseRow, "getParent");
             if (group == null) return; // tree not ready yet; a later retry handles it
+            // On the detail page the row is a dead end (it opens OPPO's own noise
+            // page, which drives a non-existent SPP channel), so it is hidden and
+            // the slider replaces it. "通用设置" renders the same concept as
+            // OneSpaceNoisePreference, and there it *is* the ANC mode switch we
+            // hijack — hiding it would remove a feature the user relies on, so on
+            // that page we only append below it.
+            boolean hideRow = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
             if (findPreferenceByKeyRecursive(group, BOSE_CNC_KEY)) {
-                setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+                if (hideRow) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
                 return;
             }
             Integer order = (Integer) invokeNoArg(noiseRow, "getOrder");
@@ -1324,12 +1344,15 @@ public final class HookModule extends XposedModule {
             if (addBoseCncPreference(group, loader, activity, sliderOrder)) {
                 addBoseWindSwitch(group, loader, activity, sliderOrder + 1);
                 addBoseExtraCategory(group, loader, activity, sliderOrder + 2);
-                setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
-                for (int i = 0; i < 3; i++) {
-                    mainHandler.postDelayed(this::keepNoiseEffectRowHidden,
-                            i == 0 ? 300L : (i == 1 ? 1200L : 2600L));
+                if (hideRow) {
+                    setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+                    for (int i = 0; i < 3; i++) {
+                        mainHandler.postDelayed(this::keepNoiseEffectRowHidden,
+                                i == 0 ? 300L : (i == 1 ? 1200L : 2600L));
+                    }
                 }
-                log(Log.INFO, TAG, event("installed Bose CNC slider, noise-effect card hidden"));
+                log(Log.INFO, TAG, event("installed Bose CNC slider on "
+                        + (hideRow ? "detail" : "general settings") + " page"));
             }
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose CNC slider install failed", t);
@@ -2753,7 +2776,12 @@ public final class HookModule extends XposedModule {
             // dead-end "降噪效果" row stays hidden even if the add hook missed it.
             if (hasBoseCnc) {
                 Object noiseRow = findPreferenceByTitle(screen, NOISE_EFFECT_TITLE);
-                if (noiseRow != null) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+                // Only the detail-page card is a dead end; the identically titled
+                // row on "通用设置" is the live ANC switch and must stay visible.
+                if (noiseRow != null
+                        && NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) {
+                    setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
+                }
             }
             if (!hasSonySettings && !hasHuaweiLowLatency) return;
             Object anchor = findPreferenceByTitle(screen, SOUND_QUALITY_TITLE);
@@ -3198,7 +3226,9 @@ public final class HookModule extends XposedModule {
      */
     private void addBoseExtraCategory(
             Object group, ClassLoader loader, Activity activity, int order) {
-        if (findPreferenceByKeyRecursive(group, BOSE_EXTRA_CATEGORY_KEY) != null) return;
+        // findPreferenceByKeyRecursive answers a boolean, not an object (0.4.7
+        // compared it to null and failed to compile).
+        if (findPreferenceByKeyRecursive(group, BOSE_EXTRA_CATEGORY_KEY)) return;
         Object category = newPreference(loader,
                 "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
         if (category == null) category = newPreference(loader,
