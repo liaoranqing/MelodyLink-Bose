@@ -3721,7 +3721,7 @@ public final class HookModule extends XposedModule {
      * silently inject nothing.
      */
     @SuppressLint("MissingPermission")
-    private static boolean boseBonded() {
+    private boolean boseBonded() {
         try {
             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
             if (adapter != null && adapter.isEnabled()) {
