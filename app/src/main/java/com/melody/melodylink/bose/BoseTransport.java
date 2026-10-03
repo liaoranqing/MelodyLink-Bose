@@ -70,6 +70,23 @@ public final class BoseTransport {
 
     /** [31.10] byte 3 cache: wind block 0=off, 1=on (-1 = never read). */
     private volatile int windBlock = -1;
+
+    /** Cached [1.7] EQ values for bass/mid/treble, in dB-like steps (-10..10). */
+    private final byte[] eqBands = new byte[]{0, 0, 0};
+
+    /** Cached [1.9] button actions indexed by buttonIndex(buttonId, event). */
+    private final int[] buttonActions = new int[32 * 8];
+
+    /** [31.2] capability bitmap; -1 until read. */
+    private volatile int capabilityFlags = -1;
+
+    /** [1.4] auto-off timer in minutes; -1 until read. */
+    private volatile int standbyMinutes = -1;
+
+    /** Cached [31.6] custom mode slots 5-10. */
+    private final int[] modeSlotCnc = new int[6];
+    private final int[] modeSlotSpatial = new int[6];
+    private final int[] modeSlotWind = new int[6];
     /** Bumped without ioLock so UI-thread callers never block behind a long session. */
     private final java.util.concurrent.atomic.AtomicInteger generation =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -459,6 +476,402 @@ public final class BoseTransport {
         } finally {
             closeSocket();
         }
+    }
+
+    // ------------------------------------------------------- EQ / buttons / mode slots
+
+    /** Callback for a generic settings transaction. */
+    public interface BlockResult {
+        void onDone(boolean success, byte[] payload);
+    }
+
+    /**
+     * Runs one read-modify-write transaction on a worker session. Everything that
+     * is not a [31.10] byte tweak goes through here: 3-band EQ ([1.7]), button
+     * remap ([1.9]) and custom mode slots ([31.6]). Session teardown and the
+     * pre-handshake supersede check are shared with the CNC path.
+     */
+    private void runBlockTransaction(final String label, final BlockWork work) {
+        final int myGen = generation.incrementAndGet();
+        active = true;
+        linkDead = false;
+        post(new Runnable() {
+            @Override public void run() {
+                if (myGen != generation.get()) return;
+                BluetoothSocket opened = null;
+                try {
+                    opened = openSocket();
+                } catch (Throwable error) {
+                    final String reason = label + " rfcomm open failed: " + error;
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() { listener.onLog(reason); }
+                    });
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() { work.onDone(false, null); }
+                    });
+                    return;
+                }
+                final BluetoothSocket current = opened;
+                synchronized (ioLock) {
+                    if (myGen != generation.get()) {
+                        closeQuietly(current);
+                        return;
+                    }
+                    socket = current;
+                }
+                linkDead = false;
+                startReader(current);
+                try {
+                    sleepQuietly(POST_WRITE_DELAY_MS + 100L);
+                    drainStartup(current);
+                    final boolean ok = work.run(current, myGen);
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() {
+                            listener.onLog(label + (ok ? " ok" : " failed"));
+                        }
+                    });
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() {
+                            work.onDone(ok, work.lastPayload());
+                        }
+                    });
+                } catch (Throwable t) {
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() { listener.onLog(label + " error: " + t); }
+                    });
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() { work.onDone(false, null); }
+                    });
+                } finally {
+                    closeSocket();
+                }
+            }
+        });
+    }
+
+    /** Work unit executed inside an open session. */
+    private interface BlockWork {
+        boolean run(BluetoothSocket socket, int generation) throws Exception;
+
+        void onDone(boolean success, byte[] payload);
+
+        byte[] lastPayload();
+    }
+
+    /** Sends one frame and waits for the matching STATUS/ERROR reply. */
+    private byte[] exchange(int myGen, int block, int function, int operator, byte[] payload)
+            throws Exception {
+        BoseBmap.Frame answer = command(block, function, operator, payload);
+        if (answer == null) return null;
+        if (answer.operator == BoseBmap.OP_ERROR) return null;
+        return answer.payload;
+    }
+
+    /** Reads the current 3-band EQ via [1.7]; result stored in eqBands. */
+    public void readEq(EqCallback callback) {
+        runBlockTransaction("Bose EQ read", new BlockWork() {
+            private byte[] payload;
+
+            @Override public boolean run(BluetoothSocket socket, int gen) throws Exception {
+                BoseBmap.Frame frame = command(BoseBmap.BLOCK_DEVICE_SETTINGS, BoseBmap.FUNC_EQ,
+                        BoseBmap.OP_GET, null);
+                if (frame == null || frame.operator == BoseBmap.OP_ERROR) return false;
+                payload = frame.payload;
+                parseEqPayload(payload);
+                return true;
+            }
+
+            @Override public void onDone(boolean success, byte[] ignored) {
+                if (callback != null) callback.onEq(success, getEqBand(0), getEqBand(1), getEqBand(2));
+            }
+
+            @Override public byte[] lastPayload() {
+                return payload;
+            }
+        });
+    }
+
+    /** Writes one EQ band via [1.7] SETGET, then re-reads to confirm. */
+    public void writeEqBand(final int bandId, final int value, final EqCallback callback) {
+        final int clamped = Math.max(-10, Math.min(10, value));
+        runBlockTransaction("Bose EQ band " + bandId + "=" + clamped, new BlockWork() {
+            private byte[] payload;
+
+            @Override public boolean run(BluetoothSocket socket, int gen) throws Exception {
+                byte[] answer = exchange(gen, BoseBmap.BLOCK_DEVICE_SETTINGS, BoseBmap.FUNC_EQ,
+                        BoseBmap.OP_SETGET, BoseBmap.eqBandPayload(clamped, bandId));
+                if (answer == null) return false;
+                BoseBmap.Frame confirm = command(BoseBmap.BLOCK_DEVICE_SETTINGS, BoseBmap.FUNC_EQ,
+                        BoseBmap.OP_GET, null);
+                if (confirm == null || confirm.operator == BoseBmap.OP_ERROR) return false;
+                payload = confirm.payload;
+                parseEqPayload(payload);
+                return eqBands[clampBand(bandId)] == clamped;
+            }
+
+            @Override public void onDone(boolean success, byte[] ignored) {
+                if (callback != null) callback.onEq(success, getEqBand(0), getEqBand(1), getEqBand(2));
+            }
+
+            @Override public byte[] lastPayload() {
+                return payload;
+            }
+        });
+    }
+
+    private static int clampBand(int bandId) {
+        if (bandId == BoseBmap.EQ_BASS) return 0;
+        if (bandId == BoseBmap.EQ_BASS + 2) return 2;
+        return 1;
+    }
+
+    /** [1.7] GET returns 4-byte groups: [min, max, current, bandId]. */
+    private void parseEqPayload(byte[] payload) {
+        if (payload == null) return;
+        for (int i = 0; i + 3 < payload.length; i += 4) {
+            int bandId = payload[i + 3] & 0xff;
+            int index = bandId == BoseBmap.EQ_BASS ? 0 : (bandId == BoseBmap.EQ_BASS + 2 ? 2 : 1);
+            if (bandId > BoseBmap.EQ_BASS + 2) continue;
+            eqBands[index] = (byte) payload[i + 2];
+        }
+    }
+
+    public int getEqBand(int index) {
+        return eqBands[index < 0 || index > 2 ? 0 : index];
+    }
+
+    /** EQ read callback. */
+    public interface EqCallback {
+        void onEq(boolean success, int bass, int mid, int treble);
+    }
+
+    /** Remaps one button event via [1.9] SETGET. */
+    public void writeButton(final int buttonId, final int event, final int action,
+            final EqCallback callback) {
+        runBlockTransaction("Bose button " + buttonId + " ev=" + event + "->" + action,
+                new BlockWork() {
+                    private byte[] payload;
+
+                    @Override public boolean run(BluetoothSocket socket, int gen) throws Exception {
+                        byte[] answer = exchange(gen, BoseBmap.BLOCK_DEVICE_SETTINGS,
+                                BoseBmap.FUNC_BUTTONS, BoseBmap.OP_SETGET,
+                                BoseBmap.buttonPayload(buttonId, event, action));
+                        if (answer == null) return false;
+                        BoseBmap.Frame confirm = command(BoseBmap.BLOCK_DEVICE_SETTINGS,
+                                BoseBmap.FUNC_BUTTONS, BoseBmap.OP_GET, null);
+                        if (confirm != null && confirm.operator != BoseBmap.OP_ERROR) {
+                            payload = confirm.payload;
+                            if (payload != null && payload.length >= 3) {
+                                buttonActions[buttonIndex(buttonId, event)] = payload[2] & 0xff;
+                            }
+                        }
+                        return true;
+                    }
+
+                    @Override public void onDone(boolean success, byte[] ignored) {
+                        if (callback != null) {
+                            callback.onEq(success, getEqBand(0), getEqBand(1), getEqBand(2));
+                        }
+                    }
+
+                    @Override public byte[] lastPayload() {
+                        return payload;
+                    }
+                });
+    }
+
+    private static int buttonIndex(int buttonId, int event) {
+        return (buttonId & 0x1f) * 8 + (event & 0x0f);
+    }
+
+    public int getButtonAction(int buttonId, int event) {
+        int index = buttonIndex(buttonId, event);
+        int value = index < buttonActions.length ? buttonActions[index] : -1;
+        return value;
+    }
+
+    /**
+     * Writes a custom mode slot via [31.6] ModeConfig SETGET. Slots 5-10 are the
+     * firmware's empty user slots; 0-4 are locked presets.
+     */
+    public void writeModeSlot(final int slot, final String name, final int cncLevel,
+            final int spatial, final int windBlock, final ModeCallback callback) {
+        final int index = Math.max(BoseBmap.MODE_SLOT_FIRST, Math.min(BoseBmap.MODE_SLOT_LAST, slot));
+        runBlockTransaction("Bose mode slot " + index, new BlockWork() {
+            private byte[] payload;
+
+            @Override public boolean run(BluetoothSocket socket, int gen) throws Exception {
+                byte[] body = BoseBmap.modeConfigPayload(index, name, cncLevel, spatial,
+                        windBlock, 1);
+                byte[] answer = exchange(gen, BoseBmap.BLOCK_AUDIO_MODES, BoseBmap.FUNC_MODE_CONFIG,
+                        BoseBmap.OP_SETGET, body);
+                if (answer == null) return false;
+                BoseBmap.Frame status = command(BoseBmap.BLOCK_AUDIO_MODES,
+                        BoseBmap.FUNC_MODE_CONFIG, BoseBmap.OP_STATUS, null);
+                if (status != null && status.operator != BoseBmap.OP_ERROR) {
+                    payload = status.payload;
+                    parseModeConfigPayload(index, payload);
+                }
+                return true;
+            }
+
+            @Override public void onDone(boolean success, byte[] ignored) {
+                if (callback != null) callback.onMode(success, index);
+            }
+
+            @Override public byte[] lastPayload() {
+                return payload;
+            }
+        });
+    }
+
+    /** [31.6] STATUS is 48 bytes on this firmware; config fields start at 42. */
+    private void parseModeConfigPayload(int slot, byte[] payload) {
+        if (payload == null || payload.length < 48) return;
+        int index = slot - BoseBmap.MODE_SLOT_FIRST;
+        if (index < 0 || index >= modeSlotCnc.length) return;
+        modeSlotCnc[index] = payload[42] & 0xff;
+        modeSlotSpatial[index] = payload[44] & 0xff;
+        modeSlotWind[index] = payload[45] & 0xff;
+    }
+
+    public int getModeSlotCnc(int slot) {
+        int index = slot - BoseBmap.MODE_SLOT_FIRST;
+        return index < 0 || index >= modeSlotCnc.length ? -1 : modeSlotCnc[index];
+    }
+
+    /** Mode-slot write callback. */
+    public interface ModeCallback {
+        void onMode(boolean success, int slot);
+    }
+
+    /**
+     * Reads [31.2] AudioModes capabilities. The feature bitmap is the honest way
+     * to learn whether wind block exists on this model before offering the switch:
+     * bit 3 (CAP_WIND) is the firmware's own answer. -1 when unknown.
+     */
+    public void readCapabilities(final CapCallback callback) {
+        runBlockTransaction("Bose capabilities", new BlockWork() {
+            private byte[] payload;
+
+            @Override public boolean run(BluetoothSocket socket, int gen) throws Exception {
+                BoseBmap.Frame frame = command(BoseBmap.BLOCK_AUDIO_MODES, 2, BoseBmap.OP_GET, null);
+                if (frame == null || frame.operator == BoseBmap.OP_ERROR) return false;
+                payload = frame.payload;
+                if (payload != null && payload.length >= 6) capabilityFlags = payload[5] & 0xff;
+                return true;
+            }
+
+            @Override public void onDone(boolean success, byte[] ignored) {
+                if (callback != null) callback.onCapabilities(success, capabilityFlags);
+            }
+
+            @Override public byte[] lastPayload() {
+                return payload;
+            }
+        });
+    }
+
+    /** -1 until [31.2] has been read. */
+    public int getCapabilityFlags() {
+        return capabilityFlags;
+    }
+
+    public boolean supportsFeature(int capFlag) {
+        return capabilityFlags >= 0 && (capabilityFlags & capFlag) != 0;
+    }
+
+    /** Capabilities callback. */
+    public interface CapCallback {
+        void onCapabilities(boolean success, int flags);
+    }
+
+    /** Writes the auto-off timer via [1.4] SETGET (0 = never). */
+    public void writeStandbyTimer(final int minutes, final StandbyCallback callback) {
+        runBlockTransaction("Bose standby timer " + minutes, new BlockWork() {
+            private byte[] payload;
+
+            @Override public boolean run(BluetoothSocket socket, int gen) throws Exception {
+                byte[] answer = exchange(gen, BoseBmap.BLOCK_DEVICE_SETTINGS,
+                        BoseBmap.FUNC_STANDBY_TIMER, BoseBmap.OP_SETGET,
+                        BoseBmap.standbyTimerPayload(minutes));
+                if (answer == null) return false;
+                BoseBmap.Frame confirm = command(BoseBmap.BLOCK_DEVICE_SETTINGS,
+                        BoseBmap.FUNC_STANDBY_TIMER, BoseBmap.OP_GET, null);
+                if (confirm != null && confirm.operator != BoseBmap.OP_ERROR) {
+                    payload = confirm.payload;
+                    if (payload != null && payload.length >= 1) standbyMinutes = payload[0] & 0xff;
+                }
+                return true;
+            }
+
+            @Override public void onDone(boolean success, byte[] ignored) {
+                if (callback != null) callback.onStandby(success, standbyMinutes);
+            }
+
+            @Override public byte[] lastPayload() {
+                return payload;
+            }
+        });
+    }
+
+    public int getStandbyMinutes() {
+        return standbyMinutes;
+    }
+
+    /** Standby-timer callback. */
+    public interface StandbyCallback {
+        void onStandby(boolean success, int minutes);
+    }
+
+    /**
+     * Powers the earbuds off via [7.4] START (0 = off). The link drops as soon as
+     * the firmware accepts it, so success means "delivered", not "confirmed".
+     */
+    public void powerOff(final PowerCallback callback) {
+        final int myGen = generation.incrementAndGet();
+        active = true;
+        linkDead = false;
+        post(new Runnable() {
+            @Override public void run() {
+                if (myGen != generation.get()) return;
+                BluetoothSocket opened = null;
+                try {
+                    opened = openSocket();
+                    final BluetoothSocket current = opened;
+                    synchronized (ioLock) {
+                        socket = current;
+                    }
+                    startReader(current);
+                    sleepQuietly(POST_WRITE_DELAY_MS + 100L);
+                    drainStartup(current);
+                    command(BoseBmap.BLOCK_CONTROL, BoseBmap.FUNC_POWER, BoseBmap.OP_START,
+                            BoseBmap.powerPayload(false));
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() { listener.onLog("Bose power off sent"); }
+                    });
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() { callback.onPower(true); }
+                    });
+                } catch (Throwable t) {
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() {
+                            listener.onLog("Bose power off failed: " + t);
+                        }
+                    });
+                    listenerOnUi(new Runnable() {
+                        @Override public void run() { callback.onPower(false); }
+                    });
+                } finally {
+                    closeSocket();
+                }
+            }
+        });
+    }
+
+    /** Power callback. */
+    public interface PowerCallback {
+        void onPower(boolean delivered);
     }
 
     private void notifySettingResult(

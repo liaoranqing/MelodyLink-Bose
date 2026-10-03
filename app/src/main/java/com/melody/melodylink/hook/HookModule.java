@@ -142,6 +142,12 @@ public final class HookModule extends XposedModule {
     /** Injected "抗风噪" switch, kept for state re-sync. */
     private volatile Object boseWindPreference;
     private volatile int lastWindSwitchState = -1;
+
+    /** Injected "音效调节" panel: three EQ sliders, button remaps, mode slots. */
+    private final List<Object> boseEqSliders = new ArrayList<>();
+    private final List<Object> boseButtonDropdowns = new ArrayList<>();
+    private final List<Object> boseModeSlotSliders = new ArrayList<>();
+    private volatile Object boseExtraCategory;
     private volatile Boolean confirmedHuaweiLowLatency;
     private volatile XiaomiEarbudsFacade xiaomiTransport;
     private volatile boolean xiaomiBatteryReceiverRegistered;
@@ -1317,6 +1323,7 @@ public final class HookModule extends XposedModule {
             int sliderOrder = order == null ? -1 : order + 1;
             if (addBoseCncPreference(group, loader, activity, sliderOrder)) {
                 addBoseWindSwitch(group, loader, activity, sliderOrder + 1);
+                addBoseExtraCategory(group, loader, activity, sliderOrder + 2);
                 setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
                 for (int i = 0; i < 3; i++) {
                     mainHandler.postDelayed(this::keepNoiseEffectRowHidden,
@@ -2197,6 +2204,16 @@ public final class HookModule extends XposedModule {
     private static File boseCncStateFile() {
         Application application = currentApplication();
         return application == null ? null : MelodySharedStateStore.from(application).boseCncStateFile();
+    }
+
+    private static File boseExtraStateFile() {
+        Application application = currentApplication();
+        return application == null ? null : MelodySharedStateStore.from(application).boseExtraStateFile();
+    }
+
+    private static File boseExtraCommandFile() {
+        Application application = currentApplication();
+        return application == null ? null : MelodySharedStateStore.from(application).boseExtraCommandFile();
     }
 
     private static File boseCncCommandFile() {
@@ -3127,6 +3144,396 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    // ------------------------------------------------- EQ / buttons / mode slots / power
+
+    /** Command kinds mirrored in MelodySharedStateStore. */
+    private static final int CMD_EQ_BAND = 0;
+    private static final int CMD_BUTTON = 1;
+    private static final int CMD_MODE_SLOT = 2;
+    private static final int CMD_STANDBY = 3;
+    private static final int CMD_POWER_OFF = 4;
+
+    private static final String BOSE_EXTRA_CATEGORY_KEY = "melodylink.bose.extra";
+
+    /**
+     * Builds the "Bose 音效" category: 3-band EQ, Action-button remaps, custom
+     * mode slots, auto-off timer and power off. Everything is forwarded to the
+     * primary process (which owns the BMAP session) through one command file.
+     */
+    private void addBoseExtraCategory(
+            Object group, ClassLoader loader, Activity activity, int order) {
+        if (findPreferenceByKeyRecursive(group, BOSE_EXTRA_CATEGORY_KEY) != null) return;
+        Object category = newPreference(loader,
+                "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
+        if (category == null) category = newPreference(loader,
+                "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
+        if (category == null) return;
+        setPreferenceValue(category, "setTitle", "Bose \u97f3\u6548");
+        setPreferenceValue(category, "setKey", BOSE_EXTRA_CATEGORY_KEY);
+        if (order >= 0) setPreferenceValue(category, "setOrder", order);
+        if (!addPreference(group, category, loader)) return;
+        boseExtraCategory = category;
+
+        boseEqSliders.clear();
+        boseButtonDropdowns.clear();
+        boseModeSlotSliders.clear();
+
+        int[] shared = MelodySharedStateStore.readBoseExtraState(boseExtraStateFile());
+        int eqBass = shared != null && shared.length > 0 && shared[0] >= -10 ? shared[0] : 0;
+        int eqMid = shared != null && shared.length > 1 && shared[1] >= -10 ? shared[1] : 0;
+        int eqTreble = shared != null && shared.length > 2 && shared[2] >= -10 ? shared[2] : 0;
+
+        // --- 3-band EQ. Values are stored signed; the COUI bar is 0..20 offset by 10.
+        addBoseBandSlider(category, loader, activity, order + 1,
+                "\u4f4e\u9891", 0, eqBass);
+        addBoseBandSlider(category, loader, activity, order + 2,
+                "\u4e2d\u9891", 1, eqMid);
+        addBoseBandSlider(category, loader, activity, order + 3,
+                "\u9ad8\u9891", 2, eqTreble);
+
+        // --- Action button remaps: single / long / double press.
+        int[] events = {com.melody.melodylink.bose.BoseBmap.EVENT_SINGLE_PRESS,
+                com.melody.melodylink.bose.BoseBmap.EVENT_LONG_PRESS,
+                com.melody.melodylink.bose.BoseBmap.EVENT_DOUBLE_PRESS};
+        String[] eventNames = {"\u5355\u51fb", "\u957f\u6309", "\u53cc\u51fb"};
+        for (int i = 0; i < events.length; i++) {
+            int current = shared != null && shared.length > 3 + i ? shared[3 + i] : 0;
+            addBoseButtonRow(category, loader, activity, order + 4 + i,
+                    eventNames[i], events[i], current);
+        }
+
+        // --- Custom mode slots 5-10, each with its own CNC level.
+        for (int slot = com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST;
+                slot <= com.melody.melodylink.bose.BoseBmap.MODE_SLOT_LAST; slot++) {
+            int offset = 6 + (slot - com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST);
+            int level = shared != null && shared.length > offset ? shared[offset] : -1;
+            addBoseModeSlotRow(category, loader, activity, order + 7 + slot, slot, level);
+        }
+
+        // --- Auto-off timer + power off.
+        addBoseStandbyRow(category, loader, activity, order + 18);
+        addBosePowerRow(category, loader, activity, order + 19);
+
+        log(Log.INFO, TAG, event("installed Bose extras: EQ / buttons / mode slots / standby"));
+    }
+
+    /** One EQ band slider. The COUI bar counts 0..20; the wire value is -10..10. */
+    private void addBoseBandSlider(Object parent, ClassLoader loader, Activity activity,
+            int order, String title, final int bandIndex, int value) {
+        Object seek = newPreference(loader,
+                "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
+        if (seek == null) return;
+        setPreferenceValue(seek, "setKey", "melodylink.bose.eq." + bandIndex);
+        setPreferenceValue(seek, "setTitle", title);
+        setPreferenceValue(seek, "setPersistent", false);
+        setPreferenceValue(seek, "setPromptVolumePercent", Boolean.FALSE);
+        invokeInt(seek, "setBarMaxValue", 20);
+        final int clamped = Math.max(-10, Math.min(10, value));
+        invokeInt(seek, "setProgress", clamped + 10);
+        setPreferenceValue(seek, "setSummary", eqLabel(clamped));
+        if (order >= 0) setPreferenceValue(seek, "setOrder", order);
+        installBoseBandListener(seek, bandIndex);
+        if (addPreference(parent, seek, loader)) boseEqSliders.add(seek);
+    }
+
+    private static String eqLabel(int value) {
+        if (value == 0) return "0";
+        return value > 0 ? "+" + value : String.valueOf(value);
+    }
+
+    private void installBoseBandListener(Object preference, final int bandIndex) {
+        Method setter = null;
+        for (Method candidate : allMethods(preference.getClass())) {
+            if (candidate.getName().equals("setOnTrackChangeListener")
+                    && candidate.getParameterTypes().length == 1) {
+                setter = candidate;
+                break;
+            }
+        }
+        if (setter == null || !setter.getParameterTypes()[0].isInterface()) return;
+        Class<?> type = setter.getParameterTypes()[0];
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(classLoaderOf(type),
+                new Class<?>[]{type}, (proxy, method, args) -> {
+                    if ("toString".equals(method.getName())) return "MelodyLinkBoseEqListener";
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
+                    if (args == null || args.length < 1 || !(args[0] instanceof Number)) return null;
+                    int raw = ((Number) args[0]).intValue() - 10;   // bar 0..20 -> wire -10..10
+                    int value = Math.max(-10, Math.min(10, raw));
+                    setPreferenceValue(preference, "setSummary", eqLabel(value));
+                    forwardBoseCommand(CMD_EQ_BAND, bandIndex, value, 0, 0);
+                    return null;
+                });
+        try {
+            setter.setAccessible(true);
+            setter.invoke(preference, listener);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose EQ listener install failed", t);
+        }
+    }
+
+    private static ClassLoader classLoaderOf(Class<?> type) {
+        ClassLoader loader = type.getClassLoader();
+        return loader == null ? HookModule.class.getClassLoader() : loader;
+    }
+
+    /** One Action-button event row: tapping opens a list of supported actions. */
+    private void addBoseButtonRow(Object parent, ClassLoader loader, Activity activity,
+            int order, String label, final int event, int currentAction) {
+        Object row = newPreference(loader,
+                "com.oplus.melody.ui.component.detail.moresetting.MoreSettingItem", activity);
+        if (row == null) row = newSwitchPreference(loader, activity);
+        if (row == null) return;
+        setPreferenceValue(row, "setKey", "melodylink.bose.btn." + event);
+        setPreferenceValue(row, "setTitle", label);
+        setPreferenceValue(row, "setSummary",
+                com.melody.melodylink.bose.BoseBmap.actionLabel(currentAction));
+        if (order >= 0) setPreferenceValue(row, "setOrder", order);
+        installBoseButtonListener(row, event);
+        if (addPreference(parent, row, loader)) boseButtonDropdowns.add(row);
+    }
+
+    private void installBoseButtonListener(Object row, final int event) {
+        Method setter = null;
+        for (Method candidate : allMethods(row.getClass())) {
+            if (candidate.getName().equals("setOnPreferenceClickListener")
+                    && candidate.getParameterTypes().length == 1) {
+                setter = candidate;
+                break;
+            }
+        }
+        if (setter == null || !setter.getParameterTypes()[0].isInterface()) return;
+        Class<?> type = setter.getParameterTypes()[0];
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(classLoaderOf(type),
+                new Class<?>[]{type}, (proxy, method, args) -> {
+                    if ("toString".equals(method.getName())) return "MelodyLinkBoseButtonListener";
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
+                    if (!"onClick".equals(method.getName())) return null;
+                    showBoseActionPicker(row, event);
+                    return null;
+                });
+        try {
+            setter.setAccessible(true);
+            setter.invoke(row, listener);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose button listener install failed", t);
+        }
+    }
+
+    /**
+     * Offers the action list in a native single-choice dialog. [1.9] reports the
+     * supported set per button; until we have that read, the full action table is
+     * offered and the firmware rejects anything unsupported.
+     */
+    private void showBoseActionPicker(final Object row, final int event) {
+        try {
+            Context context = detailActivity;
+            if (context == null) return;
+            final int[] actions = {0, 2, 9, 4, 10, 11, 3, 7, 8, 5, 6, 13, 17, 19, 1, 12, 14, 15};
+            String[] labels = new String[actions.length];
+            for (int i = 0; i < actions.length; i++) {
+                labels[i] = com.melody.melodylink.bose.BoseBmap.actionLabel(actions[i]);
+            }
+            final int[] chosen = new int[1];
+            android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(context)
+                    .setTitle("\u6309\u952e\u529f\u80fd")
+                    .setItems(labels, (d, which) -> {
+                        chosen[0] = actions[which];
+                        setPreferenceValue(row, "setSummary", labels[which]);
+                        forwardBoseCommand(CMD_BUTTON, event, chosen[0], 0, 0);
+                    })
+                    .setNegativeButton("\u53d6\u6d88", null)
+                    .create();
+            dialog.show();
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose action picker failed", t);
+        }
+    }
+
+    /** One custom mode slot: name is fixed, CNC level is a slider. */
+    private void addBoseModeSlotRow(Object parent, ClassLoader loader, Activity activity,
+            int order, final int slot, int level) {
+        Object seek = newPreference(loader,
+                "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
+        if (seek == null) return;
+        setPreferenceValue(seek, "setKey", "melodylink.bose.mode." + slot);
+        setPreferenceValue(seek, "setTitle", "\u6a21\u5f0f\u69fd " + slot);
+        setPreferenceValue(seek, "setSummary", "\u964d\u566a\u7b49\u7ea7 "
+                + (level >= 0 ? String.valueOf(level) : "?") + "/10");
+        setPreferenceValue(seek, "setPersistent", false);
+        setPreferenceValue(seek, "setPromptVolumePercent", Boolean.FALSE);
+        invokeInt(seek, "setBarMaxValue", 10);
+        invokeInt(seek, "setProgress", Math.max(0, level));
+        if (order >= 0) setPreferenceValue(seek, "setOrder", order);
+        installBoseModeSlotListener(seek, slot);
+        if (addPreference(parent, seek, loader)) boseModeSlotSliders.add(seek);
+    }
+
+    private void installBoseModeSlotListener(Object preference, final int slot) {
+        Method setter = null;
+        for (Method candidate : allMethods(preference.getClass())) {
+            if (candidate.getName().equals("setOnTrackChangeListener")
+                    && candidate.getParameterTypes().length == 1) {
+                setter = candidate;
+                break;
+            }
+        }
+        if (setter == null || !setter.getParameterTypes()[0].isInterface()) return;
+        Class<?> type = setter.getParameterTypes()[0];
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(classLoaderOf(type),
+                new Class<?>[]{type}, (proxy, method, args) -> {
+                    if ("toString".equals(method.getName())) return "MelodyLinkBoseModeSlot";
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
+                    if (args == null || args.length < 1 || !(args[0] instanceof Number)) return null;
+                    int value = Math.max(0, Math.min(10, ((Number) args[0]).intValue()));
+                    setPreferenceValue(preference, "setSummary",
+                            "\u964d\u566a\u7b49\u7ea7 " + value + "/10");
+                    forwardBoseCommand(CMD_MODE_SLOT, slot, value, 0, 0);
+                    return null;
+                });
+        try {
+            setter.setAccessible(true);
+            setter.invoke(preference, listener);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose mode slot listener install failed", t);
+        }
+    }
+
+    /** Auto-off timer row: cycles through the firmware's preset minute values. */
+    private void addBoseStandbyRow(Object parent, ClassLoader loader, Activity activity, int order) {
+        Object row = newSwitchPreference(loader, activity);
+        if (row == null) return;
+        setPreferenceValue(row, "setKey", "melodylink.bose.standby");
+        setPreferenceValue(row, "setTitle", "\u81ea\u52a8\u5173\u673a");
+        setPreferenceValue(row, "setSummary",
+                com.melody.melodylink.bose.BoseBmap.standbyLabel(
+                        boseTransport.getStandbyMinutes() < 0 ? 0 : boseTransport.getStandbyMinutes()));
+        if (order >= 0) setPreferenceValue(row, "setOrder", order);
+        installBoseStandbyListener(row);
+        addPreference(parent, row, loader);
+    }
+
+    private void installBoseStandbyListener(Object row) {
+        Method setter = null;
+        for (Method candidate : allMethods(row.getClass())) {
+            if (candidate.getName().equals("setOnPreferenceClickListener")
+                    && candidate.getParameterTypes().length == 1) {
+                setter = candidate;
+                break;
+            }
+        }
+        if (setter == null || !setter.getParameterTypes()[0].isInterface()) return;
+        Class<?> type = setter.getParameterTypes()[0];
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(classLoaderOf(type),
+                new Class<?>[]{type}, (proxy, method, args) -> {
+                    if ("toString".equals(method.getName())) return "MelodyLinkBoseStandby";
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
+                    if (!"onClick".equals(method.getName())) return null;
+                    int current = boseTransport.getStandbyMinutes();
+                    int[] presets = com.melody.melodylink.bose.BoseBmap.STANDBY_MINUTES;
+                    int next = presets[0];
+                    for (int value : presets) {
+                        if (value > current) {
+                            next = value;
+                            break;
+                        }
+                    }
+                    setPreferenceValue(row, "setSummary",
+                            com.melody.melodylink.bose.BoseBmap.standbyLabel(next));
+                    forwardBoseCommand(CMD_STANDBY, next, 0, 0, 0);
+                    return null;
+                });
+        try {
+            setter.setAccessible(true);
+            setter.invoke(row, listener);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose standby listener install failed", t);
+        }
+    }
+
+    /** Power-off row with a confirmation step: the earbuds drop the link. */
+    private void addBosePowerRow(Object parent, ClassLoader loader, Activity activity, int order) {
+        Object row = newSwitchPreference(loader, activity);
+        if (row == null) return;
+        setPreferenceValue(row, "setKey", "melodylink.bose.poweroff");
+        setPreferenceValue(row, "setTitle", "\u5173\u673a");
+        setPreferenceValue(row, "setSummary", "\u5173\u95ed\u8033\u673a\u5e76\u65ad\u5f00\u8fde\u63a5");
+        if (order >= 0) setPreferenceValue(row, "setOrder", order);
+        installBosePowerListener(row);
+        addPreference(parent, row, loader);
+    }
+
+    private void installBosePowerListener(Object row) {
+        Method setter = null;
+        for (Method candidate : allMethods(row.getClass())) {
+            if (candidate.getName().equals("setOnPreferenceClickListener")
+                    && candidate.getParameterTypes().length == 1) {
+                setter = candidate;
+                break;
+            }
+        }
+        if (setter == null || !setter.getParameterTypes()[0].isInterface()) return;
+        Class<?> type = setter.getParameterTypes()[0];
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(classLoaderOf(type),
+                new Class<?>[]{type}, (proxy, method, args) -> {
+                    if ("toString".equals(method.getName())) return "MelodyLinkBosePower";
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
+                    if (!"onClick".equals(method.getName())) return null;
+                    confirmBosePowerOff();
+                    return null;
+                });
+        try {
+            setter.setAccessible(true);
+            setter.invoke(row, listener);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose power listener install failed", t);
+        }
+    }
+
+    private void confirmBosePowerOff() {
+        try {
+            Context context = detailActivity;
+            if (context == null) return;
+            new android.app.AlertDialog.Builder(context)
+                    .setTitle("\u5173\u673a")
+                    .setMessage("\u786e\u5b9a\u5173\u95ed\u8033\u673a\uff1f\u5c06\u65ad\u5f00\u84dd\u7259\u8fde\u63a5\u3002")
+                    .setPositiveButton("\u5173\u673a", (d, which) -> {
+                        setPreferenceValue(boseExtraCategory, "setKey", BOSE_EXTRA_CATEGORY_KEY);
+                        forwardBoseCommand(CMD_POWER_OFF, 0, 0, 0, 0);
+                    })
+                    .setNegativeButton("\u53d6\u6d88", null)
+                    .show();
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose power confirm failed", t);
+        }
+    }
+
+    /**
+     * Writes one transaction to the shared command file. The primary process polls
+     * it and performs the BMAP write, then republishes the state file.
+     */
+    private void forwardBoseCommand(int kind, int index, int value, int extra1, int extra2) {
+        try {
+            String address = targetAddress == null
+                    ? MelodySharedStateStore.readBoseExtraAddress(boseExtraStateFile())
+                    : targetAddress;
+            if (address == null) {
+                address = com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
+                        .getKNOWN_MACS().iterator().next();
+            }
+            MelodySharedStateStore.writeBoseExtraCommand(boseExtraCommandFile(), address,
+                    kind, index, value, extra1, extra2, java.util.UUID.randomUUID().toString());
+            log(Log.INFO, TAG, event("queued Bose command kind=" + kind + " index=" + index
+                    + " value=" + value));
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose command forward failed", t);
+        }
+    }
+
     /** Pushes the earbud's real wind-block state back onto the injected switch. */
     private void updateBoseWindSwitch() {
         Object toggle = boseWindPreference;
@@ -3495,6 +3902,7 @@ public final class HookModule extends XposedModule {
             observeSharedSonyBatteryCommand();
             observeSharedSonySettingCommand();
             observeSharedBoseCncCommand();
+            observeSharedBoseExtraCommand();
         }
         MelodySharedStateStore.SharedState state = readSharedSonyState();
         String fingerprint = state == null
@@ -3567,6 +3975,108 @@ public final class HookModule extends XposedModule {
         String publishedAddress = targetAddress == null ? command.address : targetAddress;
         MelodySharedStateStore.writeBoseCncState(boseCncStateFile(), publishedAddress, level,
                 boseTransport.getWindBlock());
+    }
+
+    private volatile String lastBoseExtraCommandNonce;
+
+    /**
+     * Primary-process side of the EQ / button / mode-slot / standby / power
+     * channel. Each command opens one BMAP session, performs the write and
+     * republishes the state file so the :fg page re-reads the real values.
+     */
+    private void observeSharedBoseExtraCommand() {
+        MelodySharedStateStore.SharedBoseExtraCommand command =
+                MelodySharedStateStore.readBoseExtraCommand(boseExtraCommandFile());
+        if (command == null) return;
+        if (command.nonce.equals(lastBoseExtraCommandNonce)) return;
+        lastBoseExtraCommandNonce = command.nonce;
+        if (!isBoseCommandTarget(command.address)) return;
+        BluetoothDevice device = resolveBoseForTile();
+        if (device == null) {
+            log(Log.WARN, TAG, event("Bose extra command skipped: device unavailable"));
+            return;
+        }
+        switch (command.kind) {
+            case CMD_EQ_BAND:
+                boseTransport.readEq(null);
+                boseTransport.writeEqBand(command.index, command.value,
+                        (ok, bass, mid, treble) -> {
+                            log(Log.INFO, TAG, event("Bose EQ band " + command.index + " -> "
+                                    + command.value + (ok ? " ok" : " failed")
+                                    + " [bass=" + bass + " mid=" + mid + " treble=" + treble + "]"));
+                            publishBoseExtraState();
+                        });
+                break;
+            case CMD_BUTTON:
+                boseTransport.writeButton(com.melody.melodylink.bose.BoseBmap.BUTTON_ACTION,
+                        command.index, command.value, (ok, bass, mid, treble) -> {
+                            log(Log.INFO, TAG, event("Bose button ev=" + command.index
+                                    + " -> " + com.melody.melodylink.bose.BoseBmap
+                                    .actionLabel(command.value) + (ok ? " ok" : " failed")));
+                            publishBoseExtraState();
+                        });
+                break;
+            case CMD_MODE_SLOT:
+                boseTransport.writeModeSlot(command.index,
+                        "ML" + command.index, command.value, 0, boseTransport.getWindBlock() > 0 ? 1 : 0,
+                        (ok, slot) -> {
+                            log(Log.INFO, TAG, event("Bose mode slot " + slot
+                                    + " cnc=" + command.value + (ok ? " ok" : " failed")));
+                            publishBoseExtraState();
+                        });
+                break;
+            case CMD_STANDBY:
+                boseTransport.writeStandbyTimer(command.index, (ok, minutes) -> {
+                    log(Log.INFO, TAG, event("Bose standby timer -> "
+                            + com.melody.melodylink.bose.BoseBmap.standbyLabel(minutes)
+                            + (ok ? " ok" : " failed")));
+                    publishBoseExtraState();
+                });
+                break;
+            case CMD_POWER_OFF:
+                log(Log.INFO, TAG, event("executing forwarded Bose power off"));
+                boseTransport.powerOff(delivered -> {
+                    log(delivered ? Log.INFO : Log.WARN, TAG,
+                            event("Bose power off " + (delivered ? "sent" : "failed")));
+                });
+                break;
+            default:
+                log(Log.WARN, TAG, event("unknown Bose extra command kind=" + command.kind));
+        }
+    }
+
+    /** Publishes EQ / button / mode-slot state for the :fg detail page. */
+    private void publishBoseExtraState() {
+        String address = targetAddress;
+        if (address == null) {
+            address = com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
+                    .getKNOWN_MACS().iterator().next();
+        }
+        int[] values = new int[12];
+        values[0] = boseTransport.getEqBand(0);
+        values[1] = boseTransport.getEqBand(1);
+        values[2] = boseTransport.getEqBand(2);
+        values[3] = boseTransport.getButtonAction(
+                com.melody.melodylink.bose.BoseBmap.BUTTON_ACTION,
+                com.melody.melodylink.bose.BoseBmap.EVENT_SINGLE_PRESS);
+        values[4] = boseTransport.getButtonAction(
+                com.melody.melodylink.bose.BoseBmap.BUTTON_ACTION,
+                com.melody.melodylink.bose.BoseBmap.EVENT_LONG_PRESS);
+        values[5] = boseTransport.getButtonAction(
+                com.melody.melodylink.bose.BoseBmap.BUTTON_ACTION,
+                com.melody.melodylink.bose.BoseBmap.EVENT_DOUBLE_PRESS);
+        for (int slot = com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST;
+                slot <= com.melody.melodylink.bose.BoseBmap.MODE_SLOT_LAST; slot++) {
+            int level = boseTransport.getModeSlotCnc(slot);
+            values[6 + (slot - com.melody.melodylink.bose.BoseBmap.MODE_SLOT_FIRST)] = level;
+        }
+        MelodySharedStateStore.writeBoseExtraState(boseExtraStateFile(), address, values);
+    }
+
+    /** Same address policy the CNC command path uses. */
+    private boolean isBoseCommandTarget(String address) {
+        if (isTargetAddress(address)) return true;
+        return com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(address);
     }
 
     private void observeSharedSonyCommand() {

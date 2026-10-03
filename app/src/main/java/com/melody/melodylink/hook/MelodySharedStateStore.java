@@ -14,6 +14,8 @@ final class MelodySharedStateStore {
     static final String BATTERY_COMMAND_FILE = ".melodylink_sony_battery_command";
     static final String SETTING_COMMAND_FILE = ".melodylink_sony_setting_command";
     static final String BOSE_CNC_STATE_FILE = ".melodylink_bose_cnc_state";
+    static final String BOSE_EXTRA_STATE_FILE = ".melodylink_bose_extra_state";
+    static final String BOSE_EXTRA_COMMAND_FILE = ".melodylink_bose_extra_command";
     static final String BOSE_CNC_COMMAND_FILE = ".melodylink_bose_cnc_command";
 
     private final File directory;
@@ -44,6 +46,14 @@ final class MelodySharedStateStore {
 
     File boseCncStateFile() {
         return new File(directory, BOSE_CNC_STATE_FILE);
+    }
+
+    File boseExtraStateFile() {
+        return new File(directory, BOSE_EXTRA_STATE_FILE);
+    }
+
+    File boseExtraCommandFile() {
+        return new File(directory, BOSE_EXTRA_COMMAND_FILE);
     }
 
     File boseCncCommandFile() {
@@ -267,6 +277,85 @@ final class MelodySharedStateStore {
             this.address = address;
             this.settingId = settingId;
             this.value = value;
+            this.nonce = nonce;
+        }
+    }
+
+    /**
+     * EQ / button-remap / mode-slot state published by the primary process:
+     * bass, mid, treble, then the three Action-button event slots
+     * (single / long / double press), then one byte per custom mode slot 5-10
+     * holding its CNC level (255 = unknown).
+     */
+    static boolean writeBoseExtraState(File file, String address, int[] values) {
+        if (values == null) return false;
+        StringBuilder out = new StringBuilder(address);
+        for (int value : values) out.append('\n').append(value);
+        out.append('\n');
+        return write(file, out.toString());
+    }
+
+    static int[] readBoseExtraState(File file) {
+        String[] lines = readLines(file, 16);
+        if (lines == null) return null;
+        int[] values = new int[lines.length - 1];
+        for (int i = 1; i < lines.length; i++) {
+            try {
+                values[i - 1] = Integer.parseInt(lines[i].trim());
+            } catch (NumberFormatException ignored) {
+                values[i - 1] = -1;
+            }
+        }
+        return values;
+    }
+
+    static String readBoseExtraAddress(File file) {
+        String[] lines = readLines(file, 16);
+        return lines == null ? null : lines[0].trim();
+    }
+
+    /**
+     * One settings transaction forwarded from the :fg detail page to the primary
+     * process, which owns the BMAP session. kind: 0=EQ band, 1=button, 2=mode slot.
+     * For kind 0 the pair carries (bandId, value); for kind 1 (button, event) with
+     * value=action; for kind 2 (slot, cnc) with extra1=spatial, extra2=wind.
+     */
+    static boolean writeBoseExtraCommand(File file, String address, int kind, int index,
+            int value, int extra1, int extra2, String nonce) {
+        return write(file, address + "\n" + kind + "\n" + index + "\n" + value + "\n"
+                + extra1 + "\n" + extra2 + "\n" + nonce + "\n");
+    }
+
+    static SharedBoseExtraCommand readBoseExtraCommand(File file) {
+        String[] lines = readLines(file, 7);
+        if (lines == null) return null;
+        try {
+            return new SharedBoseExtraCommand(lines[0].trim(),
+                    Integer.parseInt(lines[1].trim()), Integer.parseInt(lines[2].trim()),
+                    Integer.parseInt(lines[3].trim()), Integer.parseInt(lines[4].trim()),
+                    Integer.parseInt(lines[5].trim()), lines[6].trim());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    static final class SharedBoseExtraCommand {
+        final String address;
+        final int kind;
+        final int index;
+        final int value;
+        final int extra1;
+        final int extra2;
+        final String nonce;
+
+        SharedBoseExtraCommand(String address, int kind, int index, int value, int extra1,
+                int extra2, String nonce) {
+            this.address = address;
+            this.kind = kind;
+            this.index = index;
+            this.value = value;
+            this.extra1 = extra1;
+            this.extra2 = extra2;
             this.nonce = nonce;
         }
     }
