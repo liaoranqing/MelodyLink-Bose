@@ -86,6 +86,7 @@ public final class HookModule extends XposedModule {
     private static final String ADVANCED_SETTING_KEY_PREFIX = "melodylink.setting.";
     private static final String HUAWEI_LOW_LATENCY_SETTING_KEY = "melodylink.huawei.low_latency";
     private static final String SOUND_QUALITY_TITLE = "音质音效";
+    private static final String BOSE_CNC_KEY = "melodylink.bose.cnc";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
     private static final int WF_1000XM3_PRODUCT_ID = 0x067410;
     private volatile int targetAddressHash;
@@ -683,6 +684,7 @@ public final class HookModule extends XposedModule {
                         Object result = chain.proceed();
                         removeUnsupportedDetailCategory(preference);
                         hideAncStrengthPreference(preference);
+                        captureNoiseEffectRow(preference);
                         return result;
                     }
                     if ("detailActivityCreate".equals(label)) {
@@ -1240,6 +1242,52 @@ public final class HookModule extends XposedModule {
     }
 
     /** Melody's child-menu is for ANC intensity, which this module intentionally does not support. */
+    /**
+     * The "降噪效果" row is the reliable anchor for the injected CNC slider.
+     * Capturing it the moment Melody adds it (inside detailPreferenceAdd) beats
+     * searching the finished tree later: 0.4.3 lost the slider whenever
+     * findPreferenceByTitle ran before the row existed, and the recursive
+     * Collection-field walk is not reliable across PreferenceGroup subclasses.
+     * The row itself is a dead end for Bose (it opens OPPO's own noise page,
+     * which drives a non-existent SPP channel) so we hide it too.
+     */
+    private void captureNoiseEffectRow(Object preference) {
+        if (preference == null || !boseBonded()) return;
+        if (preference.getClass().getName()
+                .equals("com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem")) {
+            Object parent = invokeNoArg(preference, "getParent");
+            if (parent == null) return;
+            final Object group = parent;
+            final Object row = preference;
+            // addPreference must not run inside the addPreference hook itself —
+            // defer to the next frame, and retry once in case the group is still
+            // being populated.
+            for (int i = 0; i < 2; i++) {
+                mainHandler.postDelayed(() -> installBoseCncUnderNoiseRow(group, row), i == 0 ? 80L : 400L);
+            }
+        }
+    }
+
+    private void installBoseCncUnderNoiseRow(Object group, Object noiseRow) {
+        try {
+            if (group == null || noiseRow == null) return;
+            if (!boseBonded()) return;
+            ClassLoader loader = noiseRow.getClass().getClassLoader();
+            Object context = invokeNoArg(noiseRow, "getContext");
+            if (!(context instanceof Context)) return;
+            Activity activity = findActivity((Context) context);
+            if (activity == null) activity = detailActivity;
+            if (activity == null) return;
+            if (findPreferenceByKeyRecursive(group, BOSE_CNC_KEY)) return;
+            Integer order = (Integer) invokeNoArg(noiseRow, "getOrder");
+            if (addBoseCncPreference(group, loader, activity, order == null ? -1 : order + 1)) {
+                log(Log.INFO, TAG, event("installed Bose CNC slider under noise-effect row"));
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose CNC slider install failed", t);
+        }
+    }
+
     private void hideAncStrengthPreference(Object preference) {
         if (preference == null || !hasMappedDeviceActive()) return;
         try {
@@ -1332,11 +1380,37 @@ public final class HookModule extends XposedModule {
             log(Log.WARN, TAG, event("Bose " + surface + " image skipped: asset unavailable"));
             return false;
         }
-        imageView.setImageURI(Uri.fromFile(imageFile));
-        imageView.setVisibility(View.VISIBLE);
-        hideLoadingView(readField(owner, loadingField));
+        applyBoseImage(imageView, imageFile, owner, loadingField);
+        // Melody loads its own product art asynchronously (spinner first, generic
+        // earbud photo last) and that late setImageDrawable overwrites ours — the
+        // reason the Bose photo appeared only on some page opens. Re-apply a few
+        // times so our image is the final state; the loading spinner is cancelled
+        // on every pass so it cannot reappear either.
+        final Object imageOwner = owner;
+        for (int i = 0; i < 4; i++) {
+            final long delay = i == 0 ? 250L : (i == 1 ? 900L : (i == 2 ? 2000L : 4000L));
+            mainHandler.postDelayed(() -> {
+                if (imageOwner == null) return;
+                File again = materializeBoseImage();
+                if (again == null) return;
+                applyBoseImage(imageView, again, imageOwner, loadingField);
+            }, delay);
+        }
         log(Log.INFO, TAG, event("replaced Bose " + surface + " product image"));
         return true;
+    }
+
+    /** Sets the Bose photo and silences the stock loading spinner for that view. */
+    private void applyBoseImage(ImageView imageView, File imageFile, Object owner, String loadingField) {
+        try {
+            imageView.setImageURI(Uri.fromFile(imageFile));
+            imageView.setVisibility(View.VISIBLE);
+            Object loading = loadingField == null ? null : readField(owner, loadingField);
+            hideLoadingView(loading);
+            if (loading instanceof View) ((View) loading).setVisibility(View.GONE);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose image apply failed", t);
+        }
     }
 
     private File materializeBoseImage() {
@@ -2528,21 +2602,14 @@ public final class HookModule extends XposedModule {
             // page. The privacy page reuses the same fragment class but has no such
             // row, so this lookup doubles as the page guard (0.4.1 regression: the
             // root-screen fallback dumped "高级设置" at the bottom of every page).
+            // The Bose CNC slider is injected from the detailPreferenceAdd hook
+            // (captureNoiseEffectRow), which anchors on the real NoiseReductionItem
+            // instance as Melody adds it. 0.4.3 lost the slider whenever this
+            // tree walk ran before the row existed. Here we only make sure the
+            // dead-end "降噪效果" row stays hidden even if the add hook missed it.
             if (hasBoseCnc) {
                 Object noiseRow = findPreferenceByTitle(screen, NOISE_EFFECT_TITLE);
-                if (noiseRow != null
-                        && !findPreferenceByKeyRecursive(screen, "melodylink.bose.cnc")) {
-                    // The row itself is a dead end for Bose: it opens OPPO's own
-                    // noise-effect page, which drives a non-existent SPP channel.
-                    // Hide it — the CNC slider below is its functional replacement.
-                    setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
-                    Object cncParent = invokeNoArg(noiseRow, "getParent");
-                    Integer cncOrder = (Integer) invokeNoArg(noiseRow, "getOrder");
-                    addBoseCncPreference(cncParent != null ? cncParent : screen, loader, activity,
-                            cncOrder == null ? -1 : cncOrder + 1);
-                    log(Log.INFO, TAG, event("installed Bose CNC level slider under noise-effect row"
-                            + " (noise-effect row hidden)"));
-                }
+                if (noiseRow != null) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
             }
             if (!hasSonySettings && !hasHuaweiLowLatency) return;
             Object anchor = findPreferenceByTitle(screen, SOUND_QUALITY_TITLE);
@@ -2823,14 +2890,16 @@ public final class HookModule extends XposedModule {
      * widget exposes clean public setBarMaxValue/setProgress/setOnTrackChangeListener.
      * Placed directly under the "降噪效果" row, not in a buried category.
      */
-    private void addBoseCncPreference(Object parent, ClassLoader loader, Activity activity, int order) {
+    private boolean addBoseCncPreference(
+            Object parent, ClassLoader loader, Activity activity, int order) {
+        if (parent == null) return false;
         Object seek = newPreference(loader,
                 "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
         if (seek == null) {
             log(Log.WARN, TAG, event("Bose CNC slider unavailable: COUI seekbar ctor failed"));
-            return;
+            return false;
         }
-        setPreferenceValue(seek, "setKey", "melodylink.bose.cnc");
+        setPreferenceValue(seek, "setKey", BOSE_CNC_KEY);
         setPreferenceValue(seek, "setTitle", "\u964d\u566a\u7b49\u7ea7");
         setPreferenceValue(seek, "setPersistent", false);
         // Raw 0..10 readout, not a percentage.
@@ -2846,9 +2915,12 @@ public final class HookModule extends XposedModule {
         setPreferenceValue(seek, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + level + "/10");
         if (order >= 0) setPreferenceValue(seek, "setOrder", order);
         installBoseCncListener(seek, loader);
-        if (addPreference(parent, seek, loader)) {
-            boseCncPreference = seek;
+        if (!addPreference(parent, seek, loader)) {
+            log(Log.WARN, TAG, event("Bose CNC slider add rejected by parent"));
+            return false;
         }
+        boseCncPreference = seek;
+        return true;
     }
 
     /** Re-sync the injected slider when a BMAP session reports the real CNC level. */
