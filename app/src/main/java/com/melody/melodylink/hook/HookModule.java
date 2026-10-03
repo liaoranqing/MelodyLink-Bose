@@ -2316,7 +2316,9 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.cnc.onespace.skip", "reason", "no_tree");
                 return;
             }
-            if (findPreferenceByKeyRecursive(tree, BOSE_CNC_ONESPACE_KEY) != null) return;
+            // Idempotence: onBindViewHolder re-runs on every scroll and state change, and
+            // findPreferenceByKeyRecursive answers with a boolean, not a node.
+            if (findPreferenceByKeyRecursive(tree, BOSE_CNC_ONESPACE_KEY)) return;
 
             ClassLoader loader = preference.getClass().getClassLoader();
             Object seek = newPreference(loader,
