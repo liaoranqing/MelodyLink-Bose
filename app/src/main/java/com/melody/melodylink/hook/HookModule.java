@@ -104,6 +104,8 @@ public final class HookModule extends XposedModule {
      * TextUtils.isEmpty() while adding no visible text — the row carries its own title.
      */
     private static final String PLACEHOLDER_SUMMARY = " ";
+    /** The catalog entry with the most controls, used to fill a null children list. */
+    private static volatile Object richestCatalogEntry;
     /** Marks catalog entries we added, so containsBoseEntry() can recognise them. */
     private static final String BOSE_ENTRY_PREFIX = "Bose QC Ultra";
     private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
@@ -978,6 +980,18 @@ public final class HookModule extends XposedModule {
                             // what the matcher actually compared.
                             MLog.event("bose.detail.whitelist.still_null",
                                     "mac", String.valueOf(mac));
+                        }
+                        if (result != null && isBoseTarget) {
+                            // 0.5.44: the lookup finally returns a real DTO, but it is the
+                            // host's own OPPO Enco X3 entry and its children field is null.
+                            // Whatever the host builds sections from, a null children yields
+                            // none. Fill it from the richest catalog entry so there is
+                            // something for the page to render.
+                            Object filled = fillMissingChildren(result);
+                            if (filled) {
+                                MLog.event("bose.detail.children_filled",
+                                        "into", String.valueOf(readField(result, "name")));
+                            }
                         }
                         return result;
                     }
@@ -2106,6 +2120,58 @@ public final class HookModule extends XposedModule {
         return total;
     }
 
+    /**
+     * Copies a populated children list into a catalog entry that has none.
+     *
+     * <p>0.5.44. The lookup returns the host's own OPPO Enco X3 entry with
+     * {@code children=null}. If the detail page derives its sections from that field, null
+     * means no sections — which matches the symptom exactly: a fully configured device and an
+     * empty page.
+     *
+     * <p>The source is the richest entry we have seen in the catalog, remembered when
+     * {@code b()} was last walked. Operates on the object the host is about to use, so the
+     * sections come from real catalog data rather than anything we invented.
+     *
+     * @return true when children were filled in
+     */
+    private boolean fillMissingChildren(Object dto) {
+        if (dto == null || richestCatalogEntry == null) return false;
+        try {
+            java.lang.reflect.Field target = findField(dto.getClass(), "children");
+            java.lang.reflect.Field source = findField(
+                    richestCatalogEntry.getClass(), "children");
+            if (target == null || source == null) return false;
+            target.setAccessible(true);
+            source.setAccessible(true);
+            Object existing = target.get(dto);
+            if (existing instanceof java.util.Collection
+                    && !((java.util.Collection<?>) existing).isEmpty()) {
+                return false; // already populated; leave it alone
+            }
+            Object donor = source.get(richestCatalogEntry);
+            if (!(donor instanceof java.util.Collection)
+                    || ((java.util.Collection<?>) donor).isEmpty()) {
+                return false;
+            }
+            target.set(dto, donor);
+            return true;
+        } catch (Throwable t) {
+            MLog.event("bose.detail.children_error", "error", MLog.compactThrowable(t));
+            return false;
+        }
+    }
+
+    /** Finds a field by name anywhere on the class chain. */
+    private static java.lang.reflect.Field findField(Class<?> type, String name) {
+        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+            try {
+                return c.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        return null;
+    }
+
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
         if (!(listResult instanceof java.util.List)) return listResult;
         java.util.List<?> list = (java.util.List<?>) listResult;
@@ -2134,12 +2200,18 @@ public final class HookModule extends XposedModule {
                     richestIndex = i;
                 }
             }
+            if (richestIndex >= 0) richestCatalogEntry = list.get(richestIndex);
             MLog.event("bose.catalog.probe",
                     "size", list.size(),
                     "with_controls", withControls,
                     "richest", richest,
                     "richest_name", richestIndex >= 0
                             ? String.valueOf(readField(list.get(richestIndex), "name")) : "n/a",
+                    // 0.5.44: the entry the host actually returns has children=null. If the
+                    // section list comes from children, that is the whole reason the page is
+                    // empty. Dump the richest entry so we can see what a populated one holds.
+                    "richest_dump", richestIndex >= 0
+                            ? describeDto(list.get(richestIndex)) : "n/a",
                     "sample", String.valueOf(list.isEmpty()
                             ? "empty" : list.get(0).getClass().getName()));
             if (list.isEmpty()) return listResult;
