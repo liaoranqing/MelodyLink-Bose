@@ -99,7 +99,13 @@ public final class HookModule extends XposedModule {
      * not enough. 400ms keeps the content stable without measurable cost: the walk touches
      * roughly a dozen nodes and only runs while the page is actually focused.
      */
-    private static final long REVEAL_POLL_INTERVAL_MS = 400L;
+    /**
+     * Text handed to MelodyJumpPreference rows that have no summary of their own.
+     * MelodyJumpPreference.a() hides a row whose summary is empty, and with no catalog
+     * entry every Bose row ends up empty. A single space is enough to pass TextUtils
+     * .isEmpty() while adding no visible text; the row itself carries the title.
+     */
+    private static final String PLACEHOLDER_SUMMARY = " ";
     private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
     private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
@@ -919,10 +925,10 @@ public final class HookModule extends XposedModule {
                             // Bose has no catalog entry and the page responds to that by
                             // hiding the rows it cannot populate. Un-hiding them is safe: a
                             // row with no data renders empty rather than crashing.
-                            forceRevealDetailContent(created);
+                            fillDetailRowSummaries(created);
                             for (long delay : new long[]{300L, 800L, 2000L, 5000L}) {
                                 mainHandler.postDelayed(() -> {
-                                    forceRevealDetailContent(created);
+                                    fillDetailRowSummaries(created);
                                     reportDetailContainer("t+" + delay);
                                 }, delay);
                             }
@@ -1871,8 +1877,6 @@ public final class HookModule extends XposedModule {
     }
 
     private static volatile String pendingDetailMac;
-    /** Guards against stacking poll timers if forceRevealDetailContent is re-entered. */
-    private boolean detailRevealPollScheduled;
 
     /**
      * Builds a minimal {@code WhitelistConfigDTO} so Melody's own detail page has something
@@ -2043,72 +2047,75 @@ public final class HookModule extends XposedModule {
      * only inside the detail container, so the app bar and its own hidden stubs are left
      * alone. A row with no data renders empty rather than throwing.
      */
-    private void forceRevealDetailContent(Activity activity) {
+    /**
+     * Gives the detail rows the summary text the host demands before it shows them.
+     *
+     * <p>0.5.28 root cause, read off {@code MelodyJumpPreference.a()} in 17.6.3:
+     * <pre>
+     *   if (TextUtils.isEmpty(q)) {     // q = the summary string
+     *       c.setVisibility(GONE);      // c = mTextContainer
+     *   }
+     * </pre>
+     * {@code a()} is called from {@code onFinishInflate}, so a row is hidden the moment it
+     * is inflated. For Bose every row ends up with an empty summary — the host has no
+     * catalog entry to derive text from — so every row is GONE. That is the real reason the
+     * page rendered as pure background, and the reason 0.5.27's force-reveal showed content
+     * for a moment before the host re-applied its own rule on a later update.
+     *
+     * <p>The fix is to supply the missing text, so the host's own visibility logic keeps
+     * the rows on screen. No polling, no fighting the layout.
+     */
+    private void fillDetailRowSummaries(Activity activity) {
         try {
             if (activity == null || activity.isFinishing()) return;
-            if (!activity.hasWindowFocus()) return;
             ViewGroup container = findDetailContainer(activity);
             if (container == null) return;
-            int revealed = revealHiddenViews(container, 0);
-            if (revealed > 0) {
-                MLog.event("bose.detail.revealed", "count", revealed);
+            int filled = fillSummaries(container, 0);
+            if (filled > 0) {
+                MLog.event("bose.detail.summary_filled", "count", filled);
             }
         } catch (Throwable t) {
-            log(Log.WARN, TAG, "Bose detail reveal failed", t);
+            log(Log.WARN, TAG, "Bose detail summary fill failed", t);
         }
-        // 0.5.27: a one-shot reveal is not enough. The page renders, we reveal six nodes
-        // (evt=bose.detail.revealed count=6, and the tree then shows a clean
-        // "LinearLayout[2 kids, ... 1440x4272] 1440x3168" with no HIDDEN markers), the
-        // user sees content for a moment — and then the host hides it again. It reacts to
-        // some later state (a LiveData update, a connection refresh) and re-applies GONE
-        // to the rows it cannot populate. Polling is blunt but it beats tracing every
-        // call site, and the work is trivial: a walk over a dozen nodes, only while the
-        // page actually has focus.
-        scheduleRevealPoll(activity);
     }
 
-    private void scheduleRevealPoll(Activity activity) {
-        if (detailRevealPollScheduled) return;
-        detailRevealPollScheduled = true;
-        mainHandler.postDelayed(() -> {
-            detailRevealPollScheduled = false;
-            try {
-                if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
-                    return;
-                }
-                if (activity.hasWindowFocus()) {
-                    forceRevealDetailContent(activity);
-                }
-            } catch (Throwable ignored) {
+    /** True when this view is a MelodyJumpPreference row or a subclass of it. */
+    private static boolean isJumpPreferenceRow(Object view) {
+        if (view == null) return false;
+        for (Class<?> type = view.getClass(); type != null; type = type.getSuperclass()) {
+            if ("com.oplus.melody.ui.widget.MelodyJumpPreference".equals(type.getName())) {
+                return true;
             }
-        }, REVEAL_POLL_INTERVAL_MS);
+        }
+        return false;
     }
 
-    private static int revealHiddenViews(View view, int depth) {
+    private static int fillSummaries(View view, int depth) {
         if (view == null || depth > 8) return 0;
-        int revealed = 0;
-        try {
-            boolean hidden = view.getVisibility() != View.VISIBLE;
-            boolean transparent = view.getAlpha() <= 0.01f;
-            if (hidden || transparent) {
-                // 0x0-sized nodes are collapsed placeholders, not content: showing them
-                // would add empty rows. Only reveal nodes that actually occupy space.
-                boolean occupiesSpace = view.getWidth() > 0 && view.getHeight() > 0;
-                if (occupiesSpace) {
-                    if (hidden) view.setVisibility(View.VISIBLE);
-                    if (transparent) view.setAlpha(1.0f);
-                    revealed++;
+        int filled = 0;
+        if (isJumpPreferenceRow(view)) {
+            Object summary = readField(view, "q");
+            Object container = readField(view, "c");
+            boolean empty = summary == null
+                    || (summary instanceof CharSequence && ((CharSequence) summary).length() == 0);
+            if (empty) {
+                // setSummary(String) makes the host's own isEmpty() check pass, so the row
+                // is laid out with its container visible from then on.
+                if (setPreferenceValue(view, "setSummary", PLACEHOLDER_SUMMARY)) {
+                    filled++;
+                    if (container instanceof View) {
+                        ((View) container).setVisibility(View.VISIBLE);
+                    }
                 }
             }
-        } catch (Throwable ignored) {
         }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
             for (int i = 0; i < group.getChildCount(); i++) {
-                revealed += revealHiddenViews(group.getChildAt(i), depth + 1);
+                filled += fillSummaries(group.getChildAt(i), depth + 1);
             }
         }
-        return revealed;
+        return filled;
     }
 
     private static String describeFocusedWindow(Activity activity) {
