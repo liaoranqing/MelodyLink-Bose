@@ -573,11 +573,25 @@ public final class HookModule extends XposedModule {
             // had was firing normally, which means the failure is upstream of any
             // preference we could touch — inside A()'s future.
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainActivity", "A", 0, "detailPipelineStart");
-            // The completion callback. If the future completes exceptionally, the fragment
-            // is never attached and the container legitimately stays empty.
-            hookNamed(loader, "Aa", "accept", 2, "detailPipelineComplete");
-            // The supplier itself — logs what it is asked to load.
-            hookNamed(loader, "A9", "get", 0, "detailPipelineSupply");
+            // 0.5.18 evidence: hooking A9/r.get and Aa/h.accept produced nothing. Both are
+            // R8-merged lambda holders — a single class shared by dozens of call sites,
+            // dispatched through a packed-switch on an int field. A() builds A9/r with
+            // field a=0x12 and Aa/h with a=0x7, so those two hooks only covered unrelated
+            // branches. Hooking the real work instead: the whitelist lookup.
+            //
+            // 17.6.3 DetailMainActivity.A() branch 0x12 resolves the MAC (from the "device"
+            // extra, else "device_mac_info", else SharedPreferences launcher_address) and
+            // then calls c9/a.a(mac) for a WhitelistConfigDTO. Bose has no catalog entry,
+            // so that returns null and the page builds from a null config — which matches
+            // the observed symptom exactly: the row attaches (container holds a
+            // NestedScrollView) but stays empty.
+            hookAny(loader, "detailWhitelistLookup",
+                    "c9/a#a#1",
+                    "com.oplus.melody.common.util.V#a#3");
+            // The fragment that the callback is supposed to populate. Watching its lifecycle
+            // tells us whether it is created at all once the config resolves.
+            hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainFragment",
+                    "onCreateView", 3, "detailFragmentCreated");
             // JADX labels this class v9.t; the runtime name in Melody 16.8.3 is v9.C1594t.
             hookNamed(loader, "v9.C1594t", "onViewCreated", 2, "detailPreferenceHostCreated");
             // MelodyCodecTweaker's stable entry: every DetailMain preference page inherits this.
@@ -831,18 +845,38 @@ public final class HookModule extends XposedModule {
                             throw t;
                         }
                     }
-                    if ("detailPipelineComplete".equals(label)) {
-                        Object arg0 = arity > 0 ? chain.getArg(0) : null;
-                        Object arg1 = arity > 1 ? chain.getArg(1) : null;
-                        // CompletableFuture passes the outcome as (value, throwable).
-                        if (arg1 instanceof Throwable) {
-                            logDetailPipeline("complete_error", "error",
-                                    MLog.compactThrowable((Throwable) arg1));
-                        } else {
-                            logDetailPipeline("complete_ok", "value", describeValue(arg0));
-                        }
+                    if ("detailWhitelistLookup".equals(label)) {
+                        // The decisive call: a null WhitelistConfigDTO means the page has no
+                        // product to render, which is the whole blank-page story.
                         Object result = chain.proceed();
-                        reportDetailContainer("after_complete");
+                        Object mac = arity > 0 ? chain.getArg(0) : null;
+                        boolean isBoseTarget = mac instanceof String
+                                && isTargetAddress((String) mac);
+                        MLog.event("bose.detail.whitelist",
+                                "mac", String.valueOf(mac),
+                                "config", result == null ? "NULL" : result.getClass().getSimpleName(),
+                                "bose", isBoseTarget);
+                        if (result == null && isBoseTarget) {
+                            // Remember it, then supply a synthetic config so the host can
+                            // build its own page instead of us drawing one.
+                            pendingDetailMac = (String) mac;
+                            Object synthetic = buildSyntheticWhitelistConfig(loader, (String) mac);
+                            if (synthetic != null) {
+                                MLog.event("bose.detail.whitelist.synthesized",
+                                        "class", synthetic.getClass().getSimpleName());
+                                return synthetic;
+                            }
+                            MLog.event("bose.detail.whitelist.synth_failed");
+                        }
+                        return result;
+                    }
+                    if ("detailFragmentCreated".equals(label)) {
+                        Object result = chain.proceed();
+                        Object frag = chain.getThisObject();
+                        MLog.event("bose.detail.fragment",
+                                "class", frag == null ? "null"
+                                        : frag.getClass().getSimpleName(),
+                                "args", String.valueOf(describeArgs(chain, arity)));
                         return result;
                     }
                     if ("detailActivityCreate".equals(label)) {
@@ -853,10 +887,15 @@ public final class HookModule extends XposedModule {
                             // Snapshot the container right after onCreate. If A() never
                             // runs at all, this is the only evidence we get.
                             reportDetailContainer("after_onCreate");
-                            // The pipeline is async, so re-check once the main looper has
-                            // drained — this is the state the user actually sees.
-                            mainHandler.postDelayed(
-                                    () -> reportDetailContainer("after_onCreate+800ms"), 800L);
+                            // 0.5.18: one snapshot is not enough. At +800ms the container
+                            // already held a NestedScrollView, but the page the user
+                            // eventually sees is empty — so the row is being built and
+                            // then torn down (or refilled) somewhere in between. Sample
+                            // across the whole window the pipeline runs in.
+                            for (long delay : new long[]{300L, 800L, 2000L, 5000L}) {
+                                mainHandler.postDelayed(
+                                        () -> reportDetailContainer("t+" + delay), delay);
+                            }
                         }
                         return result;
                     }
@@ -1711,6 +1750,129 @@ public final class HookModule extends XposedModule {
      * "fragment attached but empty" — the two look identical in a uiautomator dump but need
      * completely different fixes.
      */
+    /**
+     * Renders a view subtree as {@code ClassName#resourceName[children,size,vis]}.
+     *
+     * <p>IDs are the only stable way to tell one row from another, and the child count is
+     * what separates "the row exists" from "the row has content" — a preference row with
+     * zero children is a real symptom, not an empty container. Depth is capped so a
+     * pathological tree cannot spin.
+     */
+    private static String describeViewTree(View view, int depth) {
+        if (view == null) return "null";
+        if (depth > 4) return "...";
+        StringBuilder sb = new StringBuilder();
+        try {
+            sb.append(view.getClass().getSimpleName());
+            if (view.getId() != View.NO_ID) {
+                String name;
+                try {
+                    name = view.getResources().getResourceEntryName(view.getId());
+                } catch (Throwable t) {
+                    name = "id" + view.getId();
+                }
+                sb.append('#').append(name);
+            }
+            sb.append('[');
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                sb.append(group.getChildCount()).append(" kids");
+                int shown = Math.min(group.getChildCount(), 8);
+                if (shown > 0) sb.append(", ");
+                for (int i = 0; i < shown; i++) {
+                    sb.append(describeViewTree(group.getChildAt(i), depth + 1));
+                    if (i < shown - 1) sb.append(' ');
+                }
+                if (group.getChildCount() > shown) sb.append(" +more");
+            }
+            sb.append(' ').append(view.getWidth()).append('x').append(view.getHeight());
+            if (view.getVisibility() != View.VISIBLE) sb.append(" HIDDEN");
+            sb.append(']');
+        } catch (Throwable t) {
+            sb.append("[unreadable: ").append(t.getClass().getSimpleName()).append(']');
+        }
+        return sb.toString();
+    }
+
+    private static volatile String pendingDetailMac;
+
+    /**
+     * Builds a minimal {@code WhitelistConfigDTO} so Melody's own detail page has something
+     * to render for a device that is not in its catalog.
+     *
+     * <p>17.6.3 {@code DetailMainActivity.A()} branch {@code 0x12} does:
+     * <pre>
+     *   mac  = device extra -> device_mac_info -> SharedPreferences launcher_address
+     *   cfg  = c9/a.f().a(mac)          // WhitelistConfigDTO
+     *   pair = Pair.create(mac, cfg)
+     * </pre>
+     * For Bose the lookup returns null, and every downstream consumer then has no product
+     * to build from. The DTO has one 16-argument constructor and a no-arg one; we fill the
+     * fields the page actually reads ({@code id}, {@code name}, {@code brand}, {@code uuid},
+     * {@code type}) and leave the tunables at sane defaults.
+     *
+     * <p>If construction fails we return null and the page stays exactly as it is now —
+     * this is a best-effort fallback, never a new failure mode.
+     */
+    private Object buildSyntheticWhitelistConfig(ClassLoader loader, String mac) {
+        try {
+            Class<?> dtoClass = Class.forName(
+                    "com.oplus.melody.common.data.WhitelistConfigDTO", false, loader);
+            Object dto = null;
+            for (java.lang.reflect.Constructor<?> ctor : dtoClass.getDeclaredConstructors()) {
+                if (ctor.getParameterCount() == 16) {
+                    ctor.setAccessible(true);
+                    Class<?>[] types = ctor.getParameterTypes();
+                    Object[] args = new Object[16];
+                    for (int i = 0; i < 16; i++) args[i] = defaultFor(types[i]);
+                    // id, name, brand, uuid, type are Strings and land in that order per the
+                    // smali signature (String, String, List, String, String, String, ...).
+                    args[0] = mac;
+                    args[1] = "Bose QC Ultra 2";
+                    args[3] = "Bose";
+                    args[4] = mac;
+                    args[5] = String.valueOf(0);
+                    dto = ctor.newInstance(args);
+                    break;
+                }
+            }
+            if (dto == null) {
+                ctor = dtoClass.getDeclaredConstructor();
+                ctor.setAccessible(true);
+                dto = ctor.newInstance();
+                setIfPresent(dtoClass, dto, "id", mac);
+                setIfPresent(dtoClass, dto, "name", "Bose QC Ultra 2");
+                setIfPresent(dtoClass, dto, "brand", "Bose");
+            }
+            return dto;
+        } catch (Throwable t) {
+            MLog.event("bose.detail.synth_error", "error", MLog.compactThrowable(t));
+            return null;
+        }
+    }
+
+    private static Object defaultFor(Class<?> type) {
+        if (!type.isPrimitive()) return null;
+        if (type == boolean.class) return Boolean.FALSE;
+        if (type == int.class) return 0;
+        if (type == long.class) return 0L;
+        if (type == float.class) return 0f;
+        if (type == double.class) return 0d;
+        if (type == short.class) return (short) 0;
+        if (type == byte.class) return (byte) 0;
+        if (type == char.class) return (char) 0;
+        return null;
+    }
+
+    private static void setIfPresent(Class<?> type, Object instance, String field, Object value) {
+        try {
+            java.lang.reflect.Field f = type.getDeclaredField(field);
+            f.setAccessible(true);
+            f.set(instance, value);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void reportDetailContainer(String stage) {
         try {
             Activity activity = detailActivity;
@@ -1723,21 +1885,18 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.container.state", "stage", stage, "reason", "no_container");
                 return;
             }
-            int children = container.getChildCount();
-            StringBuilder tree = new StringBuilder();
-            for (int i = 0; i < children && i < 6; i++) {
-                View child = container.getChildAt(i);
-                tree.append(child.getClass().getSimpleName()).append('(')
-                        .append(child.getId() == View.NO_ID ? "no-id" : child.getResources()
-                                .getResourceEntryName(child.getId()))
-                        .append(") ");
-            }
             MLog.event("bose.container.state",
                     "stage", stage,
-                    "children", children,
+                    "children", container.getChildCount(),
                     "visible", container.getVisibility(),
                     "size", container.getWidth() + "x" + container.getHeight(),
-                    "first", tree.toString().trim());
+                    // 0.5.18 evidence: at +800ms the container held one child
+                    // (NestedScrollView / melody_ui_detail_scrollview) yet the final
+                    // uiautomator dump showed zero children. The row is therefore
+                    // attached and then emptied again, so a single snapshot is not
+                    // enough — the whole subtree has to be printed to see what is
+                    // inside it at each sample.
+                    "tree", describeViewTree(container, 0));
         } catch (Throwable t) {
             MLog.event("bose.container.state", "stage", stage,
                     "error", MLog.compactThrowable(t));
