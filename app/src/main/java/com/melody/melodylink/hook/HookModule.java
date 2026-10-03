@@ -1956,7 +1956,7 @@ public final class HookModule extends XposedModule {
             // than the one on screen.
             MLog.event("bose.container.decorOfFocused",
                     "stage", stage,
-                    "focused", describeFocusedWindow());
+                    "focused", describeFocusedWindow(activity));
             MLog.event("bose.container.state",
                     "stage", stage,
                     // The container subtree can be perfectly healthy while the screen is
@@ -2001,41 +2001,52 @@ public final class HookModule extends XposedModule {
      * inspecting a window that is no longer the one on screen. Dumping the focused window's
      * decor hierarchy answers both in one shot.
      */
-    private static String describeFocusedWindow() {
+    private static String describeFocusedWindow(Activity activity) {
         try {
-            android.view.WindowManager wm = null;
-            Application application = currentApplication();
-            if (application != null) {
-                wm = (android.view.WindowManager)
-                        application.getSystemService(android.content.Context.WINDOW_SERVICE);
+            if (activity == null) return "no_activity";
+            View decor = activity.getWindow().getDecorView();
+            StringBuilder sb = new StringBuilder();
+            sb.append("token=").append(decor.getWindowToken())
+                    .append(" shown=").append(decor.isShown())
+                    .append(" size=").append(decor.getWidth())
+                    .append('x').append(decor.getHeight())
+                    .append(" | tree=").append(describeViewTree(decor, 0));
+            ViewGroup container = findDetailContainer(activity);
+            if (container == null) {
+                sb.append(" | container=not_found");
+                return sb.toString();
             }
-            if (wm == null) return "no_wm";
-            // Window.isFocused() does not exist (verified with javap against
-            // android-37.0) — focus lives on View.hasWindowFocus(), so the decor view is
-            // what we test.
-            android.view.Window focused = null;
-            for (android.view.Window window : wm.getDefaultDisplay().getAllWindows()) {
-                if (window.getAttributes() == null) continue;
-                if (window.getAttributes().type
-                        != android.view.WindowManager.LayoutParams.TYPE_APPLICATION) continue;
-                View decorCandidate = window.getDecorView();
-                if (decorCandidate != null && decorCandidate.hasWindowFocus()) {
-                    focused = window;
-                    break;
+            // The container itself is healthy; the occluder, if any, is a sibling drawn
+            // after it. A full-screen opaque or translucent sibling is the classic cause of
+            // "the tree is fully populated but the screen is blank".
+            ViewGroup parent = container.getParent() instanceof ViewGroup
+                    ? (ViewGroup) container.getParent() : null;
+            sb.append(" | siblings_above=");
+            if (parent == null) {
+                sb.append("no_parent");
+            } else {
+                int index = parent.indexOfChild(container);
+                int drawn = 0;
+                for (int i = index + 1; i < parent.getChildCount() && drawn < 6; i++) {
+                    View sib = parent.getChildAt(i);
+                    drawn++;
+                    sb.append(sib.getClass().getSimpleName())
+                            .append('[').append(sib.getWidth())
+                            .append('x').append(sib.getHeight())
+                            .append(" vis=").append(sib.getVisibility())
+                            .append(" alpha=").append(sib.getAlpha())
+                            .append(" z=").append(sib.getZ())
+                            .append("] ");
                 }
+                if (drawn == 0) sb.append("none");
             }
-            if (focused == null) return "no_focused_app_window";
-            View decor = focused.getDecorView();
-            return "token=" + decor.getWindowToken()
-                    + " shown=" + decor.isShown()
-                    + " size=" + decor.getWidth() + "x" + decor.getHeight()
-                    + " " + describeViewTree(decor, 0);
+            return sb.toString();
         } catch (Throwable t) {
             return "error: " + t.getClass().getSimpleName();
         }
     }
 
-    private ViewGroup findDetailContainer(Activity activity) {
+    private static ViewGroup findDetailContainer(Activity activity) {
         try {
             int id = activity.getResources().getIdentifier(
                     "melody_ui_fragment_container", "id", activity.getPackageName());
