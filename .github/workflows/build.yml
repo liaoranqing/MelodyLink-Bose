@@ -32,18 +32,13 @@ jobs:
         shell: bash
         run: sdkmanager --install "platforms;android-37.0"
 
-      - name: Build debug APK
-        run: ./gradlew --no-daemon :app:assembleDebug
-
       - name: Build release APK
+        # Release only. The debug variant was a second full compile of the same sources for
+        # an artifact nobody installs — roughly doubling CI time. Release is also the
+        # variant that matters: it is what gets sideloaded as an LSPosed module.
+        # `withoutDebug` is not used because assembleRelease alone does not build debug;
+        # this step simply no longer asks for it.
         run: ./gradlew --no-daemon :app:assembleRelease
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: melodylink-bose-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
 
       - name: Upload release APK
         uses: actions/upload-artifact@v7
