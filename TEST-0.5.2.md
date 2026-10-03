@@ -1,6 +1,6 @@
-# 0.5.1 验证清单
+# 0.5.2 验证清单
 
-**提交**：`4e68fb7` · **versionCode 27 / 0.5.1-bose** · 请先 Push origin
+**提交**：`c5e987d` · **versionCode 28 / 0.5.2-bose** · 请先 Push origin
 
 ## 测试前提（已更正）
 
