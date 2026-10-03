@@ -2442,6 +2442,14 @@ public final class HookModule extends XposedModule {
             MLog.event("bose.detail.row_classes",
                     "found", boseRowClasses.size(),
                     "classes", String.valueOf(boseRowClasses));
+
+            // 0.5.47: the container holds a NestedScrollView, not a RecyclerView, so the
+            // detail page is a custom layout rather than a PreferenceFragment. Its
+            // LinearLayout has two children and the second one is where sections would go —
+            // dump that one deep, because "empty" and "full but hidden" look identical from
+            // the outside and imply completely different fixes.
+            MLog.event("bose.detail.sections",
+                    "dump", String.valueOf(dumpSectionHost(container)));
             if (filled > 0) {
                 MLog.event("bose.detail.summary_filled", "count", filled);
             }
@@ -6128,6 +6136,77 @@ public final class HookModule extends XposedModule {
     private static boolean isWhitelistLeaf(Class<?> type) {
         return type.isPrimitive() || type.isEnum() || type == String.class || Number.class.isAssignableFrom(type)
                 || type == Boolean.class || type == Character.class || type == Class.class;
+    }
+
+    /**
+     * Walks to the view that would host the detail sections and describes it in depth.
+     *
+     * <p>0.5.47. The container's subtree is a NestedScrollView with a LinearLayout holding
+     * two children. The first is the device-info header (model view, status views). The
+     * second is where the configurable sections go, and it has been empty every time. This
+     * reports its class, id, size, visibility and a deep listing of what it contains, so we
+     * can tell "never built" apart from "built and then hidden".
+     */
+    private static String dumpSectionHost(View view) {
+        try {
+            if (!(view instanceof ViewGroup)) return "not_a_group";
+            ViewGroup group = (ViewGroup) view;
+            // Descend to the first NestedScrollView we find.
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View child = group.getChildAt(i);
+                if (child == null) continue;
+                String name = child.getClass().getName();
+                if (name.contains("NestedScrollView")) {
+                    if (!(child instanceof ViewGroup)) break;
+                    ViewGroup scroll = (ViewGroup) child;
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("scroll[").append(scroll.getChildCount()).append("] ");
+                    for (int j = 0; j < scroll.getChildCount(); j++) {
+                        View inner = scroll.getChildAt(j);
+                        if (inner == null) continue;
+                        sb.append("host").append(j).append('=')
+                          .append(idName(inner)).append('(')
+                          .append(inner.getClass().getSimpleName()).append(')')
+                          .append('[').append(inner.getWidth())
+                          .append('x').append(inner.getHeight())
+                          .append(" vis=").append(inner.getVisibility()).append(']');
+                        if (inner instanceof ViewGroup) {
+                            ViewGroup hg = (ViewGroup) inner;
+                            sb.append('{').append(hg.getChildCount()).append(" kids: ");
+                            for (int k = 0; k < hg.getChildCount() && k < 10; k++) {
+                                View kid = hg.getChildAt(k);
+                                if (kid == null) continue;
+                                sb.append(kid.getClass().getSimpleName());
+                                if (kid.getId() != View.NO_ID) sb.append('#').append(idName(kid));
+                                sb.append('[').append(kid.getWidth()).append('x')
+                                  .append(kid.getHeight()).append(" vis=")
+                                  .append(kid.getVisibility()).append("] ");
+                            }
+                            sb.append('}');
+                        }
+                        sb.append(" | ");
+                    }
+                    return sb.toString();
+                }
+                // keep descending one level in case the scroll view is nested deeper
+                String deeper = dumpSectionHost(child);
+                if (deeper != null && !"not_a_group".equals(deeper) && !deeper.isEmpty()) {
+                    return deeper;
+                }
+            }
+            return "";
+        } catch (Throwable t) {
+            return "err:" + t.getClass().getSimpleName();
+        }
+    }
+
+    /** Resource entry name for a view id, or the raw id when unresolvable. */
+    private static String idName(View view) {
+        try {
+            return view.getResources().getResourceEntryName(view.getId());
+        } catch (Throwable t) {
+            return "id" + view.getId();
+        }
     }
 
     private static Object readField(Object object, String fieldName) {
