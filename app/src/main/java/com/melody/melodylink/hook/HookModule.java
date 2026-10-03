@@ -1819,30 +1819,37 @@ public final class HookModule extends XposedModule {
             Class<?> dtoClass = Class.forName(
                     "com.oplus.melody.common.data.WhitelistConfigDTO", false, loader);
             Object dto = null;
-            for (java.lang.reflect.Constructor<?> ctor : dtoClass.getDeclaredConstructors()) {
-                if (ctor.getParameterCount() == 16) {
-                    ctor.setAccessible(true);
-                    Class<?>[] types = ctor.getParameterTypes();
-                    Object[] args = new Object[16];
-                    for (int i = 0; i < 16; i++) args[i] = defaultFor(types[i]);
-                    // id, name, brand, uuid, type are Strings and land in that order per the
-                    // smali signature (String, String, List, String, String, String, ...).
-                    args[0] = mac;
-                    args[1] = "Bose QC Ultra 2";
-                    args[3] = "Bose";
-                    args[4] = mac;
-                    args[5] = String.valueOf(0);
-                    dto = ctor.newInstance(args);
-                    break;
-                }
+            for (java.lang.reflect.Constructor<?> candidate : dtoClass.getDeclaredConstructors()) {
+                if (candidate.getParameterCount() != 16) continue;
+                candidate.setAccessible(true);
+                Class<?>[] types = candidate.getParameterTypes();
+                Object[] args = new Object[16];
+                for (int i = 0; i < 16; i++) args[i] = defaultFor(types[i]);
+                // The smali signature is
+                //   (String id, String name, List children, String brand, String uuid,
+                //    String type, Rssi, int coreFrom, int defaultColor, Function,
+                //    boolean, boolean, int, int, Integer protocolType, Map)
+                // so the String slots we care about are 0, 1, 3, 4, 5. The int slots stay
+                // at 0, which is a valid default for every one of them.
+                args[0] = mac;
+                args[1] = "Bose QC Ultra 2";
+                args[3] = "Bose";
+                args[4] = mac;
+                args[5] = "0";
+                dto = candidate.newInstance(args);
+                break;
             }
             if (dto == null) {
-                ctor = dtoClass.getDeclaredConstructor();
-                ctor.setAccessible(true);
-                dto = ctor.newInstance();
+                // No 16-arg constructor in this build — fall back to the no-arg one and set
+                // the fields directly.
+                java.lang.reflect.Constructor<?> empty = dtoClass.getDeclaredConstructor();
+                empty.setAccessible(true);
+                dto = empty.newInstance();
                 setIfPresent(dtoClass, dto, "id", mac);
                 setIfPresent(dtoClass, dto, "name", "Bose QC Ultra 2");
                 setIfPresent(dtoClass, dto, "brand", "Bose");
+                setIfPresent(dtoClass, dto, "uuid", mac);
+                setIfPresent(dtoClass, dto, "type", "0");
             }
             return dto;
         } catch (Throwable t) {
