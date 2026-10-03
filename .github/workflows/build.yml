@@ -28,9 +28,9 @@ jobs:
         with:
           packages: ''
 
-      - name: Install Android SDK platform 37
+      - name: Install Android SDK platform 36
         shell: bash
-        run: sdkmanager --install "platforms;android-37.0"
+        run: sdkmanager --install "platforms;android-36"
 
       - name: Build debug APK
         run: ./gradlew --no-daemon :app:assembleDebug

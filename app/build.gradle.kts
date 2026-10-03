@@ -7,7 +7,7 @@ android {
     namespace = "com.melody.melodylink"
     // android-37 is not published in the stable channel yet; 36 builds the
     // same API surface used by this module.
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.melody.melodylink"
