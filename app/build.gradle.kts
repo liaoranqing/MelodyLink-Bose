@@ -13,8 +13,8 @@ android {
         applicationId = "com.melody.melodylink"
         minSdk = 35
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.5.6-bose"
+        versionCode = 33
+        versionName = "0.5.7-bose"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

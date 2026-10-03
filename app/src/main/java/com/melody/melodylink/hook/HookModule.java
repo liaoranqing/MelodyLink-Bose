@@ -619,9 +619,36 @@ public final class HookModule extends XposedModule {
             // Melody 16.8.3's child-mode callback supplies the stable modeType before it is
             // converted to the opaque protocol index passed to EarphoneRepository.s0.
             startForegroundStateWatcher();
+            startPersistentLogCapture();
+            // Report every hard-coded anchor that this Melody build no longer ships, so a
+            // host update is diagnosed from evidence instead of from guesswork.
+            mainHandler.post(() -> ClassAudit.run(loader));
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "hook setup failed", t);
         }
+    }
+
+    /**
+     * Starts the on-disk logcat capture.
+     *
+     * <p>The reason this exists: a plain {@code adb logcat -d} is worthless as evidence on
+     * this device because the ring buffer turns over within seconds, which is how 0.4.x /
+     * 0.5.x shipped several "fixes" based on guesses. The capture writes straight to a file
+     * for the whole session, so a report can always be checked against real evidence.
+     *
+     * <p>Delayed: {@code su} spawns a shell, which must not happen on the hook-setup path.
+     */
+    private void startPersistentLogCapture() {
+        Application application = currentApplication();
+        if (application == null) return;
+        mainHandler.postDelayed(() -> {
+            try {
+                LogcatCapture.start(application);
+                MLog.event("logcat.capture.armed", "path", LogcatCapture.path());
+            } catch (Throwable t) {
+                MLog.event("logcat.capture.error", "error", MLog.compactThrowable(t));
+            }
+        }, 4000L);
     }
 
     /**
@@ -711,7 +738,7 @@ public final class HookModule extends XposedModule {
                         removeUnsupportedDetailCategory(preference);
                         hideAncStrengthPreference(preference);
                         captureNoiseEffectRow(preference);
-                        keepNoiseEffectRowHidden();
+                        hideNoiseEffectRow();
                         return result;
                     }
                     if ("detailActivityCreate".equals(label)) {
@@ -1269,109 +1296,210 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    /** Melody's child-menu is for ANC intensity, which this module intentionally does not support. */
     /**
-     * The "降噪效果" row is the reliable anchor for the injected CNC slider.
-     * Capturing it the moment Melody adds it (inside detailPreferenceAdd) beats
-     * searching the finished tree later: 0.4.3 lost the slider whenever
-     * findPreferenceByTitle ran before the row existed, and the recursive
-     * Collection-field walk is not reliable across PreferenceGroup subclasses.
-     * The row itself is a dead end for Bose (it opens OPPO's own noise page,
-     * which drives a non-existent SPP channel) so we hide it too.
+     * Injection entry point for the earbud detail page.
+     *
+     * <p>Melody's "降噪效果" row is the anchor. It is identified structurally (by its
+     * Preference key) rather than by its R8-hashed class name, because the host renames those
+     * between releases while the key survives — the same approach
+     * Andrea-lyz/MelodyCodecTweaker uses for its {@code HiQualityAudioItem} / {@code
+     * EqualizerItem} anchors.
+     *
+     * <p>Injection is <em>not</em> done inline in {@code addPreference}. Racing the host's own
+     * tree construction is what left the 0.5.x detail page blank: the rows were added while
+     * COUI was still measuring, and the resulting order collisions made the RecyclerView
+     * produce nothing. Instead we record the anchor and run a bounded retry loop that waits
+     * for a live screen, then inserts with a proper order shift.
      */
     private void captureNoiseEffectRow(Object preference) {
         if (preference == null || !boseBonded()) return;
-        if (!isBoseNoiseRowClass(preference.getClass().getName())) return;
-        // Remember the row instance, not its parent: at this point in
-        // onCreatePreferences the parent is often still null (0.4.4 lost the slider
-        // on exactly the screen where the row got added first). Retrying against
-        // the live row once the tree is assembled is what actually works.
-        if (noiseEffectRow == preference) return; // already captured, do not re-arm
+        if (noiseEffectRow == preference) return;   // same instance, already armed
         noiseEffectRow = preference;
-        for (int i = 0; i < 3; i++) {
-            // Three passes only. 0.5.5 ran five, and because this hook fires for
-            // EVERY preference Melody adds, the queue kept re-entering
-            // installBoseCncUnderNoiseRow while the tree was still being built.
-            final long delay = i == 0 ? 150L : (i == 1 ? 600L : 1800L);
-            mainHandler.postDelayed(this::installBoseCncUnderNoiseRow, delay);
+        MLog.event("bose.anchor.captured",
+                "class", preference.getClass().getSimpleName(),
+                "key", PrefRef.getKey(preference));
+        scheduleBoseInjection(0);
+    }
+
+    /**
+     * Bounded back-off retry. Melody's PreferenceScreen is assembled asynchronously (the
+     * first-launch WhitelistConfig path involves a network round trip), so a single shot at
+     * onCreatePreferences time is a race; but retrying forever would fight the host. Fifteen
+     * attempts over ~15 s covers the observed spread, then we give up and say so.
+     */
+    private void scheduleBoseInjection(int attempt) {
+        mainHandler.postDelayed(() -> {
+            try {
+                if (!boseBonded()) return;
+                if (isBoseInjected()) return;
+                if (installBoseIntoLiveScreen()) {
+                    scheduleBoseInjectionRecheck(attempt);
+                    return;
+                }
+            } catch (Throwable t) {
+                MLog.event("bose.inject.error", "error", MLog.compactThrowable(t));
+                return;
+            }
+            if (attempt < 14) {
+                scheduleBoseInjection(attempt + 1);
+            } else {
+                MLog.event("bose.inject.exhausted", "attempts", attempt + 1);
+            }
+        }, attempt == 0 ? 200L : 1000L);
+    }
+
+    private void scheduleBoseInjectionRecheck(int attempt) {
+        if (attempt >= 14) return;
+        mainHandler.postDelayed(() -> {
+            try {
+                if (boseBonded() && isBoseInjected()) scheduleBoseInjection(attempt + 1);
+            } catch (Throwable ignored) {
+            }
+        }, 1000L);
+    }
+
+    /** True once any of our keys is present on the live screen. */
+    private boolean isBoseInjected() {
+        Object screen = boseLiveScreen();
+        if (screen == null) return false;
+        return PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
+                || PrefRef.findPreferenceRecursive(screen, BOSE_CNC_CARD_KEY) != null;
+    }
+
+    /** The PreferenceScreen of the fragment currently hosting our anchor. */
+    private Object boseLiveScreen() {
+        try {
+            if (boseInjectedScreens.isEmpty()) return null;
+            Object screen = boseInjectedScreens.iterator().next();
+            if (screen == null) return null;
+            if (PrefRef.getPreferenceCount(screen) <= 0) return null;
+            return screen;
+        } catch (Throwable t) {
+            return null;
         }
     }
 
     /**
-     * The "降噪效果" card is re-shown by its own onBindViewHolder, so a one-shot
-     * setVisible(false) is not enough. Re-assert it on every addPreference pass
-     * and on a short timer after each bind.
+     * Performs the actual insertion against a live tree. Returns false when the tree is not
+     * ready yet so the caller can retry.
      */
-    private void keepNoiseEffectRowHidden() {
-        hideNoiseEffectRow();
-        mainHandler.postDelayed(this::hideNoiseEffectRow, 300L);
+    private boolean installBoseIntoLiveScreen() {
+        Object noiseRow = noiseEffectRow;
+        if (noiseRow == null) return false;
+
+        ClassLoader loader = noiseRow.getClass().getClassLoader();
+        Object screen = boseInjectedScreens.isEmpty() ? null
+                : boseInjectedScreens.iterator().next();
+        if (screen == null) {
+            // Recover the screen by walking up from the anchor's own context.
+            screen = screenForAnchor(noiseRow);
+            if (screen == null) return false;
+        }
+        boseInjectedScreens.add(screen);
+
+        Object parent = PrefRef.getParent(noiseRow);
+        if (parent == null) parent = screen;
+        if (PrefRef.findPreferenceRecursive(parent, BOSE_CNC_KEY) != null) return true;
+
+        Object context = PrefRef.invokeNoArg(noiseRow, "getContext");
+        if (!(context instanceof Context)) return false;
+        Activity activity = findActivity((Context) context);
+        if (activity == null) activity = detailActivity;
+        if (activity == null) return false;
+
+        boolean detailPage = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
+        if (detailPage) hideNoiseEffectRow();
+
+        int anchorOrder = PrefRef.getOrder(noiseRow);
+        int target = anchorOrder < 0 ? 0 : anchorOrder + 1;
+        // Make room before inserting, otherwise the new rows collide with the host's own
+        // order values and COUI merges or drops entries.
+        PrefRef.shiftPreferenceOrders(parent, target, +40);
+
+        boolean ok = addBoseCncPreference(parent, loader, activity, target);
+        if (!ok) return false;
+        if (detailPage) addBoseExtraCategory(parent, loader, activity, target + 10);
+
+        MLog.event("bose.injected",
+                "page", detailPage ? "detail" : "general",
+                "anchor", PrefRef.getKey(noiseRow),
+                "order", target,
+                "fragment", screen.getClass().getSimpleName());
+        return true;
     }
+
+    /** Finds the PreferenceScreen by asking the anchor's context for a fragment manager. */
+    private Object screenForAnchor(Object anchor) {
+        try {
+            Object context = PrefRef.invokeNoArg(anchor, "getContext");
+            if (!(context instanceof Context)) return null;
+            if (!(context instanceof android.app.Activity)) return null;
+            Object manager = null;
+            for (String name : new String[]{"getSupportFragmentManager", "getFragmentManager"}) {
+                manager = PrefRef.invokeNoArg(context, name);
+                if (manager != null) break;
+            }
+            if (manager == null) return null;
+            java.util.List<?> fragments = readFragmentList(manager);
+            if (fragments == null) return null;
+            for (Object fragment : fragments) {
+                if (fragment == null) continue;
+                Object screen = PrefRef.getPreferenceScreen(fragment);
+                if (screen == null) continue;
+                if (PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null) return screen;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** Pulls the fragment list out of a FragmentManager without compile-time androidx. */
+    private static java.util.List<?> readFragmentList(Object manager) {
+        if (manager == null) return null;
+        for (java.lang.reflect.Field f : allFieldsOf(manager.getClass())) {
+            if (!java.util.List.class.equals(f.getType())) continue;
+            try {
+                f.setAccessible(true);
+                Object v = f.get(manager);
+                if (v instanceof java.util.List) return (java.util.List<?>) v;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static java.lang.reflect.Field[] allFieldsOf(Class<?> type) {
+        java.util.LinkedHashSet<java.lang.reflect.Field> out = new java.util.LinkedHashSet<>();
+        for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Field f : c.getDeclaredFields()) out.add(f);
+        }
+        return out.toArray(new java.lang.reflect.Field[0]);
+    }
+
+    /** Screens we already injected into; weak so a destroyed Activity is not retained. */
+    private final java.util.Set<Object> boseInjectedScreens =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<Object, Boolean>());
 
     /**
      * Hides the "降噪效果" row on the earbud detail page.
      *
-     * This row is the OPPO/Enco ANC intensity picker — 深度 / 中度 / 轻度 / 智能
-     * 降噪 — which drives an Enco-only protocol. Bose QC Ultra 2 has no such
-     * four-level ANC path, so the control cannot do anything for this device.
-     * setVisible(false) is used rather than removing the preference: the row's
-     * own LiveData observer still calls onBindViewHolder, and a removed-but-
-     * observed preference crashes the page.
+     * <p>This row is the OPPO/Enco ANC intensity picker — 深度 / 中度 / 轻度 / 智能降噪 —
+     * which drives an Enco-only protocol. Bose QC Ultra 2 has no four-level ANC path, so the
+     * control cannot do anything for this device. {@code setVisible(false)} is used rather than
+     * removing the preference: the row's own LiveData observer still calls
+     * {@code onBindViewHolder}, and a removed-but-observed preference crashes the page.
      */
     private void hideNoiseEffectRow() {
         try {
             Object noiseRow = noiseEffectRow;
             if (noiseRow == null || !boseBonded()) return;
             if (!NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName())) return;
-            if (setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE)) {
-                log(Log.INFO, TAG, event("hidden Enco-only 降噪效果 row for Bose"));
-            }
+            PrefRef.setVisible(noiseRow, false);
+            MLog.event("bose.anco.row.hidden", "key", PrefRef.getKey(noiseRow));
         } catch (Throwable t) {
-            log(Log.WARN, TAG, "降噪效果 row hide failed", t);
+            MLog.event("bose.anco.row.hide_failed", "error", MLog.compactThrowable(t));
         }
     }
-
-    private void installBoseCncUnderNoiseRow() {
-        try {
-            Object noiseRow = noiseEffectRow;
-            if (noiseRow == null || !boseBonded()) return;
-            // One-shot per row instance. Every addBoseXxx below is itself guarded
-            // by findPreferenceByKeyRecursive, so re-running is harmless but noisy.
-            if (boseCncInstalledFor == noiseRow) return;
-            ClassLoader loader = noiseRow.getClass().getClassLoader();
-            Object context = invokeNoArg(noiseRow, "getContext");
-            if (!(context instanceof Context)) return;
-            Activity activity = findActivity((Context) context);
-            if (activity == null) activity = detailActivity;
-            if (activity == null) return;
-            Object group = invokeNoArg(noiseRow, "getParent");
-            if (group == null) return; // tree not ready yet; a later retry handles it
-
-            boolean detailPage = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
-            // Hide the Enco-only ANC intensity row on the detail page. The 通用设置
-            // page renders the same concept as OneSpaceNoisePreference and stays.
-            if (detailPage) hideNoiseEffectRow();
-
-            if (findPreferenceByKeyRecursive(group, BOSE_CNC_KEY)) {
-                boseCncInstalledFor = noiseRow;
-                return;
-            }
-            Integer order = (Integer) invokeNoArg(noiseRow, "getOrder");
-            int base = order == null ? -1 : order + 10;
-            if (!addBoseCncPreference(group, loader, activity, base)) return;
-            boseCncInstalledFor = noiseRow;
-            // EQ / buttons / mode slots / power only belong on the earbud detail
-            // page. On 通用设置 they duplicated the same controls and made the
-            // list unreadable.
-            if (detailPage) addBoseExtraCategory(group, loader, activity, base + 20);
-            log(Log.INFO, TAG, event("installed Bose CNC slider on "
-                    + (detailPage ? "detail" : "general settings") + " page"));
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Bose CNC slider install failed", t);
-        }
-    }
-
-    /** The noise row instance the slider was already installed against. */
-    private Object boseCncInstalledFor;
 
     private void hideAncStrengthPreference(Object preference) {
         if (preference == null || !hasMappedDeviceActive()) return;
@@ -3925,19 +4053,9 @@ public final class HookModule extends XposedModule {
         return title != null && SOUND_QUALITY_TITLE.equals(title.toString().trim());
     }
 
+    /** Builds a host preference with the theming (Context, AttributeSet) constructor. */
     private static Object newPreference(ClassLoader loader, String typeName, Context context) {
-        try {
-            Class<?> type = Class.forName(typeName, false, loader);
-            try {
-                Constructor<?> constructor = type.getConstructor(android.content.Context.class,
-                        android.util.AttributeSet.class);
-                return constructor.newInstance(context, null);
-            } catch (NoSuchMethodException ignored) {
-                return type.getConstructor(android.content.Context.class).newInstance(context);
-            }
-        } catch (Throwable ignored) {
-            return null;
-        }
+        return PrefRef.create(loader, typeName, context);
     }
 
     private static Object newSwitchPreference(ClassLoader loader, Context context) {
@@ -3961,23 +4079,7 @@ public final class HookModule extends XposedModule {
     }
 
     private static boolean addPreference(Object parent, Object child, ClassLoader loader) {
-        try {
-            Class<?> preference = Class.forName("androidx.preference.Preference", false, loader);
-            for (String name : new String[]{"addPreference", "f"}) {
-                for (Method method : allMethods(parent.getClass())) {
-                    if (!method.getName().equals(name) || method.getParameterTypes().length != 1
-                            || !method.getParameterTypes()[0].isAssignableFrom(child.getClass())) continue;
-                    try {
-                        method.setAccessible(true);
-                        Object result = method.invoke(parent, child);
-                        return !(result instanceof Boolean) || (Boolean) result;
-                    } catch (Throwable ignored) {
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return false;
+        return PrefRef.addPreference(parent, child);
     }
 
     private static Object findPreference(Object group, String key) {
@@ -4055,7 +4157,15 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    /** Returns true when the setter was found and invoked. */
+    /**
+     * Invokes a 1-arg setter by name, falling back to a signature-based lookup.
+     *
+     * <p>The fallback matters because a pure name lookup fails <em>silently</em> once R8 has
+     * renamed the member: no exception is thrown, the value simply never lands, and the panel
+     * stays blank. We re-discover the setter by parameter type, and only when exactly one
+     * candidate exists — with two or more we deliberately do nothing, because writing into the
+     * wrong setter is worse than the no-op. This mirrors PrefRef.invokeSetter.
+     */
     private static boolean setPreferenceValue(Object target, String name, Object value) {
         if (target == null) return false;
         for (Method method : allMethods(target.getClass())) {
@@ -4068,7 +4178,43 @@ public final class HookModule extends XposedModule {
                 }
             }
         }
-        return false;
+        if (value == null) return false;
+        Class<?> paramType = value instanceof String ? String.class
+                : value instanceof Boolean ? boolean.class
+                : value instanceof Integer ? int.class
+                : value.getClass();
+        Method fallback = uniqueSetterByType(target.getClass(), paramType);
+        if (fallback == null) return false;
+        try {
+            fallback.setAccessible(true);
+            fallback.invoke(target, value);
+            MLog.event("pref.setter.sigfallback", "logical", name,
+                    "resolved", fallback.getName(), "type", paramType.getSimpleName());
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** The single 1-arg method on the hierarchy accepting {@code paramType}, or null. */
+    private static Method uniqueSetterByType(Class<?> startCls, Class<?> paramType) {
+        boolean textType = paramType == String.class || paramType == CharSequence.class;
+        Method match = null;
+        for (Class<?> cls = startCls; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
+            for (Method m : cls.getDeclaredMethods()) {
+                if (m.getParameterCount() != 1) continue;
+                if (m.getReturnType() != void.class) continue;
+                if (m.isSynthetic() || m.isBridge()) continue;
+                Class<?> p = m.getParameterTypes()[0];
+                boolean accepts = textType
+                        ? (p == String.class || p == CharSequence.class)
+                        : p == paramType;
+                if (!accepts) continue;
+                if (match != null && !match.getName().equals(m.getName())) return null;
+                match = m;
+            }
+        }
+        return match;
     }
 
     private static MelodySharedStateStore.SharedCommand readSharedSonyCommand() {
