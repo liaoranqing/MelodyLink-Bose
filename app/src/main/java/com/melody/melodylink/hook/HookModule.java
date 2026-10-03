@@ -2018,6 +2018,94 @@ public final class HookModule extends XposedModule {
      * augments. If anything about the provider shape is unexpected it silently passes
      * through, so the worst case is the behaviour before this change.
      */
+    /**
+     * Field-by-field dump of a catalog entry.
+     *
+     * <p>0.5.41. The host returns our entry from its lookup but builds no sections from it, so
+     * the entry must be missing whatever the page keys on. Printing the entry makes that
+     * visible instead of guessable: collections show their size, so a null list or an empty
+     * one stands out immediately.
+     */
+    private static String describeDto(Object dto) {
+        if (dto == null) return "null";
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (java.lang.reflect.Field f : allFieldsOf(dto.getClass())) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object v = f.get(dto);
+                sb.append(f.getName()).append('=');
+                if (v == null) {
+                    sb.append("null");
+                } else if (v instanceof java.util.Collection) {
+                    sb.append('(').append(((java.util.Collection<?>) v).size()).append(')');
+                } else if (v instanceof java.util.Map) {
+                    sb.append('{').append(((java.util.Map<?, ?>) v).size()).append('}');
+                } else {
+                    sb.append(v);
+                }
+                sb.append(';');
+            }
+            String out = sb.toString();
+            return out.length() > 700 ? out.substring(0, 700) : out;
+        } catch (Throwable t) {
+            return "err:" + t.getClass().getSimpleName();
+        }
+    }
+
+    /**
+     * True when this list already holds an entry we injected.
+     *
+     * <p>0.5.40/42. The one-shot {@code boseCatalogInjected} flag had to go: an exception
+     * thrown before the assignment left it false forever (catalog 94 to 214), and once it was
+     * set, the fresh list {@code b()} builds on every call returned without the entry at all
+     * (lookup NULL). Checking the list itself is idempotent no matter what happened on a
+     * previous attempt, and stays correct when the list is brand new each time.
+     */
+    private static boolean containsBoseEntry(java.util.List<?> list) {
+        try {
+            for (Object entry : list) {
+                Object name = readField(entry, "name");
+                if (name instanceof String && ((String) name).startsWith(BOSE_ENTRY_PREFIX)) {
+                    return true;
+                }
+                Object brand = readField(entry, "brand");
+                if (brand instanceof String && "Bose".equals(brand)) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /**
+     * Counts the control entries on a catalog row.
+     *
+     * <p>0.5.39. Which sections the detail page shows is driven by the row's Control /
+     * ControlList sub-objects. A row whose controls are empty contributes nothing visible.
+     */
+    private static int countControls(Object dto) {
+        if (dto == null) return 0;
+        int total = 0;
+        try {
+            for (java.lang.reflect.Field f : allFieldsOf(dto.getClass())) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object value = f.get(dto);
+                if (value instanceof java.util.Collection) {
+                    total += ((java.util.Collection<?>) value).size();
+                } else if (value instanceof java.util.Map) {
+                    total += ((java.util.Map<?, ?>) value).size();
+                } else if (value != null
+                        && value.getClass().getName().contains("WhitelistConfigDTO$")) {
+                    // A populated sub-object counts once: it means the row declares support.
+                    total++;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return total;
+    }
+
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
         if (!(listResult instanceof java.util.List)) return listResult;
         java.util.List<?> list = (java.util.List<?>) listResult;
