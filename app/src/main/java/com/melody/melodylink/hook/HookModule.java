@@ -104,6 +104,8 @@ public final class HookModule extends XposedModule {
      * TextUtils.isEmpty() while adding no visible text — the row carries its own title.
      */
     private static final String PLACEHOLDER_SUMMARY = " ";
+    /** Marks catalog entries we added, so containsBoseEntry() can recognise them. */
+    private static final String BOSE_ENTRY_PREFIX = "Bose QC Ultra";
     private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
     private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
@@ -2140,6 +2142,29 @@ public final class HookModule extends XposedModule {
         return total;
     }
 
+    /**
+     * True when this list already holds an entry we injected.
+     *
+     * <p>0.5.40. The one-shot {@code boseCatalogInjected} flag was unreliable: an exception
+     * thrown before the assignment left it false forever, and the catalog then grew on every
+     * call (94 to 214 in one session, each entry a full DTO clone). Checking the list itself
+     * is idempotent no matter what happened on a previous attempt.
+     */
+    private static boolean containsBoseEntry(java.util.List<?> list) {
+        try {
+            for (Object entry : list) {
+                Object name = readField(entry, "name");
+                if (name instanceof String && ((String) name).startsWith(BOSE_ENTRY_PREFIX)) {
+                    return true;
+                }
+                Object brand = readField(entry, "brand");
+                if (brand instanceof String && "Bose".equals(brand)) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
         if (!(listResult instanceof java.util.List)) return listResult;
         java.util.List<?> list = (java.util.List<?>) listResult;
@@ -2179,24 +2204,34 @@ public final class HookModule extends XposedModule {
             // Clone from entries that actually have controls, and add several so the page
             // ends up with the union of whatever the catalog offers. Candidate selection is by
             // field inspection, not by product name, so it survives catalog reordering.
-            int added = 0;
-            for (Object template : list) {
+            // 0.5.40: the previous version added to the list while iterating it, which
+            // throws ConcurrentModificationException inside the try. The catch swallowed it,
+            // so boseCatalogInjected was never set and the catalog grew on every single call
+            // (94 -> 214 in one session). Two fixes:
+            //
+            // 1. Collect the templates first, add afterwards. Never mutate while iterating.
+            // 2. Gate on content, not on a flag. A flag can be skipped by an exception; a
+            //    check for "does this list already contain our entry" cannot.
+            if (containsBoseEntry(list)) return listResult;
+
+            java.util.List<Object> templates = new java.util.ArrayList<>();
+            for (int i = 0; i < list.size() && templates.size() < 3; i++) {
+                Object template = list.get(i);
                 if (template == null) continue;
                 if (countControls(template) == 0) continue;
+                templates.add(template);
+            }
+            if (templates.isEmpty() && !list.isEmpty()) {
+                // Nothing in the catalog carries controls we can see; fall back to the
+                // previous behaviour so the entry is at least present.
+                templates.add(list.get(list.size() - 1));
+            }
+            int added = 0;
+            for (Object template : templates) {
                 Object clone = cloneCatalogEntry(template, loader);
                 if (clone == null) continue;
                 mutable.add(clone);
                 added++;
-                if (added >= 3) break;
-            }
-            if (added == 0) {
-                // Nothing in the catalog carries controls we can see; fall back to the
-                // previous behaviour so the entry is at least present.
-                Object clone = cloneCatalogEntry(list.get(list.size() - 1), loader);
-                if (clone != null) {
-                    mutable.add(clone);
-                    added = 1;
-                }
             }
             boseCatalogInjected = true;
             MLog.event("bose.catalog.injected",
