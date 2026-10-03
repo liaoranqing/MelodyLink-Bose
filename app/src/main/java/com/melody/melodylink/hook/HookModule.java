@@ -3297,9 +3297,16 @@ public final class HookModule extends XposedModule {
             return;
         }
         Class<?> listenerType = listenerSetter.getParameterTypes()[0];
+        // Pick the change callback by its exact shape: (Preference, Object) -> boolean.
+        // Guessing "the first boolean method taking two parameters" is what broke
+        // 0.5.0 — COUISwitchPreference declares several such methods and the host
+        // unboxed null on every tap ("Expected to unbox a 'boolean' ... returned null").
         Method callback = null;
         for (Method candidate : listenerType.getMethods()) {
-            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
+            Class<?>[] params = candidate.getParameterTypes();
+            if (candidate.getReturnType() == Boolean.TYPE && params.length == 2
+                    && params[0].isAssignableFrom(androidx.preference.Preference.class)
+                    && !params[1].isPrimitive()) {
                 callback = candidate;
                 break;
             }
@@ -3310,9 +3317,11 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseWindListener";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (changeCallback == null || method.getName() != changeCallback.getName()
+                    if (changeCallback == null || !"onPreferenceChange".equals(method.getName())
                             || args == null || args.length < 2 || !(args[1] instanceof Boolean)) {
-                        return Boolean.TRUE;
+                        // Any other method on this interface may be unboxed by the host,
+                        // so never answer null.
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
                     }
                     boolean on = (Boolean) args[1];
                     int value = on ? 1 : 0;
@@ -3580,7 +3589,7 @@ public final class HookModule extends XposedModule {
                         // Void and primitive-returning callbacks share one proxy:
                         // returning null crashes the app when the caller unboxes a
                         // boolean, so hand back a type-appropriate default.
-                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
                     }
                     showBoseActionPicker(row, event);
                     return null;
@@ -3731,7 +3740,7 @@ public final class HookModule extends XposedModule {
                         // Void and primitive-returning callbacks share one proxy:
                         // returning null crashes the app when the caller unboxes a
                         // boolean, so hand back a type-appropriate default.
-                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
                     }
                     int current = boseTransport.getStandbyMinutes();
                     int[] presets = com.melody.melodylink.bose.BoseBmap.STANDBY_MINUTES;
@@ -3789,7 +3798,7 @@ public final class HookModule extends XposedModule {
                         // Void and primitive-returning callbacks share one proxy:
                         // returning null crashes the app when the caller unboxes a
                         // boolean, so hand back a type-appropriate default.
-                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
                     }
                     confirmBosePowerOff();
                     return null;
@@ -3942,9 +3951,14 @@ public final class HookModule extends XposedModule {
             return;
         }
         Class<?> listenerType = listenerSetter.getParameterTypes()[0];
+        // Match the change callback by shape (Preference, Object) -> boolean and never
+        // return null: the host unboxes the result, so a null here kills the process.
         Method callback = null;
         for (Method candidate : listenerType.getMethods()) {
-            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
+            Class<?>[] params = candidate.getParameterTypes();
+            if (candidate.getReturnType() == Boolean.TYPE && params.length == 2
+                    && params[0].isAssignableFrom(androidx.preference.Preference.class)
+                    && !params[1].isPrimitive()) {
                 callback = candidate;
                 break;
             }
@@ -3954,8 +3968,10 @@ public final class HookModule extends XposedModule {
             if ("toString".equals(method.getName())) return "MelodyLinkSettingListener";
             if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
             if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-            if (changeCallback == null || !method.getName().equals(changeCallback.getName())
-                    || args == null || args.length < 2 || !(args[1] instanceof Boolean)) return null;
+            if (changeCallback == null || !"onPreferenceChange".equals(method.getName())
+                    || args == null || args.length < 2 || !(args[1] instanceof Boolean)) {
+                return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
+            }
             Boolean value = (Boolean) args[1];
             setPreferenceValue(preference, "setEnabled", false);
             if (isPrimaryProcess() && sonyTransport.isConnected()) {
