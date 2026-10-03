@@ -250,6 +250,10 @@ public final class BoseTransport {
     private AncMode ancDomainMode;
     private boolean ancDirty;
     private boolean ancWorkerRunning;
+    private int lastAncModeValue = -1;
+    private Integer lastAncByteValue;
+    /** Gap after a session close so Bose can release RFCOMM channel 2. */
+    private static final long SESSION_SETTLE_MS = 600L;
 
     private void ancWorker() {
         while (true) {
@@ -263,9 +267,18 @@ public final class BoseTransport {
                 modeValue = ancModeValue;
                 ancValue = ancByteValue;
                 domainMode = ancDomainMode;
+                // Same target as the last completed write: nothing to do.
+                if (modeValue == lastAncModeValue && java.util.Objects.equals(ancValue, lastAncByteValue)) {
+                    ancWorkerRunning = false;
+                    return;
+                }
                 myGen = generation.incrementAndGet();
             }
             runAncWrite(myGen, modeValue, ancValue, domainMode);
+            // Bose needs a beat to release RFCOMM channel 2 after a session
+            // closes; opening the next one immediately fails with
+            // "read failed, socket might closed" (0.4.1 alternating-failure log).
+            sleepQuietly(SESSION_SETTLE_MS);
         }
     }
 
@@ -309,6 +322,10 @@ public final class BoseTransport {
             }
             final EarbudsState state = new EarbudsState(
                     BoseDeviceConfig.INSTANCE.getCapabilities(), domainMode, new HashMap<>());
+            synchronized (ancLock) {
+                lastAncModeValue = modeValue;
+                lastAncByteValue = ancValue;
+            }
             reportAnc(true, state, "ok");
         } finally {
             closeSocket();

@@ -86,6 +86,7 @@ public final class HookModule extends XposedModule {
     private static final String ADVANCED_SETTING_KEY_PREFIX = "melodylink.setting.";
     private static final String HUAWEI_LOW_LATENCY_SETTING_KEY = "melodylink.huawei.low_latency";
     private static final String SOUND_QUALITY_TITLE = "音质音效";
+    private static final String NOISE_EFFECT_TITLE = "降噪效果";
     private static final int WF_1000XM3_PRODUCT_ID = 0x067410;
     private volatile int targetAddressHash;
     private volatile String targetAddress;
@@ -1301,7 +1302,63 @@ public final class HookModule extends XposedModule {
                 || replaceHuaweiProductImage(owner, viewModelField, addressField, nameField,
                 imageField, loadingField, surface, fallbackImageView)
                 || replaceXiaomiProductImage(owner, viewModelField, addressField, nameField,
+                imageField, loadingField, surface, fallbackImageView)
+                || replaceBoseProductImage(owner, viewModelField, addressField, nameField,
                 imageField, loadingField, surface, fallbackImageView);
+    }
+
+    /** Show the bundled Bose QC Earbuds Ultra 2 photo on the masked detail/card. */
+    private boolean replaceBoseProductImage(
+            Object owner,
+            String viewModelField,
+            String addressField,
+            String nameField,
+            String imageField,
+            String loadingField,
+            String surface,
+            ImageView fallbackImageView
+    ) {
+        Object viewModel = readField(owner, viewModelField);
+        String address = asString(readField(viewModel, addressField));
+        if (!com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(address)) {
+            return false;
+        }
+        Object imageValue = readField(owner, imageField);
+        ImageView imageView = imageValue instanceof ImageView
+                ? (ImageView) imageValue : fallbackImageView;
+        if (imageView == null) return false;
+        File imageFile = materializeBoseImage();
+        if (imageFile == null) {
+            log(Log.WARN, TAG, event("Bose " + surface + " image skipped: asset unavailable"));
+            return false;
+        }
+        imageView.setImageURI(Uri.fromFile(imageFile));
+        imageView.setVisibility(View.VISIBLE);
+        hideLoadingView(readField(owner, loadingField));
+        log(Log.INFO, TAG, event("replaced Bose " + surface + " product image"));
+        return true;
+    }
+
+    private File materializeBoseImage() {
+        Application application = currentApplication();
+        AssetManager assets = sonyModuleAssets;
+        if (application == null || assets == null) return null;
+        File directory = new File(application.getFilesDir(), "melodylink/bose-images");
+        File output = new File(directory, "qc_ultra2.jpg");
+        try {
+            if (output.isFile() && output.length() > 0L) return output;
+            if (!directory.isDirectory() && !directory.mkdirs()) return null;
+            try (java.io.InputStream input = assets.open("bose/images/qc_ultra2.jpg");
+                 FileOutputStream stream = new FileOutputStream(output, false)) {
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = input.read(buffer)) != -1) stream.write(buffer, 0, count);
+            }
+            return output.isFile() && output.length() > 0L ? output : null;
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose image materialization failed", t);
+            return null;
+        }
     }
 
     /** Replaces only the two product-image views identified from Melody 16.8.3's resource flow. */
@@ -2460,18 +2517,26 @@ public final class HookModule extends XposedModule {
                 }
             }
             if (screen == null) throw new IllegalStateException("preference screen unavailable");
-            Object anchor = findPreferenceByTitle(screen, SOUND_QUALITY_TITLE);
-            Object parent;
-            if (anchor != null) {
-                parent = invokeNoArg(anchor, "getParent");
-            } else if (hasBoseCnc) {
-                // Bose detail page may not carry the Sony-shaped anchor; append
-                // the category straight under the root screen instead.
-                parent = screen;
-            } else {
-                throw new IllegalStateException("audio quality anchor unavailable");
+            // Bose CNC slider goes directly under the "降噪效果" row on the detail
+            // page. The privacy page reuses the same fragment class but has no such
+            // row, so this lookup doubles as the page guard (0.4.1 regression: the
+            // root-screen fallback dumped "高级设置" at the bottom of every page).
+            if (hasBoseCnc) {
+                Object noiseRow = findPreferenceByTitle(screen, NOISE_EFFECT_TITLE);
+                if (noiseRow != null
+                        && !findPreferenceByKeyRecursive(screen, "melodylink.bose.cnc")) {
+                    Object cncParent = invokeNoArg(noiseRow, "getParent");
+                    Integer cncOrder = (Integer) invokeNoArg(noiseRow, "getOrder");
+                    addBoseCncPreference(cncParent != null ? cncParent : screen, loader, activity,
+                            cncOrder == null ? -1 : cncOrder + 1);
+                    log(Log.INFO, TAG, event("installed Bose CNC level slider under noise-effect row"));
+                }
             }
-            if (parent == null) throw new IllegalStateException("advanced settings parent unavailable");
+            if (!hasSonySettings && !hasHuaweiLowLatency) return;
+            Object anchor = findPreferenceByTitle(screen, SOUND_QUALITY_TITLE);
+            if (anchor == null) return;
+            Object parent = invokeNoArg(anchor, "getParent");
+            if (parent == null) return;
             if (findPreference(parent, ADVANCED_CATEGORY_KEY) != null
                     || findPreferenceByKeyRecursive(parent, ADVANCED_CATEGORY_KEY)) return;
             Object category = newPreference(loader,
@@ -2486,11 +2551,6 @@ public final class HookModule extends XposedModule {
             if (!addPreference(parent, category, loader)) throw new IllegalStateException("category add rejected");
             advancedPreferences.clear();
             huaweiLowLatencyPreference = null;
-            if (hasBoseCnc) {
-                addBoseCncPreference(category, loader, activity);
-                log(Log.INFO, TAG, event("installed Bose CNC level slider via preference fragment"));
-                return;
-            }
             if (hasHuaweiLowLatency) {
                 addHuaweiLowLatencyPreference(category, loader, activity, 10);
                 log(Log.INFO, TAG, event("installed Huawei low-latency setting via preference fragment"));
@@ -2744,34 +2804,37 @@ public final class HookModule extends XposedModule {
      * noise-cancelling intensity). Uses androidx SeekBarPreference reflectively
      * (Melody bundles androidx.preference); a dynamic Proxy listens for changes.
      */
-    private void addBoseCncPreference(Object category, ClassLoader loader, Activity activity) {
-        Object seek = newPreference(loader, "androidx.preference.SeekBarPreference", activity);
+    /**
+     * Inject a 0..10 CNC slider using Melody's OWN COUI seekbar preference so it
+     * matches ColorOS 17 styling (the plain androidx SeekBarPreference looked
+     * foreign and its max field is R8-renamed, which broke the range). Melody's
+     * widget exposes clean public setBarMaxValue/setProgress/setOnTrackChangeListener.
+     * Placed directly under the "降噪效果" row, not in a buried category.
+     */
+    private void addBoseCncPreference(Object parent, ClassLoader loader, Activity activity, int order) {
+        Object seek = newPreference(loader,
+                "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
         if (seek == null) {
-            log(Log.WARN, TAG, event("Bose CNC slider unavailable: SeekBarPreference ctor failed"));
+            log(Log.WARN, TAG, event("Bose CNC slider unavailable: COUI seekbar ctor failed"));
             return;
         }
         setPreferenceValue(seek, "setKey", "melodylink.bose.cnc");
         setPreferenceValue(seek, "setTitle", "\u964d\u566a\u7b49\u7ea7");
         setPreferenceValue(seek, "setPersistent", false);
-        // Prefer the public setters; fall back to the androidx internal fields.
-        invokeInt(seek, "setMax", 10);
-        setIntField(seek, "mMax", 10);
-        setIntField(seek, "mMin", 0);
-        setIntField(seek, "mInterval", 1);
-        setIntField(seek, "mSeekbarIncrement", 1);
-        setBooleanField(seek, "mShowSeekBarValue", true);
+        // Raw 0..10 readout, not a percentage.
+        setPreferenceValue(seek, "setPromptVolumePercent", Boolean.FALSE);
+        invokeInt(seek, "setBarMaxValue", 10);
         int level = boseTransport.getCncLevel();
         if (level < 0) {
-            // :fg has no BMAP session; read the last published level from the
-            // shared state file written by the primary process.
             int[] shared = MelodySharedStateStore.readBoseCncState(boseCncStateFile());
             if (shared != null) level = shared[1];
         }
         if (level < 0) level = 3;
         invokeInt(seek, "setProgress", level);
         setPreferenceValue(seek, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + level + "/10");
+        if (order >= 0) setPreferenceValue(seek, "setOrder", order);
         installBoseCncListener(seek, loader);
-        if (addPreference(category, seek, loader)) {
+        if (addPreference(parent, seek, loader)) {
             boseCncPreference = seek;
         }
     }
@@ -2798,7 +2861,7 @@ public final class HookModule extends XposedModule {
     private void installBoseCncListener(Object preference, ClassLoader loader) {
         Method listenerSetter = null;
         for (Method candidate : allMethods(preference.getClass())) {
-            if (candidate.getName().equals("setOnPreferenceChangeListener")
+            if (candidate.getName().equals("setOnTrackChangeListener")
                     && candidate.getParameterTypes().length == 1) {
                 listenerSetter = candidate;
                 break;
@@ -2809,24 +2872,13 @@ public final class HookModule extends XposedModule {
             return;
         }
         Class<?> listenerType = listenerSetter.getParameterTypes()[0];
-        Method callback = null;
-        for (Method candidate : listenerType.getMethods()) {
-            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
-                callback = candidate;
-                break;
-            }
-        }
-        final Method changeCallback = callback;
         Object listener = java.lang.reflect.Proxy.newProxyInstance(loader,
                 new Class<?>[]{listenerType}, (proxy, method, args) -> {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseCncListener";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (changeCallback == null || !method.getName().equals(changeCallback.getName())
-                            || args == null || args.length < 2 || !(args[1] instanceof Number)) {
-                        return Boolean.TRUE;
-                    }
-                    int value = Math.max(0, Math.min(10, ((Number) args[1]).intValue()));
+                    if (args == null || args.length < 1 || !(args[0] instanceof Number)) return null;
+                    int value = Math.max(0, Math.min(10, ((Number) args[0]).intValue()));
                     setPreferenceValue(preference, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + value + "/10");
                     if (isPrimaryProcess()) {
                         BluetoothDevice device = resolveBoseForTile();
@@ -2836,8 +2888,6 @@ public final class HookModule extends XposedModule {
                                     com.melody.melodylink.bose.BoseDeviceConfig.SETTING_CNC, value);
                         }
                     } else {
-                        // Detail UI lives in :fg; the BMAP session is in the main
-                        // process. Hand the level over through the command file.
                         String address = targetAddress == null
                                 ? MelodySharedStateStore.readBoseCncAddress(boseCncStateFile())
                                 : targetAddress;
@@ -2848,7 +2898,7 @@ public final class HookModule extends XposedModule {
                         MelodySharedStateStore.writeBoseCncCommand(boseCncCommandFile(),
                                 address, value, java.util.UUID.randomUUID().toString());
                     }
-                    return Boolean.TRUE;
+                    return null;
                 });
         try {
             listenerSetter.setAccessible(true);
