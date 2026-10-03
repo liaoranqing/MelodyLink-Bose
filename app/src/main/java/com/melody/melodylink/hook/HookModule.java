@@ -1347,11 +1347,26 @@ public final class HookModule extends XposedModule {
         // whichever preference was added last — the page footer, which has no children
         // (evt=bose.detail.state total=0). The filter was lost in the 0.5.7 rewrite.
         if (!isBoseNoiseRow(preference)) return;
-        if (noiseEffectRow == preference) return;   // same instance, already armed
+        // Do NOT skip when the instance is unchanged: 0.5.12 showed the retry loop
+        // stopping after the very first tick, so a page whose row was captured before
+        // the loop was armed never got another chance. Re-arming is cheap — every
+        // install path is guarded by findPreferenceByKeyRecursive.
         noiseEffectRow = preference;
         MLog.event("bose.anchor.captured",
                 "class", preference.getClass().getSimpleName(),
-                "key", PrefRef.getKey(preference));
+                "key", PrefRef.getKey(preference),
+                "thread", Thread.currentThread().getName());
+        // Run one attempt inline as well: if the posted retry never fires we still
+        // learn where it stops, and the install path is idempotent.
+        try {
+            boolean done = installBoseIntoLiveScreen();
+            MLog.event("bose.inject.inline",
+                    "ok", done,
+                    "bonded", boseBonded(),
+                    "parent", describeParent());
+        } catch (Throwable t) {
+            MLog.event("bose.inject.inline_error", "error", MLog.compactThrowable(t));
+        }
         scheduleBoseInjection(0);
     }
 
@@ -1365,7 +1380,12 @@ public final class HookModule extends XposedModule {
         mainHandler.postDelayed(() -> {
             try {
                 if (!boseBonded()) return;
-                if (isBoseInjected()) return;
+                MLog.event("bose.retry.tick", "attempt", attempt,
+                "bonded", boseBonded(),
+                "injected", isBoseInjected(),
+                "anchor_class", noiseEffectRow == null ? "null"
+                        : noiseEffectRow.getClass().getSimpleName());
+        if (isBoseInjected()) return;
                 if (installBoseIntoLiveScreen()) {
                     scheduleBoseInjectionRecheck(attempt);
                     return;
@@ -1605,6 +1625,20 @@ public final class HookModule extends XposedModule {
                     "keys", keys);
         } catch (Throwable t) {
             MLog.event("bose.detail.state_error", "error", MLog.compactThrowable(t));
+        }
+    }
+
+    /** Short description of where the injection would land, for log triage. */
+    private String describeParent() {
+        try {
+            Object row = noiseEffectRow;
+            if (row == null) return "no_anchor";
+            Object parent = PrefRef.getParent(row);
+            if (parent == null) return "no_parent";
+            return parent.getClass().getSimpleName() + "/"
+                    + PrefRef.getPreferenceCount(parent);
+        } catch (Throwable t) {
+            return "error:" + MLog.compactThrowable(t);
         }
     }
 
