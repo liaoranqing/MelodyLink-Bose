@@ -987,7 +987,7 @@ public final class HookModule extends XposedModule {
                             // Whatever the host builds sections from, a null children yields
                             // none. Fill it from the richest catalog entry so there is
                             // something for the page to render.
-                            boolean filled = fillMissingChildren(result);
+                            boolean filled = fillMissingChildren(result, chain.getThisObject());
                             if (filled) {
                                 MLog.event("bose.detail.children_filled",
                                         "into", String.valueOf(readField(result, "name")));
@@ -2134,23 +2134,55 @@ public final class HookModule extends XposedModule {
      *
      * @return true when children were filled in
      */
-    private boolean fillMissingChildren(Object dto) {
-        if (dto == null || richestCatalogEntry == null) return false;
+    private boolean fillMissingChildren(Object dto, Object manager) {
+        java.lang.reflect.Field target = findField(dto.getClass(), "children");
+        if (target == null) return false;
         try {
-            java.lang.reflect.Field target = findField(dto.getClass(), "children");
-            java.lang.reflect.Field source = findField(
-                    richestCatalogEntry.getClass(), "children");
-            if (target == null || source == null) return false;
             target.setAccessible(true);
-            source.setAccessible(true);
             Object existing = target.get(dto);
             if (existing instanceof java.util.Collection
                     && !((java.util.Collection<?>) existing).isEmpty()) {
                 return false; // already populated; leave it alone
             }
+        } catch (Throwable t) {
+            return false;
+        }
+
+        // 0.5.46: b() is not a reliable source. It is only reached when
+        // DeviceInfoManager.h(mac) returns null, so on some runs it is never called at all
+        // (0.5.45 produced zero catalog events while the lookup ran five times). Call it
+        // ourselves when we do not already have the catalog, so this path does not depend on
+        // the host happening to take that branch.
+        if (richestCatalogEntry == null && manager != null) {
+            Object catalog = PrefRef.invokeNoArg(manager, "b");
+            if (catalog instanceof java.util.List) {
+                java.util.List<?> list = (java.util.List<?>) catalog;
+                int best = 0;
+                for (int i = 0; i < list.size(); i++) {
+                    int c = countControls(list.get(i));
+                    if (c > best) {
+                        best = c;
+                        richestCatalogEntry = list.get(i);
+                    }
+                }
+                MLog.event("bose.catalog.fetched",
+                        "size", list.size(),
+                        "richest", best,
+                        "richest_name", richestCatalogEntry == null ? "n/a"
+                                : String.valueOf(readField(richestCatalogEntry, "name")));
+            }
+        }
+        if (richestCatalogEntry == null) return false;
+        try {
+            java.lang.reflect.Field source = findField(
+                    richestCatalogEntry.getClass(), "children");
+            if (source == null) return false;
+            source.setAccessible(true);
             Object donor = source.get(richestCatalogEntry);
             if (!(donor instanceof java.util.Collection)
                     || ((java.util.Collection<?>) donor).isEmpty()) {
+                MLog.event("bose.detail.donor_empty",
+                        "donor", String.valueOf(readField(richestCatalogEntry, "name")));
                 return false;
             }
             target.set(dto, donor);
