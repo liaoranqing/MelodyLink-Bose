@@ -94,7 +94,6 @@ public final class HookModule extends XposedModule {
      * identity to stay idempotent across RecyclerView rebinds.
      */
     private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
-    private static final String CNC_ONESPACE_TAG = "bose_cnc_onespace";
     private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
     /**
@@ -566,6 +565,19 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainViewModel", "f", 1, "detailState");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainViewModel", "g", 1, "detailConnectionState");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainActivity", "onCreate", 1, "detailActivityCreate");
+            // DetailMainActivity.A() is the whole content pipeline — 17.6.3 smali:
+            //   CompletableFuture.supplyAsync(LA9/r;).whenCompleteAsync(LAa/h;, executor)
+            // onCreate itself contains no fragment transaction at all, so this is the only
+            // place the detail fragment can be created. 0.5.16 evidence: the page stayed
+            // blank (melody_ui_fragment_container with zero children) while every hook we
+            // had was firing normally, which means the failure is upstream of any
+            // preference we could touch — inside A()'s future.
+            hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainActivity", "A", 0, "detailPipelineStart");
+            // The completion callback. If the future completes exceptionally, the fragment
+            // is never attached and the container legitimately stays empty.
+            hookNamed(loader, "Aa", "accept", 2, "detailPipelineComplete");
+            // The supplier itself — logs what it is asked to load.
+            hookNamed(loader, "A9", "get", 0, "detailPipelineSupply");
             // JADX labels this class v9.t; the runtime name in Melody 16.8.3 is v9.C1594t.
             hookNamed(loader, "v9.C1594t", "onViewCreated", 2, "detailPreferenceHostCreated");
             // MelodyCodecTweaker's stable entry: every DetailMain preference page inherits this.
@@ -802,11 +814,49 @@ public final class HookModule extends XposedModule {
                         hideNoiseEffectRow();
                         return result;
                     }
+                    if ("detailPipelineStart".equals(label)) {
+                        Object result = chain.proceed();
+                        logDetailPipeline("start");
+                        return result;
+                    }
+                    if ("detailPipelineSupply".equals(label)) {
+                        // The supplier runs on a worker thread. If it throws, the future
+                        // completes exceptionally and the fragment is never attached.
+                        try {
+                            Object result = chain.proceed();
+                            logDetailPipeline("supply_ok", "value", describeValue(result));
+                            return result;
+                        } catch (Throwable t) {
+                            logDetailPipeline("supply_threw", "error", MLog.compactThrowable(t));
+                            throw t;
+                        }
+                    }
+                    if ("detailPipelineComplete".equals(label)) {
+                        Object arg0 = arity > 0 ? chain.getArg(0) : null;
+                        Object arg1 = arity > 1 ? chain.getArg(1) : null;
+                        // CompletableFuture passes the outcome as (value, throwable).
+                        if (arg1 instanceof Throwable) {
+                            logDetailPipeline("complete_error", "error",
+                                    MLog.compactThrowable((Throwable) arg1));
+                        } else {
+                            logDetailPipeline("complete_ok", "value", describeValue(arg0));
+                        }
+                        Object result = chain.proceed();
+                        reportDetailContainer("after_complete");
+                        return result;
+                    }
                     if ("detailActivityCreate".equals(label)) {
                         Object result = chain.proceed();
                         if (chain.getThisObject() instanceof Activity) {
                             detailActivity = (Activity) chain.getThisObject();
                             requestSonyBatteryRefresh();
+                            // Snapshot the container right after onCreate. If A() never
+                            // runs at all, this is the only evidence we get.
+                            reportDetailContainer("after_onCreate");
+                            // The pipeline is async, so re-check once the main looper has
+                            // drained — this is the state the user actually sees.
+                            mainHandler.postDelayed(
+                                    () -> reportDetailContainer("after_onCreate+800ms"), 800L);
                         }
                         return result;
                     }
@@ -1528,7 +1578,14 @@ public final class HookModule extends XposedModule {
                 "page", detailPage ? "detail" : "general",
                 "anchor", PrefRef.getKey(noiseRow),
                 "order", target,
-                "fragment", screen.getClass().getSimpleName());
+                // 0.5.16: screen is legitimately null whenever the anchor's parent chain
+                // is the only thing that resolved — which is the normal case since 0.5.11
+                // stopped requiring a PreferenceScreen. Dereferencing it here threw an NPE
+                // that aborted installBoseIntoLiveScreen *after* the rows were already added,
+                // so every run logged nothing past this point even though the insert had
+                // succeeded.
+                "fragment", screen == null ? "none" : screen.getClass().getSimpleName(),
+                "children", PrefRef.getPreferenceCount(parent));
         return true;
     }
 
@@ -1620,6 +1677,95 @@ public final class HookModule extends XposedModule {
      * not an injection problem — the two need completely different fixes, so we log the
      * actual state instead of assuming.
      */
+    /** Compact, log-safe rendering of an arbitrary pipeline value. */
+    private static String describeValue(Object value) {
+        if (value == null) return "null";
+        try {
+            String text = String.valueOf(value);
+            return value.getClass().getSimpleName() + "(" + text + ")";
+        } catch (Throwable t) {
+            return value.getClass().getName() + "(unprintable)";
+        }
+    }
+
+    /**
+     * Traces the DetailMainActivity content pipeline.
+     *
+     * <p>17.6.3 {@code DetailMainActivity.A()} is the entire content path:
+     * {@code CompletableFuture.supplyAsync(LA9/r;).whenCompleteAsync(LAa/h;, executor)}.
+     * {@code onCreate} contains no fragment transaction whatsoever, so if this future fails
+     * the {@code melody_ui_fragment_container} is guaranteed to stay empty — which is
+     * exactly the 0.5.16 symptom, with every other hook firing normally.
+     */
+    private void logDetailPipeline(String stage, String... extra) {
+        StringBuilder sb = new StringBuilder("bose.pipeline.").append(stage);
+        for (int i = 0; i + 1 < extra.length; i += 2) {
+            sb.append(' ').append(extra[i]).append('=').append(extra[i + 1]);
+        }
+        MLog.event(sb.toString());
+    }
+
+    /**
+     * Reports whether the detail content container actually has children, plus the fragment
+     * manager's view of the activity. This separates "fragment never attached" from
+     * "fragment attached but empty" — the two look identical in a uiautomator dump but need
+     * completely different fixes.
+     */
+    private void reportDetailContainer(String stage) {
+        try {
+            Activity activity = detailActivity;
+            if (activity == null) {
+                MLog.event("bose.container.state", "stage", stage, "reason", "no_activity");
+                return;
+            }
+            ViewGroup container = findDetailContainer(activity);
+            if (container == null) {
+                MLog.event("bose.container.state", "stage", stage, "reason", "no_container");
+                return;
+            }
+            int children = container.getChildCount();
+            StringBuilder tree = new StringBuilder();
+            for (int i = 0; i < children && i < 6; i++) {
+                View child = container.getChildAt(i);
+                tree.append(child.getClass().getSimpleName()).append('(')
+                        .append(child.getId() == View.NO_ID ? "no-id" : child.getResources()
+                                .getResourceEntryName(child.getId()))
+                        .append(") ");
+            }
+            MLog.event("bose.container.state",
+                    "stage", stage,
+                    "children", children,
+                    "visible", container.getVisibility(),
+                    "size", container.getWidth() + "x" + container.getHeight(),
+                    "first", tree.toString().trim());
+        } catch (Throwable t) {
+            MLog.event("bose.container.state", "stage", stage,
+                    "error", MLog.compactThrowable(t));
+        }
+    }
+
+    private ViewGroup findDetailContainer(Activity activity) {
+        try {
+            int id = activity.getResources().getIdentifier(
+                    "melody_ui_fragment_container", "id", activity.getPackageName());
+            if (id != 0) {
+                View found = activity.findViewById(id);
+                if (found instanceof ViewGroup) return (ViewGroup) found;
+            }
+            // The id lives in Melody's package, not the host app's, under some builds.
+            for (String pkg : new String[]{activity.getPackageName(), TARGET}) {
+                int alt = activity.getResources().getIdentifier(
+                        "melody_ui_fragment_container", "id", pkg);
+                if (alt != 0) {
+                    View found = activity.findViewById(alt);
+                    if (found instanceof ViewGroup) return (ViewGroup) found;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
     private void reportDetailPageState(int attempt) {
         try {
             Object row = noiseEffectRow;
@@ -2149,14 +2295,6 @@ public final class HookModule extends XposedModule {
                 return;
             }
             View widget = (View) widgetField;
-            ViewGroup parent = widget.getParent() instanceof ViewGroup
-                    ? (ViewGroup) widget.getParent() : null;
-            if (parent == null) {
-                MLog.event("bose.cnc.onespace.skip", "reason", "no_parent");
-                return;
-            }
-            if (parent.findViewWithTag(CNC_ONESPACE_TAG) != null) return;
-
             Context context = widget.getContext();
             Activity activity = findActivity(context);
             if (activity == null) activity = detailActivity;
@@ -2164,8 +2302,23 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.cnc.onespace.skip", "reason", "no_activity");
                 return;
             }
-            ClassLoader loader = preference.getClass().getClassLoader();
 
+            // 0.5.16 evidence: reason=not_a_view. The first attempt built a
+            // MelodyPromptVolumeSeekBarPreference and called addView on the widget's
+            // parent, but that class extends COUIPreference — it is a Preference, never a
+            // View, so it cannot be added to a ViewGroup at all. The 通用设置 list is a
+            // COUIPanel driven by a real preference tree (OneSpaceListFragment, field r =
+            // COUIPreferenceCategory), so the row has to be added there instead. The
+            // onBindViewHolder hook is kept only as the trigger point: it is the earliest
+            // moment the tree is guaranteed to be built.
+            Object tree = findOneSpacePreferenceTree(preference);
+            if (tree == null) {
+                MLog.event("bose.cnc.onespace.skip", "reason", "no_tree");
+                return;
+            }
+            if (findPreferenceByKeyRecursive(tree, BOSE_CNC_ONESPACE_KEY) != null) return;
+
+            ClassLoader loader = preference.getClass().getClassLoader();
             Object seek = newPreference(loader,
                     "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
             if (seek == null) {
@@ -2188,27 +2341,63 @@ public final class HookModule extends XposedModule {
             setPreferenceValue(seek, "setSummary", "效果强度 " + level + "/10");
             installBoseCncListener(seek, loader);
 
-            View view = seek instanceof View ? (View) seek : null;
-            if (view == null) {
-                MLog.event("bose.cnc.onespace.skip", "reason", "not_a_view");
+            int anchorOrder = PrefRef.getOrder(preference);
+            int target = anchorOrder < 0 ? 0 : anchorOrder + 1;
+            PrefRef.shiftPreferenceOrders(tree, target, +40);
+            if (!addPreference(tree, seek, loader)) {
+                MLog.event("bose.cnc.onespace.skip", "reason", "add_rejected",
+                        "parent", tree.getClass().getSimpleName());
                 return;
             }
-            view.setTag(CNC_ONESPACE_TAG);
-            ViewGroup.LayoutParams lp = view.getLayoutParams();
-            int width = parent.getWidth();
-            if (lp == null) {
-                lp = new ViewGroup.LayoutParams(
-                        width > 0 ? width : ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT);
-            }
-            // Directly after the three-state widget = visually below 降噪/关闭/通透.
-            parent.addView(view, parent.indexOfChild(widget) + 1, lp);
             boseCncOneSpacePreference = seek;
-            MLog.event("bose.cnc.onespace.attached", "level", level,
-                    "index", parent.indexOfChild(view));
+            MLog.event("bose.cnc.onespace.attached", "level", level, "order", target,
+                    "parent", tree.getClass().getSimpleName());
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose 通用设置 slider attach failed", t);
         }
+    }
+
+    /**
+     * Walks up from a 通用设置 row to the preference container that drives its RecyclerView.
+     *
+     * <p>{@code OneSpaceNoisePreference} has no parent link of its own — it is added by
+     * {@code OneSpaceListFragment} (field r, a {@code COUIPreferenceCategory}) to a
+     * {@code androidx.preference.g} fragment. So the tree is found by asking the row's own
+     * context for the fragment instead, and falling back to the screen the anchor lives on.
+     */
+    private Object findOneSpacePreferenceTree(Object preference) {
+        try {
+            Object context = PrefRef.invokeNoArg(preference, "getContext");
+            if (!(context instanceof Context)) return null;
+            // screenForAnchor() bails out unless the preference's context is itself an
+            // Activity. On 通用设置 it is not: the rows live in a COUIPanelFragment hosted
+            // by OneSpaceDetailActivity, so getContext() returns a ContextWrapper. Unwrap
+            // to the Activity first, then reuse the fragment-manager walk.
+            Activity activity = findActivity((Context) context);
+            if (activity == null) return null;
+            Object manager = null;
+            for (String name : new String[]{"getSupportFragmentManager", "getFragmentManager"}) {
+                manager = PrefRef.invokeNoArg(activity, name);
+                if (manager != null) break;
+            }
+            if (manager == null) return null;
+            java.util.List<?> fragments = readFragmentList(manager);
+            if (fragments == null) return null;
+            for (Object fragment : fragments) {
+                if (fragment == null) continue;
+                Object screen = PrefRef.getPreferenceScreen(fragment);
+                if (screen == null) continue;
+                if (PrefRef.findPreferenceRecursive(screen, "pref_noise_switch") != null) {
+                    MLog.event("bose.cnc.onespace.tree",
+                            "fragment", fragment.getClass().getSimpleName(),
+                            "screen", screen.getClass().getSimpleName());
+                    return screen;
+                }
+            }
+        } catch (Throwable t) {
+            MLog.event("bose.cnc.onespace.tree_error", "error", MLog.compactThrowable(t));
+        }
+        return null;
     }
 
     private ImageView findDetailImageView(Object owner) {
