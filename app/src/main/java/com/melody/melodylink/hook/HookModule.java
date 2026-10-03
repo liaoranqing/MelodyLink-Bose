@@ -93,6 +93,13 @@ public final class HookModule extends XposedModule {
      * RecyclerView item, so the slider is attached to the view hierarchy and needs its own
      * identity to stay idempotent across RecyclerView rebinds.
      */
+    /**
+     * How often the detail page is re-checked while it has focus. The host re-hides the
+     * rows it cannot populate some time after we reveal them (0.5.27), so a single pass is
+     * not enough. 400ms keeps the content stable without measurable cost: the walk touches
+     * roughly a dozen nodes and only runs while the page is actually focused.
+     */
+    private static final long REVEAL_POLL_INTERVAL_MS = 400L;
     private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
     private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
@@ -1864,6 +1871,8 @@ public final class HookModule extends XposedModule {
     }
 
     private static volatile String pendingDetailMac;
+    /** Guards against stacking poll timers if forceRevealDetailContent is re-entered. */
+    private boolean detailRevealPollScheduled;
 
     /**
      * Builds a minimal {@code WhitelistConfigDTO} so Melody's own detail page has something
@@ -2037,6 +2046,7 @@ public final class HookModule extends XposedModule {
     private void forceRevealDetailContent(Activity activity) {
         try {
             if (activity == null || activity.isFinishing()) return;
+            if (!activity.hasWindowFocus()) return;
             ViewGroup container = findDetailContainer(activity);
             if (container == null) return;
             int revealed = revealHiddenViews(container, 0);
@@ -2046,6 +2056,32 @@ public final class HookModule extends XposedModule {
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose detail reveal failed", t);
         }
+        // 0.5.27: a one-shot reveal is not enough. The page renders, we reveal six nodes
+        // (evt=bose.detail.revealed count=6, and the tree then shows a clean
+        // "LinearLayout[2 kids, ... 1440x4272] 1440x3168" with no HIDDEN markers), the
+        // user sees content for a moment — and then the host hides it again. It reacts to
+        // some later state (a LiveData update, a connection refresh) and re-applies GONE
+        // to the rows it cannot populate. Polling is blunt but it beats tracing every
+        // call site, and the work is trivial: a walk over a dozen nodes, only while the
+        // page actually has focus.
+        scheduleRevealPoll(activity);
+    }
+
+    private void scheduleRevealPoll(Activity activity) {
+        if (detailRevealPollScheduled) return;
+        detailRevealPollScheduled = true;
+        mainHandler.postDelayed(() -> {
+            detailRevealPollScheduled = false;
+            try {
+                if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+                    return;
+                }
+                if (activity.hasWindowFocus()) {
+                    forceRevealDetailContent(activity);
+                }
+            } catch (Throwable ignored) {
+            }
+        }, REVEAL_POLL_INTERVAL_MS);
     }
 
     private static int revealHiddenViews(View view, int depth) {
