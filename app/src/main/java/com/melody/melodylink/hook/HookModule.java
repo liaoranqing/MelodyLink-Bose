@@ -1344,11 +1344,11 @@ public final class HookModule extends XposedModule {
         AssetManager assets = sonyModuleAssets;
         if (application == null || assets == null) return null;
         File directory = new File(application.getFilesDir(), "melodylink/bose-images");
-        File output = new File(directory, "qc_ultra2.jpg");
+        File output = new File(directory, "qc_ultra2.png");
         try {
             if (output.isFile() && output.length() > 0L) return output;
             if (!directory.isDirectory() && !directory.mkdirs()) return null;
-            try (java.io.InputStream input = assets.open("bose/images/qc_ultra2.jpg");
+            try (java.io.InputStream input = assets.open("bose/images/qc_ultra2.png");
                  FileOutputStream stream = new FileOutputStream(output, false)) {
                 byte[] buffer = new byte[8192];
                 int count;
@@ -1908,7 +1908,10 @@ public final class HookModule extends XposedModule {
     @SuppressLint("MissingPermission")
     private BluetoothDevice resolveBoseForTile() {
         BluetoothDevice device = targetBoseDevice;
-        if (device != null && boseHostConnected) return device;
+        if (device != null && boseHostConnected) {
+            boseTransport.setDevice(device); // idempotent re-bind
+            return device;
+        }
         String mac = BoseDeviceConfig.INSTANCE.getKNOWN_MACS().isEmpty()
                 ? null : BoseDeviceConfig.INSTANCE.getKNOWN_MACS().iterator().next();
         if (mac == null) return null;
@@ -1921,6 +1924,10 @@ public final class HookModule extends XposedModule {
         if (device == null) return null;
         targetBoseDevice = device;
         boseHostConnected = true;
+        // Bind the transport too: on the main process no Melody connect flow runs
+        // for a tile/slider-initiated write, so BoseTransport.device stayed null and
+        // every [31.10] write died with "no Bose device selected".
+        boseTransport.setDevice(device);
         rememberTargetAddress(mac);
         writeSharedBoseState();
         return device;
@@ -2525,11 +2532,16 @@ public final class HookModule extends XposedModule {
                 Object noiseRow = findPreferenceByTitle(screen, NOISE_EFFECT_TITLE);
                 if (noiseRow != null
                         && !findPreferenceByKeyRecursive(screen, "melodylink.bose.cnc")) {
+                    // The row itself is a dead end for Bose: it opens OPPO's own
+                    // noise-effect page, which drives a non-existent SPP channel.
+                    // Hide it — the CNC slider below is its functional replacement.
+                    setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
                     Object cncParent = invokeNoArg(noiseRow, "getParent");
                     Integer cncOrder = (Integer) invokeNoArg(noiseRow, "getOrder");
                     addBoseCncPreference(cncParent != null ? cncParent : screen, loader, activity,
                             cncOrder == null ? -1 : cncOrder + 1);
-                    log(Log.INFO, TAG, event("installed Bose CNC level slider under noise-effect row"));
+                    log(Log.INFO, TAG, event("installed Bose CNC level slider under noise-effect row"
+                            + " (noise-effect row hidden)"));
                 }
             }
             if (!hasSonySettings && !hasHuaweiLowLatency) return;

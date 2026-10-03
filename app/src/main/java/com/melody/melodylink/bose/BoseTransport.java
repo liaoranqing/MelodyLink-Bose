@@ -86,6 +86,17 @@ public final class BoseTransport {
         return socket != null && !linkDead;
     }
 
+    /**
+     * Bind the transport to a device without opening a session. Tile/UI paths
+     * (volume panel, CNC slider) resolve the device on the main process but no
+     * connect flow has run there, so without this every openSocket() failed with
+     * "no Bose device selected" and the write was silently dropped.
+     */
+    @SuppressLint("MissingPermission")
+    public void setDevice(BluetoothDevice target) {
+        if (target != null) device = target;
+    }
+
     /** Cached [31.10] spatial byte; -1 until the first session read it. */
     public int getSpatialType() {
         return spatialType;
@@ -382,6 +393,10 @@ public final class BoseTransport {
         try {
             opened = openSocket();
         } catch (Throwable error) {
+            final String reason = "settings rfcomm open failed: " + error;
+            listenerOnUi(new Runnable() {
+                @Override public void run() { listener.onLog(reason); }
+            });
             return;
         }
         final BluetoothSocket current = opened;
@@ -397,7 +412,12 @@ public final class BoseTransport {
         try {
             sleepQuietly(POST_WRITE_DELAY_MS + 100L);
             drainStartup(current);
-            writeSettingsLocked(myGen, index, value);
+            final boolean ok = writeSettingsLocked(myGen, index, value);
+            final String result = "Bose setting[" + index + "]=" + value
+                    + (ok ? " written" : " write failed");
+            listenerOnUi(new Runnable() {
+                @Override public void run() { listener.onLog(result); }
+            });
         } finally {
             closeSocket();
         }
