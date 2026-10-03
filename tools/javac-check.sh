@@ -26,6 +26,19 @@ if [ ! -f "$ANDROID_JAR" ]; then
   exit 2
 fi
 
+# The compileSdk in app/build.gradle.kts must match the jar we check against.
+# A mismatch silently hides errors: android-36 still declares
+# BluetoothDevice.getConnectionState()/STATE_CONNECTED while the android-37.0 jar
+# the CI actually uses does not, so a local pass said nothing (0.5.2 CI failure).
+COMPILE_SDK=$(grep -oE 'compileSdk\s*=\s*[0-9]+' app/build.gradle.kts | grep -oE '[0-9]+' | head -1)
+JAR_SDK=$(echo "$ANDROID_JAR" | sed -E 's#.*android-([0-9]+).*#\1#')
+if [ -n "$COMPILE_SDK" ] && [ "$COMPILE_SDK" != "$JAR_SDK" ]; then
+  echo "SDK MISMATCH: build declares compileSdk=$COMPILE_SDK but ANDROID_JAR is android-$JAR_SDK"
+  echo "  a local pass would be meaningless; point ANDROID_JAR at the matching platform"
+  exit 3
+fi
+echo "compileSdk=$COMPILE_SDK, checking against android-$JAR_SDK"
+
 CP="$ANDROID_JAR"
 # android.jar alone lacks androidx/material; add every cached dependency jar.
 while IFS= read -r jar; do

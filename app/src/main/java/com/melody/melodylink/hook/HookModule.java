@@ -2396,7 +2396,7 @@ public final class HookModule extends XposedModule {
                         BluetoothDevice device = adapter.getRemoteDevice(mac);
                         if (device == null) continue;
                         if (device.getBondState() == BluetoothDevice.BOND_BONDED) return true;
-                        if (device.getConnectionState() == BluetoothDevice.STATE_CONNECTED) return true;
+                        if (isDeviceConnected(device)) return true;
                     } catch (Throwable ignored) {
                         // getRemoteDevice throws for an unknown MAC; try the next one
                     }
@@ -2406,6 +2406,24 @@ public final class HookModule extends XposedModule {
         }
         try {
             return MelodySharedStateStore.readBoseCncAddress(boseCncStateFile()) != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * BluetoothDevice.getConnectionState() / STATE_CONNECTED are not resolvable
+     * against every android.jar the build may use, so they are called
+     * reflectively: a compile-time reference broke CI with "cannot find symbol"
+     * while the local android-36 stub still had them. Reflection also degrades
+     * gracefully on older platform levels.
+     */
+    private static boolean isDeviceConnected(BluetoothDevice device) {
+        try {
+            Method getter = device.getClass().getMethod("getConnectionState");
+            Object state = getter.invoke(device);
+            // STATE_CONNECTED == 2 on every platform level that has the method.
+            return state instanceof Integer && (Integer) state == 2;
         } catch (Throwable ignored) {
             return false;
         }
