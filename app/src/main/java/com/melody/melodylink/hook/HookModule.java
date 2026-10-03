@@ -1955,7 +1955,11 @@ public final class HookModule extends XposedModule {
                     // container we are measuring is not the one the user is looking at. The
                     // activity class and window token settle that immediately.
                     "activity", activity.getClass().getSimpleName(),
-                    "token", String.valueOf(activity.getWindowToken()),
+                    // getWindowToken() lives on View, not on Activity — the token has to be
+                    // read off the decor view. A null token means this activity is no longer
+                    // attached to a window, which is exactly the case we are hunting for.
+                    "token", String.valueOf(
+                            activity.getWindow().getDecorView().getWindowToken()),
                     "shown", activity.getWindow().getDecorView().isShown(),
                     "finishing", activity.isFinishing(),
                     "children", container.getChildCount(),
