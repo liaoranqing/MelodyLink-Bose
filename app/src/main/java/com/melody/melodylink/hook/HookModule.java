@@ -894,6 +894,11 @@ public final class HookModule extends XposedModule {
                         Object result = chain.proceed();
                         if (chain.getThisObject() instanceof Activity) {
                             detailActivity = (Activity) chain.getThisObject();
+                            // Local final alias: the delayed lambdas below capture it, and a
+                            // field reference would work too but this keeps the compiler
+                            // honest about the capture (0.5.26 referenced an 'activity'
+                            // variable that only existed as a field name pattern).
+                            final Activity created = detailActivity;
                             requestSonyBatteryRefresh();
                             // Snapshot the container right after onCreate. If A() never
                             // runs at all, this is the only evidence we get.
@@ -907,10 +912,10 @@ public final class HookModule extends XposedModule {
                             // Bose has no catalog entry and the page responds to that by
                             // hiding the rows it cannot populate. Un-hiding them is safe: a
                             // row with no data renders empty rather than crashing.
-                            forceRevealDetailContent(activity);
+                            forceRevealDetailContent(created);
                             for (long delay : new long[]{300L, 800L, 2000L, 5000L}) {
                                 mainHandler.postDelayed(() -> {
-                                    forceRevealDetailContent(activity);
+                                    forceRevealDetailContent(created);
                                     reportDetailContainer("t+" + delay);
                                 }, delay);
                             }

@@ -1,13 +1,14 @@
-"""Static checks for the two compile-error classes we keep hitting.
+"""Static checks for the compile-error classes we keep hitting.
 
 1. A method returning a primitive must never be compared against null.
-   (This is exactly what broke the build: findPreferenceByKeyRecursive() returns
-   boolean, and it was written as `... != null`.)
-2. Brace / paren balance, which catches a botched edit that left a block unclosed.
-
-Deliberately does NOT try to resolve call targets: keywords like if/for/
-synchronized drown the signal, and a real unresolved reference is caught by the
-compiler in seconds anyway.
+   (0.5.18: findPreferenceByKeyRecursive() returns boolean, written as `!= null`.)
+2. Brace / paren balance, catching a botched edit that left a block unclosed.
+Deliberately does NOT try to resolve identifiers or call targets. Both attempts
+produced heavy false positives: keywords like if/for/synchronized drown the
+signal, javap omits inherited methods so View.getWidth() reads as missing, and a
+lambda-scope check flags every English word inside the comment above the lambda.
+Scope/undefined-variable errors are left to the compiler — the only check that
+gets them right — and CI is cached to make that loop cheap.
 
 Run from the MelodyLink-Bose directory:
     python static_check.py
@@ -21,6 +22,17 @@ FILES = [
     'app/src/main/java/com/melody/melodylink/hook/HookModule.java',
     'app/src/main/java/com/melody/melodylink/hook/PrefRef.java',
 ]
+
+JAVA_KEYWORDS = {
+    'if', 'for', 'while', 'switch', 'catch', 'synchronized', 'return', 'new',
+    'super', 'this', 'assert', 'do', 'else', 'try', 'throw', 'instanceof',
+    'final', 'static', 'private', 'public', 'protected', 'void', 'int', 'long',
+    'boolean', 'double', 'float', 'char', 'byte', 'short', 'class', 'interface',
+    'extends', 'implements', 'package', 'import', 'break', 'continue', 'case',
+    'default', 'null', 'true', 'false', 'var', 'record', 'yield', 'sealed',
+    'permits', 'non', 'abstract', 'native', 'synchronized', 'transient',
+    'volatile', 'strictfp', 'throws', 'enum', 'else',
+}
 
 problems = []
 
