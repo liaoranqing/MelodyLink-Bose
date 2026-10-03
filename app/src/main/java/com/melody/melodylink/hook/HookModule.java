@@ -614,7 +614,16 @@ public final class HookModule extends XposedModule {
             // WhitelistContentDO). Hooking b() is the better place anyway: injecting the
             // entry there means every consumer sees a normal catalog row, instead of
             // patching one call site.
-            hookNamed(loader, "L6/a", "b", 0, "whitelistConfigList");
+            // 0.5.33: 0.5.32 hooked L6/a.b() and L6/a.a(String) and both reported
+            // "cannot hook in L6/a" even though smali shows both methods clearly
+            // (SupportConfigManager, both public final on a final class). libxposed will
+            // not hook final methods, so this approach cannot work on this target.
+            //
+            // The constructor is a normal non-final method and always hooks. Its field 
+            // is the com.oplus.melody.common.util.E provider that b() reads the catalog
+            // from, so replacing that field with a proxy intercepts the catalog without
+            // touching any final method.
+            hookNamed(loader, "L6/a", "<init>", 0, "whitelistManagerCtor");
             hookNamed(loader, "L6/a", "a", 1, "detailWhitelistLookup");
             // The fragment that the callback is supposed to populate. Watching its lifecycle
             // tells us whether it is created at all once the config resolves.
@@ -901,10 +910,18 @@ public final class HookModule extends XposedModule {
                             throw t;
                         }
                     }
+                    if ("whitelistManagerCtor".equals(label)) {
+                        // Swap in a catalog provider that appends a Bose entry. Doing it on
+                        // the field rather than on b() avoids hooking a final method.
+                        Object result = chain.proceed();
+                        try {
+                            wrapCatalogProvider(chain.getThisObject());
+                        } catch (Throwable t) {
+                            log(Log.WARN, TAG, "catalog provider wrap failed", t);
+                        }
+                        return result;
+                    }
                     if ("whitelistConfigList".equals(label)) {
-                        // The catalog itself. Injecting here (rather than patching a single
-                        // lookup) means every consumer sees Bose as a normal product, so the
-                        // host builds its own detail sections instead of us drawing them.
                         Object result = chain.proceed();
                         return boseBonded() ? injectBoseCatalogEntry(result, loader) : result;
                     }
@@ -1955,6 +1972,115 @@ public final class HookModule extends XposedModule {
      * <p>Per the user's steer: target Enco X4, not an older model, so there is no need to
      * dodge the X3-era obfuscation.
      */
+    /**
+     * Replaces {@code SupportConfigManager}'s catalog provider with a proxy that appends a
+     * Bose entry to whatever the real provider returns.
+     *
+     * <p>0.5.33. {@code L6/a} is {@code SupportConfigManager}: a final class whose
+     * {@code b()} and {@code a(String)} are both public final, and libxposed refuses to hook
+     * final methods — 0.5.32 reported "cannot hook" for both even though smali lists them
+     * plainly. The constructor is not final, so hooking it works, and field {@code a} is the
+     * {@code com.oplus.melody.common.util.E} provider that {@code b()} reads the catalog
+     * from. Interposing there sidesteps the final methods entirely.
+     *
+     * <p>The proxy forwards everything untouched except the catalog call, whose result it
+     * augments. If anything about the provider shape is unexpected it silently passes
+     * through, so the worst case is the behaviour before this change.
+     */
+    private void wrapCatalogProvider(Object manager) {
+        if (manager == null || boseCatalogInjected) return;
+        try {
+            java.lang.reflect.Field field = null;
+            for (Class<?> c = manager.getClass(); c != null && field == null; c = c.getSuperclass()) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (f.getType().getName().equals("com.oplus.melody.common.util.E")) {
+                        field = f;
+                        break;
+                    }
+                }
+            }
+            if (field == null) {
+                MLog.event("bose.catalog.no_provider", "class", manager.getClass().getName());
+                return;
+            }
+            field.setAccessible(true);
+            Object provider = field.get(manager);
+            if (provider == null) {
+                MLog.event("bose.catalog.provider_null");
+                return;
+            }
+            if (java.lang.reflect.Proxy.isProxyClass(provider.getClass())) return;
+
+            Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    provider.getClass().getClassLoader(),
+                    new Class<?>[]{provider.getClass()},
+                    (p, method, args) -> {
+                        Object result = method.invoke(provider, args);
+                        // b() calls E.b() and gets a WhitelistContentDO; the DTO list is
+                        // derived from it. Appending here means the DTO we added is present
+                        // before any conversion or matching happens.
+                        if (result != null && isCatalogContent(result)) {
+                            Object augmented = appendToCatalogContent(result);
+                            if (augmented != null) return augmented;
+                        }
+                        return result;
+                    });
+            field.set(manager, proxy);
+            MLog.event("bose.catalog.provider_wrapped",
+                    "interface", provider.getClass().getName());
+        } catch (Throwable t) {
+            MLog.event("bose.catalog.wrap_error", "error", MLog.compactThrowable(t));
+        }
+    }
+
+    /** True for the {@code WhitelistContentDO} the provider hands back. */
+    private static boolean isCatalogContent(Object value) {
+        if (value == null) return false;
+        String name = value.getClass().getName();
+        return name.endsWith("WhitelistContentDO");
+    }
+
+    /**
+     * Appends a Bose entry to a {@code WhitelistContentDO}.
+     *
+     * <p>Returns null when the shape is not what we expect, in which case the caller keeps
+     * the original object. The clone is made from an existing entry so every field the host
+     * reads — function flags, protocol type, Rssi thresholds, version gates — carries values
+     * of a device Melody genuinely supports.
+     */
+    private Object appendToCatalogContent(Object content) {
+        try {
+            if (boseCatalogInjected) return null;
+            // The DTO list lives inside the content object under some field; find the first
+            // List<WhitelistConfigDTO>-shaped one and work on that instead of guessing a name.
+            for (java.lang.reflect.Field f : allFieldsOf(content.getClass())) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object value = f.get(content);
+                if (!(value instanceof java.util.List)) continue;
+                @SuppressWarnings("unchecked")
+                java.util.List<Object> list = (java.util.List<Object>) value;
+                if (list.isEmpty()) continue;
+                if (!(list.get(0).getClass().getName().endsWith("WhitelistConfigDTO"))) continue;
+
+                Object clone = cloneCatalogEntry(list.get(list.size() - 1), null);
+                if (clone == null) continue;
+                list.add(clone);
+                boseCatalogInjected = true;
+                MLog.event("bose.catalog.injected",
+                        "field", f.getName(),
+                        "new_size", list.size(),
+                        "class", clone.getClass().getSimpleName());
+                return content;
+            }
+            MLog.event("bose.catalog.no_list_field",
+                    "class", content.getClass().getName());
+        } catch (Throwable t) {
+            MLog.event("bose.catalog.append_error", "error", MLog.compactThrowable(t));
+        }
+        return null;
+    }
+
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
         if (!(listResult instanceof java.util.List)) return listResult;
         java.util.List<?> list = (java.util.List<?>) listResult;
@@ -2004,7 +2130,7 @@ public final class HookModule extends XposedModule {
             ctor.setAccessible(true);
             Object copy = ctor.newInstance();
 
-            for (java.lang.reflect.Field field : allFields(type)) {
+            for (java.lang.reflect.Field field : allFieldsOf(type)) {
                 if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
                 field.setAccessible(true);
                 try {
