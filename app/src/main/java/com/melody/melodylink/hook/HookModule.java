@@ -88,6 +88,8 @@ public final class HookModule extends XposedModule {
     private static final String SOUND_QUALITY_TITLE = "音质音效";
     private static final String BOSE_CNC_KEY = "melodylink.bose.cnc";
     private static final String BOSE_WIND_KEY = "melodylink.bose.wind";
+    private static final String BOSE_WIND_CARD_KEY = "melodylink.bose.wind.card";
+    private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
     private static final String NOISE_EFFECT_TITLE = "降噪效果";
     /**
      * Both the earbud detail page and the "通用设置" page expose a noise row, but
@@ -1350,13 +1352,22 @@ public final class HookModule extends XposedModule {
             // order+1 glued our rows into the neighbouring card (the "items stuck
             // together" report). A gap of 10 starts a new card, which is what the
             // stock list uses between sections.
+            // COUI groups consecutive orders into one rounded card. 0.5.0 used
+            // order+10 then +1, which put the slider and the wind switch in the SAME
+            // card (reported as "粘在一起、抗风噪没有圆角"). A stride of 10 gives each
+            // injected row its own card, matching the stock sections.
+            // COUI draws one rounded card per run of consecutive rows, so any two
+            // injected items end up glued together with no gap (0.5.0 report).
+            // Wrapping each item in its own COUIPreferenceCategory is how the stock
+            // settings pages get separate rounded cards — that is the supported way
+            // to control the grouping, and it survives list re-binds.
             int sliderOrder = order == null ? -1 : order + 10;
             if (addBoseCncPreference(group, loader, activity, sliderOrder)) {
-                addBoseWindSwitch(group, loader, activity, sliderOrder + 1);
+                addBoseWindSwitch(group, loader, activity, sliderOrder + 10);
                 // The "Bose 音效" block (EQ + remaps + 6 mode slots + power) is long;
                 // on 通用设置 it duplicated the detail page and made the list
                 // unreadable, so it only goes into the earbud detail page.
-                if (detailPage) addBoseExtraCategory(group, loader, activity, sliderOrder + 2);
+                if (detailPage) addBoseExtraCategory(group, loader, activity, sliderOrder + 20);
                 if (hideRow) setPreferenceValue(noiseRow, "setVisible", Boolean.FALSE);
                 log(Log.INFO, TAG, event("installed Bose CNC slider on "
                         + (detailPage ? "detail" : "general settings") + " page"));
@@ -1584,6 +1595,19 @@ public final class HookModule extends XposedModule {
         try {
             imageView.setImageURI(Uri.fromFile(imageFile));
             imageView.setVisibility(View.VISIBLE);
+            // The stock header starts its own spinner on a post(), so a single sweep
+            // is not enough (0.5.0: "通用设置图片没了" — the spinner covered our art).
+            // Re-sweep a few times after the layout settles.
+            final ImageView pinned = imageView;
+            for (int i = 0; i < 3; i++) {
+                mainHandler.postDelayed(() -> {
+                    try {
+                        if (!isBoseImagePinned(pinned)) return;
+                        stopLoadingSpinners(pinned);
+                    } catch (Throwable ignored) {
+                    }
+                }, 120L * (i + 1));
+            }
             // The stock header keeps its own spinner running above the artwork; it
             // lives in the same layout, so sweep the neighbourhood for it instead of
             // relying on the model field alone (it was often null on 通用设置).
@@ -2354,13 +2378,30 @@ public final class HookModule extends XposedModule {
 
     /** Cross-process Bose presence: any known MAC bonded (works in :fg too). */
     @SuppressLint("MissingPermission")
+    /**
+     * Is a Bose earbud reachable right now?
+     *
+     * Two things were wrong before: getRemoteDevice() throws for an unknown MAC,
+     * and a single throw aborted the whole loop (0.5.0 report: the detail page
+     * injected nothing at all while another earbud was paired). Now every MAC is
+     * probed independently, and a live A2DP/ACL connection counts as well as a
+     * bond record.
+     */
     private static boolean boseBonded() {
         try {
             BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
             if (adapter == null || !adapter.isEnabled()) return false;
             for (String mac : com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getKNOWN_MACS()) {
-                BluetoothDevice device = adapter.getRemoteDevice(mac);
-                if (device != null && device.getBondState() == BluetoothDevice.BOND_BONDED) return true;
+                try {
+                    BluetoothDevice device = adapter.getRemoteDevice(mac);
+                    if (device == null) continue;
+                    if (device.getBondState() == BluetoothDevice.BOND_BONDED) return true;
+                    // Connected counts: a live ACL link proves the earbud is here
+                    // even when the bond record lives under a different profile.
+                    if (device.getConnectionState() == BluetoothDevice.STATE_CONNECTED) return true;
+                } catch (Throwable ignored) {
+                    // unknown MAC on this adapter — just try the next one
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -3131,6 +3172,17 @@ public final class HookModule extends XposedModule {
     private boolean addBoseCncPreference(
             Object parent, ClassLoader loader, Activity activity, int order) {
         if (parent == null) return false;
+        // Own COUI category => own rounded card (see addBoseWindSwitch).
+        Object card = newPreference(loader,
+                "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
+        if (card == null) card = newPreference(loader,
+                "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
+        Object host = card != null ? card : parent;
+        if (card != null) {
+            setPreferenceValue(card, "setKey", BOSE_CNC_CARD_KEY);
+            if (order >= 0) setPreferenceValue(card, "setOrder", order);
+            if (!addPreference(parent, card, loader)) host = parent;
+        }
         Object seek = newPreference(loader,
                 "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
         if (seek == null) {
@@ -3151,9 +3203,9 @@ public final class HookModule extends XposedModule {
         if (level < 0) level = 3;
         invokeInt(seek, "setProgress", level);
         setPreferenceValue(seek, "setSummary", "\u6548\u679c\u5f3a\u5ea6 " + level + "/10");
-        if (order >= 0) setPreferenceValue(seek, "setOrder", order);
+        setPreferenceValue(seek, "setOrder", 0);
         installBoseCncListener(seek, loader);
-        if (!addPreference(parent, seek, loader)) {
+        if (!addPreference(host, seek, loader)) {
             log(Log.WARN, TAG, event("Bose CNC slider add rejected by parent"));
             return false;
         }
@@ -3171,6 +3223,21 @@ public final class HookModule extends XposedModule {
      */
     private void addBoseWindSwitch(
             Object group, ClassLoader loader, Activity activity, int order) {
+        // Own COUI category => its own rounded card. The stock settings pages group
+        // rows into cards by wrapping them in a COUIPreferenceCategory, so this is
+        // the supported way to stop our row from being glued to the neighbour.
+        Object card = newPreference(loader,
+                "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
+        if (card == null) card = newPreference(loader,
+                "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
+        Object host = card != null ? card : group;
+        if (card != null) {
+            setPreferenceValue(card, "setKey", BOSE_WIND_CARD_KEY);
+            if (order >= 0) setPreferenceValue(card, "setOrder", order);
+            if (!addPreference(group, card, loader)) {
+                host = group;
+            }
+        }
         Object toggle = newSwitchPreference(loader, activity);
         if (toggle == null) {
             log(Log.WARN, TAG, event("Bose wind switch unavailable"));
@@ -3185,9 +3252,9 @@ public final class HookModule extends XposedModule {
         if (wind < 0) wind = MelodySharedStateStore.readBoseCncWind(boseCncStateFile());
         if (wind < 0) wind = 0;
         setPreferenceValue(toggle, "setChecked", wind != 0);
-        if (order >= 0) setPreferenceValue(toggle, "setOrder", order);
+        if (order >= 0) setPreferenceValue(toggle, "setOrder", 0);
         installBoseWindListener(toggle, loader);
-        if (!addPreference(group, toggle, loader)) {
+        if (!addPreference(host, toggle, loader)) {
             log(Log.WARN, TAG, event("Bose wind switch add rejected"));
             return;
         }
@@ -3356,6 +3423,9 @@ public final class HookModule extends XposedModule {
     /** One EQ band slider. The COUI bar counts 0..20; the wire value is -10..10. */
     private void addBoseBandSlider(Object parent, ClassLoader loader, Activity activity,
             int order, String title, final int bandIndex, int value) {
+        Object host = addBoseCardRow(parent, loader, activity,
+                "melodylink.bose.eq.card." + bandIndex, order);
+        if (host == null) return;
         Object seek = newPreference(loader,
                 "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
         if (seek == null) return;
@@ -3367,9 +3437,9 @@ public final class HookModule extends XposedModule {
         final int clamped = Math.max(-10, Math.min(10, value));
         invokeInt(seek, "setProgress", clamped + 10);
         setPreferenceValue(seek, "setSummary", eqLabel(clamped));
-        if (order >= 0) setPreferenceValue(seek, "setOrder", order);
+        setPreferenceValue(seek, "setOrder", 0);
         installBoseBandListener(seek, bandIndex);
-        if (addPreference(parent, seek, loader)) boseEqSliders.add(seek);
+        if (addPreference(host, seek, loader)) boseEqSliders.add(seek);
     }
 
     private static String eqLabel(int value) {
@@ -3428,6 +3498,25 @@ public final class HookModule extends XposedModule {
         return null;
     }
 
+    /**
+     * Adds one row inside its own COUI category so it renders as an independent
+     * rounded card. Without this, consecutive orders collapse into a single card
+     * and the rows look glued together with no gap.
+     */
+    private static Object addBoseCardRow(
+            Object parent, ClassLoader loader, Activity activity, String cardKey, int order) {
+        if (parent == null) return null;
+        Object card = newPreference(loader,
+                "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
+        if (card == null) card = newPreference(loader,
+                "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
+        if (card == null) return parent;
+        setPreferenceValue(card, "setKey", cardKey);
+        if (order >= 0) setPreferenceValue(card, "setOrder", order);
+        if (!addPreference(parent, card, loader)) return parent;
+        return card;
+    }
+
     private static ClassLoader classLoaderOf(Class<?> type) {
         ClassLoader loader = type.getClassLoader();
         return loader == null ? HookModule.class.getClassLoader() : loader;
@@ -3436,15 +3525,18 @@ public final class HookModule extends XposedModule {
     /** One Action-button event row: tapping opens a list of supported actions. */
     private void addBoseButtonRow(Object parent, ClassLoader loader, Activity activity,
             int order, String label, final int event, int currentAction) {
+        Object host = addBoseCardRow(parent, loader, activity,
+                "melodylink.bose.btn.card." + event, order);
+        if (host == null) return;
         Object row = newActionPreference(loader, activity);
         if (row == null) return;
         setPreferenceValue(row, "setKey", "melodylink.bose.btn." + event);
         setPreferenceValue(row, "setTitle", label);
         setPreferenceValue(row, "setSummary",
                 com.melody.melodylink.bose.BoseBmap.actionLabel(currentAction));
-        if (order >= 0) setPreferenceValue(row, "setOrder", order);
+        setPreferenceValue(row, "setOrder", 0);
         installBoseButtonListener(row, event);
-        if (addPreference(parent, row, loader)) boseButtonDropdowns.add(row);
+        if (addPreference(host, row, loader)) boseButtonDropdowns.add(row);
     }
 
     private void installBoseButtonListener(Object row, final int event) {
@@ -3532,6 +3624,9 @@ public final class HookModule extends XposedModule {
     /** One custom mode slot: name is fixed, CNC level is a slider. */
     private void addBoseModeSlotRow(Object parent, ClassLoader loader, Activity activity,
             int order, final int slot, int level) {
+        Object host = addBoseCardRow(parent, loader, activity,
+                "melodylink.bose.mode.card." + slot, order);
+        if (host == null) return;
         Object seek = newPreference(loader,
                 "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
         if (seek == null) return;
@@ -3543,9 +3638,9 @@ public final class HookModule extends XposedModule {
         setPreferenceValue(seek, "setPromptVolumePercent", Boolean.FALSE);
         invokeInt(seek, "setBarMaxValue", 10);
         invokeInt(seek, "setProgress", Math.max(0, level));
-        if (order >= 0) setPreferenceValue(seek, "setOrder", order);
+        setPreferenceValue(seek, "setOrder", 0);
         installBoseModeSlotListener(seek, slot);
-        if (addPreference(parent, seek, loader)) boseModeSlotSliders.add(seek);
+        if (addPreference(host, seek, loader)) boseModeSlotSliders.add(seek);
     }
 
     private void installBoseModeSlotListener(Object preference, final int slot) {
@@ -3581,6 +3676,8 @@ public final class HookModule extends XposedModule {
 
     /** Auto-off timer row: cycles through the firmware's preset minute values. */
     private void addBoseStandbyRow(Object parent, ClassLoader loader, Activity activity, int order) {
+        Object host = addBoseCardRow(parent, loader, activity, "melodylink.bose.standby.card", order);
+        if (host == null) return;
         Object row = newActionPreference(loader, activity);
         if (row == null) return;
         setPreferenceValue(row, "setKey", "melodylink.bose.standby");
@@ -3588,9 +3685,9 @@ public final class HookModule extends XposedModule {
         setPreferenceValue(row, "setSummary",
                 com.melody.melodylink.bose.BoseBmap.standbyLabel(
                         boseTransport.getStandbyMinutes() < 0 ? 0 : boseTransport.getStandbyMinutes()));
-        if (order >= 0) setPreferenceValue(row, "setOrder", order);
+        setPreferenceValue(row, "setOrder", 0);
         installBoseStandbyListener(row);
-        addPreference(parent, row, loader);
+        addPreference(host, row, loader);
     }
 
     private void installBoseStandbyListener(Object row) {
@@ -3639,14 +3736,16 @@ public final class HookModule extends XposedModule {
 
     /** Power-off row with a confirmation step: the earbuds drop the link. */
     private void addBosePowerRow(Object parent, ClassLoader loader, Activity activity, int order) {
+        Object host = addBoseCardRow(parent, loader, activity, "melodylink.bose.poweroff.card", order);
+        if (host == null) return;
         Object row = newActionPreference(loader, activity);
         if (row == null) return;
         setPreferenceValue(row, "setKey", "melodylink.bose.poweroff");
         setPreferenceValue(row, "setTitle", "\u5173\u673a");
         setPreferenceValue(row, "setSummary", "\u5173\u95ed\u8033\u673a\u5e76\u65ad\u5f00\u8fde\u63a5");
-        if (order >= 0) setPreferenceValue(row, "setOrder", order);
+        setPreferenceValue(row, "setOrder", 0);
         installBosePowerListener(row);
-        addPreference(parent, row, loader);
+        addPreference(host, row, loader);
     }
 
     private void installBosePowerListener(Object row) {
