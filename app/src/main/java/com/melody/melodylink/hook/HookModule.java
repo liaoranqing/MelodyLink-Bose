@@ -898,14 +898,21 @@ public final class HookModule extends XposedModule {
                             // Snapshot the container right after onCreate. If A() never
                             // runs at all, this is the only evidence we get.
                             reportDetailContainer("after_onCreate");
-                            // 0.5.18: one snapshot is not enough. At +800ms the container
-                            // already held a NestedScrollView, but the page the user
-                            // eventually sees is empty — so the row is being built and
-                            // then torn down (or refilled) somewhere in between. Sample
-                            // across the whole window the pipeline runs in.
+                            // 0.5.25 found the actual cause. The content IS built — the decor
+                            // tree shows NestedScrollView > LinearLayout > two full-screen
+                            // children — but BOTH of those children are View.GONE (vis=8),
+                            // so nothing is drawn. Every other signal looked healthy: token
+                            // valid, shown=true, not finishing, attached to the window.
+                            //
+                            // Bose has no catalog entry and the page responds to that by
+                            // hiding the rows it cannot populate. Un-hiding them is safe: a
+                            // row with no data renders empty rather than crashing.
+                            forceRevealDetailContent(activity);
                             for (long delay : new long[]{300L, 800L, 2000L, 5000L}) {
-                                mainHandler.postDelayed(
-                                        () -> reportDetailContainer("t+" + delay), delay);
+                                mainHandler.postDelayed(() -> {
+                                    forceRevealDetailContent(activity);
+                                    reportDetailContainer("t+" + delay);
+                                }, delay);
                             }
                         }
                         return result;
@@ -2001,6 +2008,68 @@ public final class HookModule extends XposedModule {
      * inspecting a window that is no longer the one on screen. Dumping the focused window's
      * decor hierarchy answers both in one shot.
      */
+    /**
+     * Un-hides the detail page's content rows.
+     *
+     * <p>0.5.25 evidence — the decor tree at t+800/2000/5000:
+     * <pre>
+     * CoordinatorLayout#activity_standard_layout_main[4 kids
+     *   FrameLayout#melody_ui_fragment_container[1 kids
+     *     NestedScrollView#melody_ui_detail_scrollview[1 kids
+     *       LinearLayout[2 kids
+     *         ... 1440x1529 HIDDEN(vis=8)
+     *         1440x3168 HIDDEN(vis=8)
+     * </pre>
+     * Every other signal was healthy — window token valid, {@code shown=true}, not
+     * finishing, attached, correct size, and the 1356x1356 model view built. Only the
+     * visibility was off, which is why the page rendered as pure background.
+     *
+     * <p>Bose is absent from Melody's catalog and the page responds by hiding the rows it
+     * cannot populate. This restores them. Only GONE (and alpha==0) nodes are touched, and
+     * only inside the detail container, so the app bar and its own hidden stubs are left
+     * alone. A row with no data renders empty rather than throwing.
+     */
+    private void forceRevealDetailContent(Activity activity) {
+        try {
+            if (activity == null || activity.isFinishing()) return;
+            ViewGroup container = findDetailContainer(activity);
+            if (container == null) return;
+            int revealed = revealHiddenViews(container, 0);
+            if (revealed > 0) {
+                MLog.event("bose.detail.revealed", "count", revealed);
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose detail reveal failed", t);
+        }
+    }
+
+    private static int revealHiddenViews(View view, int depth) {
+        if (view == null || depth > 8) return 0;
+        int revealed = 0;
+        try {
+            boolean hidden = view.getVisibility() != View.VISIBLE;
+            boolean transparent = view.getAlpha() <= 0.01f;
+            if (hidden || transparent) {
+                // 0x0-sized nodes are collapsed placeholders, not content: showing them
+                // would add empty rows. Only reveal nodes that actually occupy space.
+                boolean occupiesSpace = view.getWidth() > 0 && view.getHeight() > 0;
+                if (occupiesSpace) {
+                    if (hidden) view.setVisibility(View.VISIBLE);
+                    if (transparent) view.setAlpha(1.0f);
+                    revealed++;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                revealed += revealHiddenViews(group.getChildAt(i), depth + 1);
+            }
+        }
+        return revealed;
+    }
+
     private static String describeFocusedWindow(Activity activity) {
         try {
             if (activity == null) return "no_activity";
