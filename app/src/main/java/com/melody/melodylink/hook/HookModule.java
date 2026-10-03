@@ -757,6 +757,26 @@ public final class HookModule extends XposedModule {
         log(Log.WARN, TAG, event("no candidate resolved for " + label));
     }
 
+    /** Compact "name/arity -> returnType" listing used when a hook target is not found. */
+    private static String describeMethods(Class<?> type) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            int shown = 0;
+            for (Method m : type.getDeclaredMethods()) {
+                if (shown++ >= 12) {
+                    sb.append("...");
+                    break;
+                }
+                sb.append(m.getName()).append('/')
+                  .append(m.getParameterTypes().length).append("->")
+                  .append(m.getReturnType().getSimpleName()).append(' ');
+            }
+            return sb.toString().trim();
+        } catch (Throwable t) {
+            return "err:" + t.getClass().getSimpleName();
+        }
+    }
+
     private boolean hookNamed(ClassLoader loader, String className, String methodName, int arity, String label) {
         try {
             Class<?> type = Class.forName(className, false, loader);
@@ -780,6 +800,14 @@ public final class HookModule extends XposedModule {
             }
             if (selected == null) {
                 log(Log.WARN, TAG, label + " not found: " + className + "." + methodName + "/" + arity);
+                MLog.event("bose.hook.miss",
+                        "label", label,
+                        "class", className,
+                        "method", methodName,
+                        "arity", arity,
+                        // Dump what the class actually exposes, so a wrong name or a
+                        // different arity is visible without another round trip.
+                        "available", describeMethods(type));
                 return false;
             }
             Method method = selected;
