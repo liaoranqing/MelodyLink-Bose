@@ -987,7 +987,7 @@ public final class HookModule extends XposedModule {
                             // Whatever the host builds sections from, a null children yields
                             // none. Fill it from the richest catalog entry so there is
                             // something for the page to render.
-                            Object filled = fillMissingChildren(result);
+                            boolean filled = fillMissingChildren(result);
                             if (filled) {
                                 MLog.event("bose.detail.children_filled",
                                         "into", String.valueOf(readField(result, "name")));
@@ -2159,17 +2159,6 @@ public final class HookModule extends XposedModule {
             MLog.event("bose.detail.children_error", "error", MLog.compactThrowable(t));
             return false;
         }
-    }
-
-    /** Finds a field by name anywhere on the class chain. */
-    private static java.lang.reflect.Field findField(Class<?> type, String name) {
-        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
-            try {
-                return c.getDeclaredField(name);
-            } catch (NoSuchFieldException ignored) {
-            }
-        }
-        return null;
     }
 
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
