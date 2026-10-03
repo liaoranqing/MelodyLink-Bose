@@ -1808,7 +1808,7 @@ public final class HookModule extends XposedModule {
      */
     private static String describeViewTree(View view, int depth) {
         if (view == null) return "null";
-        if (depth > 4) return "...";
+        if (depth > 8) return "...";
         StringBuilder sb = new StringBuilder();
         try {
             sb.append(view.getClass().getSimpleName());
@@ -1825,7 +1825,7 @@ public final class HookModule extends XposedModule {
             if (view instanceof ViewGroup) {
                 ViewGroup group = (ViewGroup) view;
                 sb.append(group.getChildCount()).append(" kids");
-                int shown = Math.min(group.getChildCount(), 8);
+                int shown = Math.min(group.getChildCount(), 12);
                 if (shown > 0) sb.append(", ");
                 for (int i = 0; i < shown; i++) {
                     sb.append(describeViewTree(group.getChildAt(i), depth + 1));
@@ -1949,8 +1949,23 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.container.state", "stage", stage, "reason", "no_container");
                 return;
             }
+            // 0.5.23: the container looked healthy (attached, visible, populated) while the
+            // screen showed nothing but the back button. Dumping the decor hierarchy of the
+            // CURRENTLY FOCUSED window, found via the window manager rather than through our
+            // own Activity reference, tells us whether we are inspecting a different window
+            // than the one on screen.
+            MLog.event("bose.container.decorOfFocused",
+                    "stage", stage,
+                    "focused", describeFocusedWindow());
             MLog.event("bose.container.state",
                     "stage", stage,
+                    // The container subtree can be perfectly healthy while the screen is
+                    // still blank, because the occluder is a SIBLING higher up. Dumping the
+                    // whole decor hierarchy settles it: 0.5.23 reported a populated,
+                    // attached, visible container while the screenshot showed nothing but the
+                    // back button.
+                    "decor", describeViewTree(
+                            activity.getWindow().getDecorView(), 0),
                     // 0.5.21: children=1 with a populated tree but a blank screen means the
                     // container we are measuring is not the one the user is looking at. The
                     // activity class and window token settle that immediately.
@@ -1975,6 +1990,48 @@ public final class HookModule extends XposedModule {
         } catch (Throwable t) {
             MLog.event("bose.container.state", "stage", stage,
                     "error", MLog.compactThrowable(t));
+        }
+    }
+
+    /**
+     * Describes the window that currently has input focus, straight from the window manager.
+     *
+     * <p>0.5.23: our container reported attached + visible + populated while the screenshot
+     * showed an empty page. Either the content is occluded by a sibling, or we have been
+     * inspecting a window that is no longer the one on screen. Dumping the focused window's
+     * decor hierarchy answers both in one shot.
+     */
+    private static String describeFocusedWindow() {
+        try {
+            android.view.WindowManager wm = null;
+            Application application = currentApplication();
+            if (application != null) {
+                wm = (android.view.WindowManager)
+                        application.getSystemService(android.content.Context.WINDOW_SERVICE);
+            }
+            if (wm == null) return "no_wm";
+            // Window.isFocused() does not exist (verified with javap against
+            // android-37.0) — focus lives on View.hasWindowFocus(), so the decor view is
+            // what we test.
+            android.view.Window focused = null;
+            for (android.view.Window window : wm.getDefaultDisplay().getAllWindows()) {
+                if (window.getAttributes() == null) continue;
+                if (window.getAttributes().type
+                        != android.view.WindowManager.LayoutParams.TYPE_APPLICATION) continue;
+                View decorCandidate = window.getDecorView();
+                if (decorCandidate != null && decorCandidate.hasWindowFocus()) {
+                    focused = window;
+                    break;
+                }
+            }
+            if (focused == null) return "no_focused_app_window";
+            View decor = focused.getDecorView();
+            return "token=" + decor.getWindowToken()
+                    + " shown=" + decor.isShown()
+                    + " size=" + decor.getWidth() + "x" + decor.getHeight()
+                    + " " + describeViewTree(decor, 0);
+        } catch (Throwable t) {
+            return "error: " + t.getClass().getSimpleName();
         }
     }
 
