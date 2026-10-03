@@ -2109,31 +2109,99 @@ public final class HookModule extends XposedModule {
         return null;
     }
 
+    /**
+     * Counts the control entries on a catalog row.
+     *
+     * <p>0.5.39. Which sections the detail page shows is driven by the row's
+     * Control / ControlList sub-objects. A row whose controls are empty contributes nothing
+     * visible, which is why cloning an arbitrary entry produced a catalog entry that the host
+     * happily returned from its lookup and then ignored.
+     */
+    private static int countControls(Object dto) {
+        if (dto == null) return 0;
+        int total = 0;
+        try {
+            for (java.lang.reflect.Field f : allFieldsOf(dto.getClass())) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object value = f.get(dto);
+                if (value instanceof java.util.Collection) {
+                    total += ((java.util.Collection<?>) value).size();
+                } else if (value instanceof java.util.Map) {
+                    total += ((java.util.Map<?, ?>) value).size();
+                } else if (value != null
+                        && value.getClass().getName().contains("WhitelistConfigDTO$")) {
+                    // A populated sub-object counts once: it means the row declares support.
+                    total++;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return total;
+    }
+
     private Object injectBoseCatalogEntry(Object listResult, ClassLoader loader) {
         if (!(listResult instanceof java.util.List)) return listResult;
         java.util.List<?> list = (java.util.List<?>) listResult;
         try {
-            if (!boseCatalogInjected) {
-                MLog.event("bose.catalog.probe",
-                        "size", list.size(),
-                        "sample", String.valueOf(list.isEmpty()
-                                ? "empty" : list.get(0).getClass().getName()));
-                if (list.isEmpty()) return listResult;
-                Object clone = cloneCatalogEntry(list.get(list.size() - 1), loader);
-                if (clone == null) {
-                    MLog.event("bose.catalog.clone_failed");
-                    return listResult;
+            if (boseCatalogInjected) return listResult;
+            // Profile the catalog before touching it: how many entries carry controls, and
+            // what the richest one looks like. That tells us what the host uses to decide
+            // which sections exist, without another guess-and-check round.
+            int withControls = 0;
+            int richest = 0;
+            int richestIndex = -1;
+            for (int i = 0; i < list.size(); i++) {
+                int c = countControls(list.get(i));
+                if (c > 0) withControls++;
+                if (c > richest) {
+                    richest = c;
+                    richestIndex = i;
                 }
-                @SuppressWarnings("unchecked")
-                java.util.List<Object> mutable = (java.util.List<Object>) list;
-                mutable.add(clone);
-                boseCatalogInjected = true;
-                MLog.event("bose.catalog.injected",
-                        "new_size", mutable.size(),
-                        "class", clone.getClass().getSimpleName(),
-                        "name", String.valueOf(readField(clone, "name")),
-                        "brand", String.valueOf(readField(clone, "brand")));
             }
+            MLog.event("bose.catalog.probe",
+                    "size", list.size(),
+                    "with_controls", withControls,
+                    "richest", richest,
+                    "richest_name", richestIndex >= 0
+                            ? String.valueOf(readField(list.get(richestIndex), "name")) : "n/a",
+                    "sample", String.valueOf(list.isEmpty()
+                            ? "empty" : list.get(0).getClass().getName()));
+            if (list.isEmpty()) return listResult;
+            @SuppressWarnings("unchecked")
+            java.util.List<Object> mutable = (java.util.List<Object>) list;
+
+            // 0.5.39: cloning the LAST entry (0.5.37/38) put a row in the catalog but the
+            // host still built no sections. A WhitelistConfigDTO carries Control / ControlList
+            // sub-objects, and those are what decide which rows the detail page shows. The
+            // last entry evidently has an empty one, so nothing appeared.
+            //
+            // Clone from entries that actually have controls, and add several so the page
+            // ends up with the union of whatever the catalog offers. Candidate selection is by
+            // field inspection, not by product name, so it survives catalog reordering.
+            int added = 0;
+            for (Object template : list) {
+                if (template == null) continue;
+                if (countControls(template) == 0) continue;
+                Object clone = cloneCatalogEntry(template, loader);
+                if (clone == null) continue;
+                mutable.add(clone);
+                added++;
+                if (added >= 3) break;
+            }
+            if (added == 0) {
+                // Nothing in the catalog carries controls we can see; fall back to the
+                // previous behaviour so the entry is at least present.
+                Object clone = cloneCatalogEntry(list.get(list.size() - 1), loader);
+                if (clone != null) {
+                    mutable.add(clone);
+                    added = 1;
+                }
+            }
+            boseCatalogInjected = true;
+            MLog.event("bose.catalog.injected",
+                    "new_size", mutable.size(),
+                    "added", added);
         } catch (Throwable t) {
             MLog.event("bose.catalog.error", "error", MLog.compactThrowable(t));
         }
