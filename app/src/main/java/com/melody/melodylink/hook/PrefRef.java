@@ -194,8 +194,46 @@ final class PrefRef {
             Object scanned = findScreenField(manager, 2);
             if (scanned != null) return scanned;
         }
-        return findScreenField(fragment, 3);
+        Object last = findScreenField(fragment, 3);
+        // 0.5.60: screen came back null for five consecutive releases even at
+        // detailFragBuild, where 17.6.3 guarantees the tree is inflated. Rather than guess
+        // which of the three lookups failed, report the fragment's real field inventory once
+        // per process: the manager field's declared type and its value's type are what decides
+        // whether findPreferenceManagerField can ever match.
+        reportScreenLookup(fragment);
+        return last;
     }
+
+    /** One-shot dump of the fragment's non-primitive fields and their resolved values. */
+    private static void reportScreenLookup(Object fragment) {
+        if (!screenLookupReported.compareAndSet(false, true)) return;
+        StringBuilder sb = new StringBuilder();
+        for (Class<?> cls = fragment.getClass(); cls != null && cls != Object.class;
+                cls = cls.getSuperclass()) {
+            for (Field f : cls.getDeclaredFields()) {
+                if (f.getType().isPrimitive()) continue;
+                String valueType = "null";
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(fragment);
+                    if (v != null) {
+                        valueType = v.getClass().getName();
+                        if (declaresScreenField(v.getClass())) valueType += "+SCREEN";
+                    }
+                } catch (Throwable t) {
+                    valueType = "throw:" + t.getClass().getSimpleName();
+                }
+                if (sb.length() > 0) sb.append(' ');
+                sb.append(cls.getSimpleName()).append('.').append(f.getName())
+                  .append(':').append(f.getType().getSimpleName())
+                  .append('=').append(valueType);
+            }
+        }
+        MLog.event("prefref.screen_lookup", "fields", sb.toString());
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean screenLookupReported =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     /**
      * Finds the PreferenceManager: any field whose type's name ends in

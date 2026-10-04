@@ -2107,7 +2107,8 @@ public final class HookModule extends XposedModule {
             MLog.event("bose.anco.row.hidden",
                     "key", rowKey,
                     "class", className,
-                    "visible_after", PrefRef.isVisible(noiseRow));
+                    "visible_after", PrefRef.isVisible(noiseRow),
+                    "title", String.valueOf(PrefRef.getTitle(noiseRow)));
         } catch (Throwable t) {
             MLog.event("bose.anco.row.hide_failed", "error", MLog.compactThrowable(t));
         }
