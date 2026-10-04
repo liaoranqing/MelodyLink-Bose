@@ -813,6 +813,11 @@ public final class HookModule extends XposedModule {
             // chain, and block finish() on OUR detail activity when the caller is host
             // auto-close logic (lesson #3: capture the stack, don't read obfuscated code).
             hookNamed(loader, "android.app.Activity", "finish", 0, "detailActivityFinish");
+            // 0.5.76. detail.finish raw stack shows finish() comes from
+            // Activity.finishAfterTransition:7852 -> RequestFinishCallback.run, i.e. the
+            // page is closed by finishAfterTransition(), not plain finish(). Hook the
+            // trigger itself so the caller that decided to close the page is named.
+            hookNamed(loader, "android.app.Activity", "finishAfterTransition", 0, "detailActivityFinishAfterTransition");
             hookAny(loader, "repositoryObserve",
                     "com.oplus.melody.model.repository.earphone.U#z#1",
                     "com.oplus.melody.model.repository.earphone.J#A#1");
@@ -1322,6 +1327,20 @@ public final class HookModule extends XposedModule {
                         } catch (Throwable ignored) {
                         }
                         return result;
+                    }
+                    if ("detailActivityFinishAfterTransition".equals(label)) {
+                        // 0.5.76. The close-trigger itself. Unlike finish(), this fires at
+                        // the DECISION point (before the transition), so the raw stack here
+                        // names the host method that chose to close the detail page.
+                        Object self = chain.getThisObject();
+                        if (self instanceof Activity) {
+                            MLog.event("bose.detail.finish_after_transition",
+                                    "seq", ++finishSeq,
+                                    "self", self.getClass().getSimpleName(),
+                                    "host", hostCallerChain(6),
+                                    "raw", rawCallerChain(12));
+                        }
+                        return chain.proceed();
                     }
                     if ("detailActivityFinish".equals(label)) {
                         // 0.5.74 ROLLBACK of the 0.5.73 interception — FORENSIC ONLY.
@@ -4471,11 +4490,12 @@ public final class HookModule extends XposedModule {
                 }
                 View p = (View) parent;
                 if (p.getVisibility() != View.VISIBLE) {
-                    blocker = p.getClass().getSimpleName() + ":vis=" + p.getVisibility();
+                    blocker = p.getClass().getSimpleName() + "@" + idName(p)
+                            + ":vis=" + p.getVisibility();
                     break;
                 }
                 if (p.getWidth() == 0 || p.getHeight() == 0) {
-                    blocker = p.getClass().getSimpleName() + ":0x0";
+                    blocker = p.getClass().getSimpleName() + "@" + idName(p) + ":0x0";
                     break;
                 }
                 node = p;
