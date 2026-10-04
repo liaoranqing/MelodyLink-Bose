@@ -1041,6 +1041,13 @@ public final class HookModule extends XposedModule {
                         // category from here survives both failure modes, and it re-runs on
                         // every rebind, i.e. after every LiveData-driven setVisible(true).
                         suppressNoiseMenuCategory(chain.getThisObject());
+                        // 0.5.69 — 通用设置 photo fallback (user report #2). The host's own
+                        // loader (OneSpaceHeaderPreference.i) is hooked as "sonyCardImage",
+                        // but for a device with no catalog entry it may never run, which is
+                        // why the card stayed blank. This bind hook is PROVEN to fire on this
+                        // page, so walk from the bound row up to the list and apply our photo
+                        // to the header row directly.
+                        applyBoseHeaderFromRowView(chain.getArg(0));
                         return result;
                     }
                     if ("onespaceNoiseMenuCheck".equals(label)
@@ -1168,23 +1175,56 @@ public final class HookModule extends XposedModule {
                             Object target = chain.getThisObject();
                             Object arg = arity > 0 ? chain.getArg(0) : null;
                             int visibility = arg instanceof Integer ? (Integer) arg : -1;
-                            if (target instanceof View && visibility != View.VISIBLE
+                            if (target instanceof View
                                     && isInsideDetailContainer((View) target)) {
-                                recordHideCaller((View) target, visibility);
+                                if (visibility != View.VISIBLE) {
+                                    recordHideCaller((View) target, visibility);
+                                }
                                 // 0.5.67: continuous protection for the ONE view whose GONE
                                 // makes the whole page blank — the detail scroll container.
                                 // The revive ticks (300/800/2000/5000ms) cannot cover a hide
                                 // that happens later (the host re-runs its visibility pass on
                                 // LiveData emits), so the scroll view is flipped straight
-                                // back here, at the moment of the hide. Everything else inside
-                                // the container keeps the host's own logic: overlays and
-                                // spinners must still be able to hide themselves.
+                                // back here, at the moment of the hide.
                                 if (boseBonded()
                                         && "melody_ui_detail_scrollview".equals(idName((View) target))) {
                                     ((View) target).setVisibility(View.VISIBLE);
                                     if (scrollReviveLogged.compareAndSet(false, true)) {
                                         MLog.event("bose.detail.scrollview_revived",
                                                 "blocked_visibility", visibility);
+                                    }
+                                }
+                                // 0.5.69 — page-level visibility arbitration. User reports
+                                // #1 (page appears, then vanishes after a few seconds) and #5
+                                // (taps on our rows do nothing) share one mechanism: seconds
+                                // after our revive the host's async path flips a FULL-SIZE
+                                // view. Either it hides the content container (page gone) or
+                                // it shows a mask / empty-state layer that swallows touches.
+                                // Row-sized views are never touched, so the host keeps its
+                                // per-row logic; only page-sized containers are arbitrated:
+                                //   * VISIBLE on a view with NO content inside  -> overlay,
+                                //     force it back to GONE;
+                                //   * non-VISIBLE on a view WITH content inside -> page hide,
+                                //     force it back to VISIBLE.
+                                if (boseBonded() && isFullSizeView((View) target)) {
+                                    boolean onContentPath = contentPathNow((View) target);
+                                    if (visibility == View.VISIBLE && !onContentPath) {
+                                        ((View) target).setVisibility(View.GONE);
+                                        if (overlayBlockLogged.compareAndSet(false, true)) {
+                                            MLog.event("bose.detail.overlay_blocked",
+                                                    "view", ((View) target).getClass()
+                                                            .getSimpleName(),
+                                                    "id", idName((View) target));
+                                        }
+                                    } else if (visibility != View.VISIBLE && onContentPath) {
+                                        ((View) target).setVisibility(View.VISIBLE);
+                                        if (pageHideBlockLogged.compareAndSet(false, true)) {
+                                            MLog.event("bose.detail.page_hide_blocked",
+                                                    "view", ((View) target).getClass()
+                                                            .getSimpleName(),
+                                                    "id", idName((View) target),
+                                                    "blocked_visibility", visibility);
+                                        }
                                     }
                                 }
                             }
@@ -2782,10 +2822,50 @@ public final class HookModule extends XposedModule {
                 setIfPresent(type, copy, "uuid", pendingDetailMac);
                 setIfPresent(type, copy, "id", pendingDetailMac);
             }
+            stripEncoSubLevels(copy);
             return copy;
         } catch (Throwable t) {
             MLog.event("bose.catalog.clone_error", "error", MLog.compactThrowable(t));
             return null;
+        }
+    }
+
+    /**
+     * 0.5.69 — removes the Enco sub-level lists our clone inherited.
+     *
+     * <p>User report #4: with the three-state widget back, the detail page still offered the
+     * Enco-only extras — ANC strength levels (3 + adaptive) under 降噪 and 增强人声 under 通透.
+     * Both are children of the cloned entry: smali shows Ba/m (the detail section builder)
+     * reading {@code NoiseReductionMode.getChildrenMode()} to build the strength selector
+     * (Ba/x) and the voice-enhancement switch (Ba/A). The outer noiseReductionMode list is
+     * what keeps the three-state widget alive (checkShowNoiseCardItem), so only the INNER
+     * child lists are emptied. Field lookup is by type+name so R8 renames of the getters
+     * cannot break it.
+     */
+    private static void stripEncoSubLevels(Object dto) {
+        try {
+            Object function = readField(dto, "function");
+            if (function == null) return;
+            Object modes = readField(function, "noiseReductionMode");
+            if (!(modes instanceof java.util.List)) return;
+            int stripped = 0;
+            for (Object mode : (java.util.List<?>) modes) {
+                if (mode == null) continue;
+                for (java.lang.reflect.Field field : allFieldsOf(mode.getClass())) {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                    if (!java.util.List.class.isAssignableFrom(field.getType())) continue;
+                    String name = field.getName().toLowerCase(java.util.Locale.ROOT);
+                    if (!name.contains("child")) continue;
+                    field.setAccessible(true);
+                    field.set(mode, new java.util.ArrayList<Object>());
+                    stripped++;
+                }
+            }
+            if (stripped > 0) {
+                MLog.event("bose.catalog.sublevels_stripped", "fields", stripped);
+            }
+        } catch (Throwable t) {
+            MLog.event("bose.catalog.strip_error", "error", MLog.compactThrowable(t));
         }
     }
 
@@ -2961,6 +3041,37 @@ public final class HookModule extends XposedModule {
             new java.util.HashSet<>(java.util.Arrays.asList(
                     "melody_ui_detail_scrollview",
                     "melody_ui_device_info"));
+
+    /** One-shot markers for the 0.5.69 page-level visibility arbitration. */
+    private static final java.util.concurrent.atomic.AtomicBoolean overlayBlockLogged =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final java.util.concurrent.atomic.AtomicBoolean pageHideBlockLogged =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * True when the view spans (nearly) the whole window, i.e. it is a page-level container
+     * or a page-level mask — never a row. Row-sized views stay under the host's own control.
+     */
+    private static boolean isFullSizeView(View v) {
+        try {
+            View root = v.getRootView();
+            if (root == null) return false;
+            int rh = root.getHeight();
+            int rw = root.getWidth();
+            if (rh <= 0 || rw <= 0) return false;
+            return v.getHeight() >= rh * 3 / 4 && v.getWidth() >= rw * 3 / 4;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** True when {@code v} is, or contains, known detail-page content (bounded walk). */
+    private static boolean contentPathNow(View v) {
+        return collectContentPath(v, 0,
+                java.util.Collections.newSetFromMap(
+                        new java.util.IdentityHashMap<View, Boolean>()),
+                new int[]{0});
+    }
 
     /** True when this view is itself known detail-page content (not an overlay/mask). */
     private static boolean isDetailContentView(View v) {
@@ -3850,11 +3961,13 @@ public final class HookModule extends XposedModule {
         AssetManager assets = sonyModuleAssets;
         if (application == null || assets == null) return null;
         File directory = new File(application.getFilesDir(), "melodylink/bose-images");
-        File output = new File(directory, "qc_ultra2.png");
+        // 0.5.69: v2 = the user-supplied high-res product photo. The name is bumped so
+        // devices that cached the old asset file pick the new one up.
+        File output = new File(directory, "qc_ultra2_v2.png");
         try {
             if (output.isFile() && output.length() > 0L) return output;
             if (!directory.isDirectory() && !directory.mkdirs()) return null;
-            try (java.io.InputStream input = assets.open("bose/images/qc_ultra2.png");
+            try (java.io.InputStream input = assets.open("bose/images/qc_ultra2_v2.png");
                  FileOutputStream stream = new FileOutputStream(output, false)) {
                 byte[] buffer = new byte[8192];
                 int count;
@@ -3991,6 +4104,40 @@ public final class HookModule extends XposedModule {
      *
      * @return true when the photo was installed, so the caller skips the host's own load.
      */
+    /**
+     * 0.5.69. Applies the Bose product photo from the onespace bind path.
+     *
+     * <p>The holder argument is the bound row's ViewHolder; its itemView lives inside the
+     * page's RecyclerView. The header row (OneSpaceHeaderPreference) is a sibling further up
+     * the same list, so walking the RecyclerView children and matching the class name finds
+     * it without depending on any R8-renamed field of the fragment.
+     */
+    private void applyBoseHeaderFromRowView(Object holder) {
+        try {
+            if (!boseBonded() || headerImageApplied) return;
+            Object rowView = readField(holder, "itemView");
+            if (!(rowView instanceof View)) return;
+            View row = (View) rowView;
+            Object parent = row.getParent();
+            if (!(parent instanceof android.view.ViewGroup)) return;
+            android.view.ViewGroup list = (android.view.ViewGroup) parent;
+            for (int i = 0; i < list.getChildCount(); i++) {
+                View child = list.getChildAt(i);
+                if (child == null
+                        || !child.getClass().getName().endsWith("OneSpaceHeaderPreference")) {
+                    continue;
+                }
+                if (replaceBoseOneSpaceHeaderImage(child)) {
+                    headerImageApplied = true;
+                }
+                return;
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private volatile boolean headerImageApplied;
+
     private boolean replaceBoseOneSpaceHeaderImage(Object owner) {
         try {
             if (!boseBonded()) return false;
