@@ -598,18 +598,31 @@ public final class HookModule extends XposedModule {
             // readiness are read from inside that one event instead of via extra hooks.
             hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
                     "a", 1, "wl17Lookup");
-            // The detail page's PreferenceFragment. In 16.x the original module looked for
-            // class "v9.z"; that class does NOT exist in 17.6.3. The real one is
-            // G9/H.smali, .source "DetailMainPreferenceFragment.java",
-            // .super com/oplus/melody/ui/base/c (a Fragment).
-            // Verified method list: onCreate(Bundle) / onViewCreated(View,Bundle) /
-            // onActivityCreated(Bundle) / onStart() / onResume() / static u(String)Z.
-            // u(String)Z is the gate that consults the whitelist DTO's getFunction().
+            // ---- The detail page's PreferenceFragment (0.5.54: class was wrong) ----
+            // 16.x looked for "v9.z"; that class does not exist in 17.6.3.
+            // 0.5.51 hooked G9/H, but 0.5.53 device logs proved that is the WRONG class:
+            //   evt=bose.frag17 class=G9.H arg0=null result=null
+            // fired only for the STATIC u(String)Z probe — no instance method ever ran, and
+            // "new-instance LG9/H;" appears nowhere in either dex. G9/H is never instantiated.
+            //
+            // The real host is G9/Q, proven from A9/f.1 (the "settingListChanged" path):
+            //   iget-object v0, v0, LA9/f;->b:Ljava/lang/Object;
+            //   check-cast       v0, LG9/Q;
+            //   const-string     v4, "DetailMainPreferenceFragment"
+            //   invoke-virtual  {v0}, Fragment;->getActivity()
+            //
+            // Full chain verified across both dex files:
+            //   G9/Q -> com/oplus/melody/ui/base/b
+            //        -> com/coui/appcompat/preference/j
+            //        -> com/coui/appcompat/preference/g
+            // G9/Q declares: onCreate(Bundle) / onDestroy() / onHiddenChanged(Z) / t() /
+            // u(LayoutInflater,ViewGroup) returning a RecyclerView, plus the static
+            // y:Ljava/util/List; field.
             hookAny(loader, "detailFrag17",
-                    "G9.H#onCreate#1",
-                    "G9.H#onViewCreated#2",
-                    "G9.H#onActivityCreated#1",
-                    "G9.H#u#1");
+                    "G9.Q#onCreate#1",
+                    "G9.Q#onHiddenChanged#1",
+                    "G9.Q#t#0",
+                    "G9.Q#onDestroy#0");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "f", 4, "deviceInfo");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "c", 1, "deviceRegistryAdd");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "d", 1, "deviceRegistryGet");
@@ -1091,15 +1104,23 @@ public final class HookModule extends XposedModule {
                                         : frag.getClass().getName(),
                                 "arg0", arity > 0 ? String.valueOf(chain.getArg(0)) : "-",
                                 "result", String.valueOf(result));
-                        // On onViewCreated the PreferenceScreen exists: report its real size.
-                        if (arity == 2 && frag != null) {
+                        // G9/Q is the real host (0.5.54). At onCreate the PreferenceFragment
+                        // and its screen exist, so this is the one place that can report what
+                        // the host tree really contains — the fact 20+ versions never had.
+                        if (arity == 1 && frag != null) {
                             try {
                                 Object screen = PrefRef.getPreferenceScreen(frag);
+                                int n = screen == null ? -1 : PrefRef.getPreferenceCount(screen);
                                 MLog.event("bose.frag17.screen",
                                         "screen", screen == null ? "null"
                                                 : screen.getClass().getSimpleName(),
-                                        "children", screen == null ? -1
-                                                : PrefRef.getPreferenceCount(screen));
+                                        "children", n,
+                                        "view_attached", frag instanceof View
+                                                && ((View) frag).isAttachedToWindow());
+                                if (screen != null && n > 0) {
+                                    MLog.event("bose.frag17.keys",
+                                            "keys", describeChildKeys(screen, 0));
+                                }
                             } catch (Throwable t) {
                                 MLog.event("bose.frag17.screen_error",
                                         "error", MLog.compactThrowable(t));
@@ -2836,6 +2857,37 @@ public final class HookModule extends XposedModule {
      * A DTO with {@code function == null} or an empty {@code children} list therefore renders
      * nothing — which is exactly the blank-page symptom, and it is visible here.
      */
+    /**
+     * Lists the keys of a group's direct children, depth-limited.
+     *
+     * <p>This is the first look at what the host actually put on the detail page. Every
+     * earlier version worked from an empty or fabricated tree, so there was never a way to
+     * tell "the host created sections" from "the host created nothing".
+     */
+    private static String describeChildKeys(Object group, int depth) {
+        if (group == null || depth > 2) return "";
+        StringBuilder sb = new StringBuilder();
+        try {
+            int count = PrefRef.getPreferenceCount(group);
+            for (int i = 0; i < count && i < 30; i++) {
+                Object child = PrefRef.getPreference(group, i);
+                if (child == null) continue;
+                String key = PrefRef.getKey(child);
+                sb.append(i).append(':')
+                  .append(child.getClass().getSimpleName())
+                  .append('/').append(key == null ? "null" : key)
+                  .append('(').append(PrefRef.getPreferenceCount(child)).append(')');
+                if (depth < 2 && PrefRef.getPreferenceCount(child) > 0) {
+                    sb.append(" {").append(describeChildKeys(child, depth + 1)).append('}');
+                }
+                sb.append(' ');
+            }
+        } catch (Throwable t) {
+            sb.append("err:").append(t.getClass().getSimpleName());
+        }
+        return sb.toString().trim();
+    }
+
     private static String describeChildren(Object dto) {
         try {
             Object v = readField(dto, "children");
