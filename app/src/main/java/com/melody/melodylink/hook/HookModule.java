@@ -3034,9 +3034,27 @@ public final class HookModule extends XposedModule {
                 if (key == null || !key.startsWith("melodylink.")) {
                     if (isBoseNoiseRowClass(child.getClass().getName())) {
                         PrefRef.setVisible(child, false);
+                        // 0.5.64: 0.5.63 device logs prove the hide DOES execute —
+                        //   evt=bose.anc.tree_row_hidden key=NoiseReductionItem class=NoiseReductionItem
+                        //   evt=bose.anc.sweep attempt=6 children=7
+                        // — and the four-level picker is still on screen. So
+                        // Preference.setVisible(false) is not enough for this COUI subclass;
+                        // its adapter must be looking at something else (or the row's own view
+                        // is kept alive by the detail page's own bind logic). The view itself
+                        // is therefore collapsed as well, which works regardless of what the
+                        // adapter consults, and the preference is disabled so no click target
+                        // remains.
+                        View rowView = PrefRef.invokeNoArg(child, "getView") instanceof View
+                                ? (View) PrefRef.invokeNoArg(child, "getView") : null;
+                        if (rowView != null) {
+                            rowView.setVisibility(View.GONE);
+                            rowView.setEnabled(false);
+                        }
                         MLog.event("bose.anc.tree_row_hidden",
                                 "key", key,
-                                "class", child.getClass().getSimpleName());
+                                "class", child.getClass().getSimpleName(),
+                                "visible_after", PrefRef.isVisible(child),
+                                "view_gone", rowView != null);
                         hidden[0]++;
                     }
                 }
