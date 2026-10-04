@@ -1200,48 +1200,33 @@ public final class HookModule extends XposedModule {
                             }
                             if (!boseBonded()) return result;
 
-                            int desired = visibility; // default: leave whatever the host set
-                            if ("melody_ui_detail_scrollview".equals(idName(target))) {
-                                // The one view whose GONE blanks the whole page.
-                                desired = View.VISIBLE;
-                            } else if (isFullSizeView(target)) {
-                                // Page-level arbitration, full-size views only (never a row):
-                                //   VISIBLE + no content inside -> overlay/mask -> force GONE
-                                //   non-VISIBLE + content inside -> page hide  -> force VISIBLE
-                                boolean onContentPath = contentPathNow(target);
-                                if (visibility == View.VISIBLE && !onContentPath) {
-                                    desired = View.GONE;
-                                } else if (visibility != View.VISIBLE && onContentPath) {
-                                    desired = View.VISIBLE;
-                                }
-                            }
-
-                            if (desired != target.getVisibility()) {
+                            // 0.5.72 ROLLBACK of the 0.5.69 page-level arbitration.
+                            // Evidence trail: 0.5.71 stopped the ANR (dropbox shows no new
+                            // melody crash after 18:55), but the user now reports a NEW
+                            // regression #6 — a grey mask over 通用设置 that crashes on tap —
+                            // plus the detail page still vanishing. The isFullSizeView /
+                            // contentPathNow heuristic forcibly flipped ANY near-full-screen
+                            // view to VISIBLE/GONE based on a guessed content test. Forcing an
+                            // unknown full-size host view (mask / empty-state / scrim) VISIBLE
+                            // or GONE is exactly the kind of "fix pushed further than the
+                            // evidence" lesson #12 forbids, and it produces leftover masks and
+                            // click crashes. There was never device proof of what the host
+                            // hides a few seconds in. So: keep ONLY the single proven
+                            // protection (the detail scroll container, whose GONE blanks the
+                            // page — established since 0.5.25), keep the re-entry guard, and
+                            // rely on bose.detail.hidden_by to finally name the real caller
+                            // before any further change.
+                            if ("melody_ui_detail_scrollview".equals(idName(target))
+                                    && visibility != View.VISIBLE) {
                                 detailArbitrating.set(Boolean.TRUE);
                                 try {
-                                    target.setVisibility(desired);
+                                    target.setVisibility(View.VISIBLE);
                                 } finally {
                                     detailArbitrating.set(Boolean.FALSE);
                                 }
-                                if (desired == View.VISIBLE
-                                        && "melody_ui_detail_scrollview".equals(idName(target))) {
-                                    if (scrollReviveLogged.compareAndSet(false, true)) {
-                                        MLog.event("bose.detail.scrollview_revived",
-                                                "blocked_visibility", visibility);
-                                    }
-                                } else if (desired == View.GONE) {
-                                    if (overlayBlockLogged.compareAndSet(false, true)) {
-                                        MLog.event("bose.detail.overlay_blocked",
-                                                "view", target.getClass().getSimpleName(),
-                                                "id", idName(target));
-                                    }
-                                } else {
-                                    if (pageHideBlockLogged.compareAndSet(false, true)) {
-                                        MLog.event("bose.detail.page_hide_blocked",
-                                                "view", target.getClass().getSimpleName(),
-                                                "id", idName(target),
-                                                "blocked_visibility", visibility);
-                                    }
+                                if (scrollReviveLogged.compareAndSet(false, true)) {
+                                    MLog.event("bose.detail.scrollview_revived",
+                                            "blocked_visibility", visibility);
                                 }
                             }
                         } catch (Throwable ignored) {
@@ -2849,39 +2834,118 @@ public final class HookModule extends XposedModule {
     /**
      * 0.5.69 — removes the Enco sub-level lists our clone inherited.
      *
-     * <p>User report #4: with the three-state widget back, the detail page still offered the
-     * Enco-only extras — ANC strength levels (3 + adaptive) under 降噪 and 增强人声 under 通透.
-     * Both are children of the cloned entry: smali shows Ba/m (the detail section builder)
-     * reading {@code NoiseReductionMode.getChildrenMode()} to build the strength selector
-     * (Ba/x) and the voice-enhancement switch (Ba/A). The outer noiseReductionMode list is
-     * what keeps the three-state widget alive (checkShowNoiseCardItem), so only the INNER
-     * child lists are emptied. Field lookup is by type+name so R8 renames of the getters
-     * cannot break it.
+     * <p>0.5.72 REWRITE: the field-name version never fired. #4 persisted on device because
+     * R8 renamed the inner fields of NoiseReductionMode (a/b/c...), so the "name contains
+     * child" match found nothing — and no diagnostic ever printed, proving it. The smali
+     * call sites (Ba/m:355, Ba/A:475, onespace/b:3285) prove {@code getChildrenMode()} is a
+     * KEEP-NAMED public getter; invoke it reflectively and clear the list IN PLACE (the
+     * getter returns the live backing list). getModeType()==6 marks the 通透 mode whose
+     * children drive 增强人声 (Ba/A) — clearing covers both extras uniformly.
      */
     private static void stripEncoSubLevels(Object dto) {
         try {
             Object function = readField(dto, "function");
-            if (function == null) return;
+            if (function == null) {
+                MLog.event("bose.catalog.strip_skip", "why", "no_function");
+                return;
+            }
             Object modes = readField(function, "noiseReductionMode");
-            if (!(modes instanceof java.util.List)) return;
-            int stripped = 0;
+            if (!(modes instanceof java.util.List)) {
+                MLog.event("bose.catalog.strip_skip", "why", "no_modes");
+                return;
+            }
+            // SAFETY: cloneCatalogEntry copies fields BY REFERENCE, so dto.function and
+            // every mode/children list are still the SAME objects the host's real Enco
+            // entries use. Clearing in place would mutate the whole catalog. Copy the
+            // chain first (function -> modes -> each mode), swap the copies into the dto,
+            // then clear children on the copies only.
+            Object functionCopy = shallowCopyObject(function);
+            if (functionCopy == null) return;
+            java.util.List<Object> modesCopy = new java.util.ArrayList<>();
+            int cleared = 0;
             for (Object mode : (java.util.List<?>) modes) {
                 if (mode == null) continue;
-                for (java.lang.reflect.Field field : allFieldsOf(mode.getClass())) {
-                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
-                    if (!java.util.List.class.isAssignableFrom(field.getType())) continue;
-                    String name = field.getName().toLowerCase(java.util.Locale.ROOT);
-                    if (!name.contains("child")) continue;
-                    field.setAccessible(true);
-                    field.set(mode, new java.util.ArrayList<Object>());
-                    stripped++;
+                Object modeCopy = shallowCopyObject(mode);
+                if (modeCopy == null) {
+                    modesCopy.add(mode);
+                    continue;
                 }
+                Method getter = null;
+                for (Method candidate : allMethods(mode.getClass())) {
+                    if ("getChildrenMode".equals(candidate.getName())
+                            && candidate.getParameterCount() == 0) {
+                        getter = candidate;
+                        break;
+                    }
+                }
+                if (getter != null) {
+                    getter.setAccessible(true);
+                    Object children = getter.invoke(mode);
+                    if (children instanceof java.util.List) {
+                        // Locate the backing field by identity (R8 renames fields, so the
+                        // name is unusable — that is exactly why 0.5.69 never fired).
+                        for (java.lang.reflect.Field field
+                                : allFieldsOf(modeCopy.getClass())) {
+                            if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                                continue;
+                            }
+                            field.setAccessible(true);
+                            if (field.get(modeCopy) == children) {
+                                field.set(modeCopy, new java.util.ArrayList<Object>());
+                                cleared++;
+                                break;
+                            }
+                        }
+                    }
+                }
+                modesCopy.add(modeCopy);
             }
-            if (stripped > 0) {
-                MLog.event("bose.catalog.sublevels_stripped", "fields", stripped);
-            }
+            writeFieldIfExists(functionCopy, "noiseReductionMode", modesCopy);
+            writeFieldIfExists(dto, "function", functionCopy);
+            MLog.event("bose.catalog.sublevels_stripped",
+                    "modes", modesCopy.size(), "cleared", cleared);
         } catch (Throwable t) {
             MLog.event("bose.catalog.strip_error", "error", MLog.compactThrowable(t));
+        }
+    }
+
+    /** No-arg-ctor + field-by-field copy of a host data object; null when impossible. */
+    private static Object shallowCopyObject(Object source) {
+        try {
+            java.lang.reflect.Constructor<?> ctor = null;
+            for (java.lang.reflect.Constructor<?> candidate
+                    : source.getClass().getDeclaredConstructors()) {
+                if (candidate.getParameterCount() == 0) {
+                    ctor = candidate;
+                    break;
+                }
+            }
+            if (ctor == null) return null;
+            ctor.setAccessible(true);
+            Object copy = ctor.newInstance();
+            for (java.lang.reflect.Field field : allFieldsOf(source.getClass())) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                field.setAccessible(true);
+                field.set(copy, field.get(source));
+            }
+            return copy;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void writeFieldIfExists(Object target, String name, Object value) {
+        try {
+            for (Class<?> c = target.getClass(); c != null; c = c.getSuperclass()) {
+                try {
+                    java.lang.reflect.Field field = c.getDeclaredField(name);
+                    field.setAccessible(true);
+                    field.set(target, value);
+                    return;
+                } catch (NoSuchFieldException ignored) {
+                }
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -6092,6 +6156,8 @@ public final class HookModule extends XposedModule {
                     int value = Math.max(-10, Math.min(10, raw));
                     setPreferenceValue(preference, "setSummary", eqLabel(value));
                     forwardBoseCommand(CMD_EQ_BAND, bandIndex, value, 0, 0);
+                    // Callback a(I)V is VOID (smali-verified on
+                    // MelodyPromptVolumeSeekBarPreference$b): null is the only safe return.
                     return null;
                 });
         try {
@@ -6179,14 +6245,22 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseButtonListener";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (!"onClick".equals(method.getName())) {
-                        // Void and primitive-returning callbacks share one proxy:
-                        // returning null crashes the app when the caller unboxes a
-                        // boolean, so hand back a type-appropriate default.
-                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
+                    // 0.5.72 — the click callback is NOT named "onClick". The host's
+                    // interface androidx.preference.Preference$d declares exactly one
+                    // abstract method j(Preference)Z (verified in smali), so the old
+                    // name check never matched and every tap silently fell into the
+                    // default-return branch: bose按键/bose电源 did nothing, in every
+                    // version since the rows were introduced. Detect the callback by
+                    // SIGNATURE instead: the interface's own single-argument,
+                    // boolean-returning method. Object methods (equals/hashCode/
+                    // toString) were handled above and are excluded by declaringClass.
+                    if (!(method.getReturnType() == boolean.class
+                            && method.getParameterCount() == 1
+                            && method.getDeclaringClass() != Object.class)) {
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
                     }
                     showBoseActionPicker(row, event);
-                    return null;
+                    return Boolean.TRUE;
                 });
         try {
             setter.setAccessible(true);
@@ -6288,6 +6362,8 @@ public final class HookModule extends XposedModule {
                     setPreferenceValue(preference, "setSummary",
                             "\u964d\u566a\u7b49\u7ea7 " + value + "/10");
                     forwardBoseCommand(CMD_MODE_SLOT, slot, value, 0, 0);
+                    // Callback a(I)V is VOID (smali-verified): return null; a boxed
+                    // Boolean would throw from the proxy on unbox-to-void.
                     return null;
                 });
         try {
@@ -6330,11 +6406,19 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseStandby";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (!"onClick".equals(method.getName())) {
-                        // Void and primitive-returning callbacks share one proxy:
-                        // returning null crashes the app when the caller unboxes a
-                        // boolean, so hand back a type-appropriate default.
-                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
+                    // 0.5.72 — the click callback is NOT named "onClick". The host's
+                    // interface androidx.preference.Preference$d declares exactly one
+                    // abstract method j(Preference)Z (verified in smali), so the old
+                    // name check never matched and every tap silently fell into the
+                    // default-return branch: bose按键/bose电源 did nothing, in every
+                    // version since the rows were introduced. Detect the callback by
+                    // SIGNATURE instead: the interface's own single-argument,
+                    // boolean-returning method. Object methods (equals/hashCode/
+                    // toString) were handled above and are excluded by declaringClass.
+                    if (!(method.getReturnType() == boolean.class
+                            && method.getParameterCount() == 1
+                            && method.getDeclaringClass() != Object.class)) {
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
                     }
                     int current = boseTransport.getStandbyMinutes();
                     int[] presets = com.melody.melodylink.bose.BoseBmap.STANDBY_MINUTES;
@@ -6348,7 +6432,7 @@ public final class HookModule extends XposedModule {
                     setPreferenceValue(row, "setSummary",
                             com.melody.melodylink.bose.BoseBmap.standbyLabel(next));
                     forwardBoseCommand(CMD_STANDBY, next, 0, 0, 0);
-                    return null;
+                    return Boolean.TRUE;
                 });
         try {
             setter.setAccessible(true);
@@ -6388,14 +6472,22 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBosePower";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    if (!"onClick".equals(method.getName())) {
-                        // Void and primitive-returning callbacks share one proxy:
-                        // returning null crashes the app when the caller unboxes a
-                        // boolean, so hand back a type-appropriate default.
-                        return method.getReturnType() == boolean.class ? Boolean.FALSE : Boolean.TRUE;
+                    // 0.5.72 — the click callback is NOT named "onClick". The host's
+                    // interface androidx.preference.Preference$d declares exactly one
+                    // abstract method j(Preference)Z (verified in smali), so the old
+                    // name check never matched and every tap silently fell into the
+                    // default-return branch: bose按键/bose电源 did nothing, in every
+                    // version since the rows were introduced. Detect the callback by
+                    // SIGNATURE instead: the interface's own single-argument,
+                    // boolean-returning method. Object methods (equals/hashCode/
+                    // toString) were handled above and are excluded by declaringClass.
+                    if (!(method.getReturnType() == boolean.class
+                            && method.getParameterCount() == 1
+                            && method.getDeclaringClass() != Object.class)) {
+                        return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
                     }
                     confirmBosePowerOff();
-                    return null;
+                    return Boolean.TRUE;
                 });
         try {
             setter.setAccessible(true);
