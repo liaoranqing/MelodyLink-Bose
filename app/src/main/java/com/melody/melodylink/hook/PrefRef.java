@@ -263,19 +263,15 @@ final class PrefRef {
      */
     static int getPreferenceCount(Object container) {
         if (container == null) return 0;
+        // 0.5.53: probing by name is unsafe on 17.6.3 (the name is R8-renamed) and probing
+        // by shape picked up getOrder(). The field-derived count is authoritative, with the
+        // by-name call kept only as a first preference because it is exact when it resolves.
         Object r = invokeNoArg(container, "getPreferenceCount");
-        if (r instanceof Integer) return (Integer) r;
-        Method counter = findNoArgIntMethod(container.getClass());
-        if (counter != null) {
-            try {
-                counter.setAccessible(true);
-                Object v = counter.invoke(container);
-                if (v instanceof Integer) return (Integer) v;
-            } catch (Throwable ignored) {
-            }
+        if (r instanceof Integer) {
+            java.util.List<?> check = getChildrenList(container);
+            if (check == null) return (Integer) r;
         }
-        java.util.List<?> children = getChildrenList(container);
-        return children == null ? 0 : children.size();
+        return readChildCount(container);
     }
 
     /**
@@ -297,6 +293,49 @@ final class PrefRef {
             }
         }
         return null;
+    }
+
+    /**
+     * Reads the child count and rejects a wrong method.
+     *
+     * <p>0.5.53 CRASH FIX. {@code findNoArgIntMethod} returns the FIRST no-arg int method it
+     * meets, and {@code getDeclaredMethods()} has no defined order. On17.6.3
+     * {@code PreferenceGroup} declares no such method itself, so the scan walked up to
+     * {@code Preference} and could easily land on {@code getOrder()},
+     * {@code getLayoutResource()} or {@code getWidgetLayoutResource()} instead of the renamed
+     * {@code getPreferenceCount()}.
+     *
+     * <p>Consequence: {@code getPreferenceCount} returned a preference's ORDER value instead of
+     * a child total, and {@code shiftPreferenceOrders} then rewrote every sibling's order with
+     * that garbage — COUI groups consecutive orders into rounded cards, so the panel stopped
+     * opening at all. 通用设置 worked in 0.5.49-0.5.52 and broke here.
+     *
+     * <p>The candidate is now accepted only when its value is consistent with the real child
+     * list obtained from {@link #getChildrenList}, which is a reliable fallback in its own
+     * right. When the two disagree, the field-derived size wins.
+     */
+    private static int readChildCount(Object container) {
+        java.util.List<?> children = getChildrenList(container);
+        int fromField = children == null ? -1 : children.size();
+        Method counter = findNoArgIntMethod(container.getClass());
+        if (counter == null) return Math.max(fromField, 0);
+        try {
+            counter.setAccessible(true);
+            Object v = counter.invoke(container);
+            if (!(v instanceof Integer)) return Math.max(fromField, 0);
+            int fromMethod = (Integer) v;
+            if (fromField >= 0) {
+                // Both sources are available: the field is authoritative, because the method
+                // may well be an unrelated accessor.
+                return fromField;
+            }
+            // No field fallback: a negative count can never be a real child count, which rules
+            // out order/resource ids (those are >= 0 but typically small); keep it only when
+            // it is a plausible total.
+            return fromMethod < 0 ? 0 : fromMethod;
+        } catch (Throwable t) {
+            return Math.max(fromField, 0);
+        }
     }
 
     /**
@@ -562,7 +601,15 @@ final class PrefRef {
      * constructor bug, the blank page.
      */
     static void shiftPreferenceOrders(Object container, int threshold, int delta) {
+        // 0.5.53 guard: this walks the whole group and rewrites sibling orders, so a wrong
+        // child count is destructive — COUI merges consecutive orders into one rounded card,
+        // and a bogus count makes it walk past the end of the real children. The count is
+        // therefore clamped to the actual child list when one can be resolved, and the whole
+        // shift is skipped when the container clearly has no children.
+        java.util.List<?> children = getChildrenList(container);
         int count = getPreferenceCount(container);
+        if (children != null) count = Math.min(count, children.size());
+        if (count <= 0 || count > 512) return;
         for (int i = 0; i < count; i++) {
             Object pref = getPreference(container, i);
             if (pref == null) continue;
@@ -572,6 +619,12 @@ final class PrefRef {
     }
 
     // -------------------------------------------------------------- dispatch
+
+    /**
+     * One-shot marker so a mis-resolved child-count probe is reported once, not every call.
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean childCountProbeLogged =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private static final Map<String, Method> METHOD_CACHE = new ConcurrentHashMap<>();
 

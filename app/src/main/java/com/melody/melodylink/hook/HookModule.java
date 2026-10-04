@@ -1903,6 +1903,17 @@ public final class HookModule extends XposedModule {
         // copy visible, because that one anchors the section it lives in.
         hideNoiseEffectRow(noiseRow);
 
+        // 0.5.53 safety gate. Everything below MUTATES the host's preference tree (order
+        // shifting plus real inserts). 0.5.52 proved the panel can be taken down entirely by
+        // a bad container, so nothing is written until the container is proven sane: it must
+        // expose a real child list, and it must have at least one child to make room for.
+        int existing = PrefRef.getPreferenceCount(parent);
+        if (existing <= 0) {
+            MLog.event("bose.inject.abort",
+                    "reason", "empty_parent",
+                    "parent", parent.getClass().getSimpleName());
+            return false;
+        }
         int anchorOrder = PrefRef.getOrder(noiseRow);
         int target = anchorOrder < 0 ? 0 : anchorOrder + 1;
         // Make room before inserting, otherwise the new rows collide with the host's own
