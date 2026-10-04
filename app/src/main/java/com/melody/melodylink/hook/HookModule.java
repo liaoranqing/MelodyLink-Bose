@@ -2947,29 +2947,89 @@ public final class HookModule extends XposedModule {
      */
     private static int revivedReported = 0;
 
-    private static int reviveGoneDetailViews(View view, int depth) {
-        if (view == null || depth > 10) return 0;
-        int revived = 0;
-        if (view.getVisibility() == View.GONE
-                && view.getWidth() > 0 && view.getHeight() > 0) {
-            view.setVisibility(View.VISIBLE);
-            revived++;
-            if (revivedReported < 6) {
-                revivedReported++;
-                MLog.event("bose.detail.revive_one",
-                        "view", view.getClass().getSimpleName(),
-                        "id", idName(view),
-                        "size", view.getWidth() + "x" + view.getHeight());
-            }
+    /**
+     * 0.5.68 — ids/classes that unambiguously identify detail-page CONTENT.
+     *
+     * <p>0.5.67 revived every GONE view with a measured size. That is indiscriminate: the
+     * host's loading mask / click-intercept layer / empty-state panel are exactly such views,
+     * and flipping them to VISIBLE put an invisible-to-us layer on top of the content — which
+     * matches user reports #1 (page appears, then vanishes after a few seconds) and #5 ("bose按键"
+     * / "bose电源" do not respond to taps). Only views on the path to real content are revived
+     * now, and an overlay never is, because an overlay contains no content node.
+     */
+    private static final java.util.Set<String> DETAIL_CONTENT_IDS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "melody_ui_detail_scrollview",
+                    "melody_ui_device_info"));
+
+    /** True when this view is itself known detail-page content (not an overlay/mask). */
+    private static boolean isDetailContentView(View v) {
+        if (v == null) return false;
+        try {
+            String id = idName(v);
+            if (id != null && DETAIL_CONTENT_IDS.contains(id)) return true;
+            String simple = v.getClass().getSimpleName();
+            if (simple.contains("MelodyDetailModelView")) return true;
+            // The COUI preference list that renders the section rows.
+            if ("RecyclerView".equals(simple)) return true;
+            if ("NestedScrollView".equals(simple)) return true;
+        } catch (Throwable ignored) {
         }
-        if (view instanceof ViewGroup && revived < 200) {
-            ViewGroup group = (ViewGroup) view;
-            int n = Math.min(group.getChildCount(), 60);
-            for (int i = 0; i < n; i++) {
-                revived += reviveGoneDetailViews(group.getChildAt(i), depth + 1);
+        return false;
+    }
+
+    private static int reviveGoneDetailViews(View root, int depthIgnored) {
+        if (root == null) return 0;
+        // Pass 1: collect the ancestor chain of every content node. Bounded walk.
+        final java.util.Set<View> contentPath =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<View, Boolean>());
+        collectContentPath(root, 0, contentPath, new int[]{0});
+        if (contentPath.isEmpty()) return 0;
+        // Pass 2: flip only the GONE views on that path.
+        int revived = 0;
+        for (View v : contentPath) {
+            try {
+                if (v.getVisibility() == View.GONE
+                        && v.getWidth() > 0 && v.getHeight() > 0) {
+                    v.setVisibility(View.VISIBLE);
+                    revived++;
+                    if (revivedReported < 8) {
+                        revivedReported++;
+                        MLog.event("bose.detail.revive_one",
+                                "view", v.getClass().getSimpleName(),
+                                "id", idName(v),
+                                "size", v.getWidth() + "x" + v.getHeight());
+                    }
+                }
+            } catch (Throwable ignored) {
             }
         }
         return revived;
+    }
+
+    /** Marks {@code view} and all its ancestors when it (or a descendant) is content. */
+    private static boolean collectContentPath(View view, int depth,
+            java.util.Set<View> path, int[] budget) {
+        if (view == null || depth > 12 || budget[0] > 800) return false;
+        budget[0]++;
+        boolean hit = isDetailContentView(view);
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            int n = Math.min(group.getChildCount(), 60);
+            for (int i = 0; i < n; i++) {
+                if (collectContentPath(group.getChildAt(i), depth + 1, path, budget)) {
+                    hit = true;
+                }
+            }
+        }
+        if (hit) {
+            for (View v = view; v != null; ) {
+                if (!path.add(v)) break;
+                Object p = v.getParent();
+                v = p instanceof View ? (View) p : null;
+            }
+        }
+        return hit;
     }
 
     /** True when this view is a MelodyUiCOUIJumpPreference row or a subclass of it. */
@@ -3291,38 +3351,18 @@ public final class HookModule extends XposedModule {
                 continue;
             }
             if (child == null) continue;
-            try {
-                String key = PrefRef.getKey(child);
-                // Never touch our own rows.
-                if (key == null || !key.startsWith("melodylink.")) {
-                    if (isBoseNoiseRowClass(child.getClass().getName())) {
-                        PrefRef.setVisible(child, false);
-                        // 0.5.64: 0.5.63 device logs prove the hide DOES execute —
-                        //   evt=bose.anc.tree_row_hidden key=NoiseReductionItem class=NoiseReductionItem
-                        //   evt=bose.anc.sweep attempt=6 children=7
-                        // — and the four-level picker is still on screen. So
-                        // Preference.setVisible(false) is not enough for this COUI subclass;
-                        // its adapter must be looking at something else (or the row's own view
-                        // is kept alive by the detail page's own bind logic). The view itself
-                        // is therefore collapsed as well, which works regardless of what the
-                        // adapter consults, and the preference is disabled so no click target
-                        // remains.
-                        // 0.5.66: the view collapse is REMOVED here. 0.5.65 logs showed
-                        // view_gone=false — getView() is null at sweep time, so it never
-                        // fired; and had it fired it would have taken the three-state widget
-                        // down with it, since both live in the same preference. The collapse
-                        // now happens in ancRowBind, which runs per row and matches on title.
-                        View rowView = null;
-                        MLog.event("bose.anc.tree_row_hidden",
-                                "key", key,
-                                "class", child.getClass().getSimpleName(),
-                                "visible_after", PrefRef.isVisible(child),
-                                "view_gone", rowView != null);
-                        hidden[0]++;
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
+            // 0.5.68 REGRESSION FIX — the detail page lost its three-state widget
+            // (user report #4: "3个耳机状态没了"). NoiseReductionItem.smali proves this
+            // class IS the three-state control itself: it holds
+            // mActionView:DeviceControlWidget plus mOnModeActionClickListener and calls
+            // getModeList()/setEnable(). OneSpaceNoisePreference is the 通用设置
+            // three-state. The old class-based setVisible(false) here therefore hid
+            // exactly the widgets that must stay. It only surfaced now because 0.5.67
+            // made the detail page visible for the first time.
+            // The Enco "降噪效果" menu is suppressed by KEY (pref_noise_menu /
+            // pref_noise_menu_category) in ancRowBind + suppressNoiseMenuCategory +
+            // the b.x/b.w hooks, so this sweep no longer hides anything; the walk is
+            // kept (recursion below) for future targeted fixes.
             hideEncoAncRowsInTree(child, depth + 1, hidden);
         }
     }
