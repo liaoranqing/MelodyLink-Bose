@@ -578,6 +578,35 @@ public final class HookModule extends XposedModule {
             hookAny(loader, "whitelist",
                     "com.oplus.melody.common.util.V#a#3",
                     "com.oplus.melody.common.util.T#a#3");
+            // ---- 17.6.3 real whitelist source (diagnosis, no behaviour change) ----
+            // The 16.x entry points above are gone in 17.6.3. Verified from smali:
+            //   com/oplus/melody/model/repository/whitelist/a.smali
+            //     .source "WhitelistRepositoryServerImpl.kt"
+            //   a(String) -> WhitelistConfigDTO   has TWO paths:
+            //     1) earphone/b;->I().y(mac) -> EarphoneDTO, then c(productId, name)
+            //     2) fallback: Lr7/m;->h(mac) -> BluetoothDevice, then T.b(device, g())
+            //   g() -> i() -> WhitelistContentDO.getWhiteList(); EMPTY_LIST when null.
+            //   i() waits CompletableFuture.get(500ms) then reads a LiveData snapshot,
+            //   so the content is ASYNC and can legitimately be absent on first read.
+            // These hooks only report; nothing is rewritten yet.
+            hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
+                    "a", 1, "wl17Lookup");
+            hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
+                    "g", 0, "wl17Catalog");
+            hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
+                    "i", 0, "wl17Content");
+            // The detail page's PreferenceFragment. In 16.x the original module looked for
+            // class "v9.z"; that class does NOT exist in 17.6.3. The real one is
+            // G9/H.smali, .source "DetailMainPreferenceFragment.java",
+            // .super com/oplus/melody/ui/base/c (a Fragment).
+            // Verified method list: onCreate(Bundle) / onViewCreated(View,Bundle) /
+            // onActivityCreated(Bundle) / onStart() / onResume() / static u(String)Z.
+            // u(String)Z is the gate that consults the whitelist DTO's getFunction().
+            hookAny(loader, "detailFrag17",
+                    "G9.H#onCreate#1",
+                    "G9.H#onViewCreated#2",
+                    "G9.H#onActivityCreated#1",
+                    "G9.H#u#1");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "f", 4, "deviceInfo");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "c", 1, "deviceRegistryAdd");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "d", 1, "deviceRegistryGet");
@@ -1020,6 +1049,58 @@ public final class HookModule extends XposedModule {
                                 "class", frag == null ? "null"
                                         : frag.getClass().getSimpleName(),
                                 "args", String.valueOf(describeArgs(chain, arity)));
+                        return result;
+                    }
+                    // ---- 17.6.3 whitelist source diagnosis (report only) ----
+                    if ("wl17Catalog".equals(label) || "wl17Content".equals(label)) {
+                        // g() -> i() -> WhitelistContentDO.getWhiteList(); the snapshot is
+                        // filled asynchronously (CompletableFuture + 500 ms wait), so a null
+                        // here on the first read is expected, not a bug to chase.
+                        Object result = chain.proceed();
+                        MLog.event("bose.wl17.source",
+                                "method", label,
+                                "is_null", result == null,
+                                "size", result instanceof java.util.Collection
+                                        ? ((java.util.Collection<?>) result).size() : -1,
+                                "class", result == null ? "null"
+                                        : result.getClass().getSimpleName());
+                        return result;
+                    }
+                    if ("wl17Lookup".equals(label)) {
+                        // a(String mac) -> WhitelistConfigDTO. Two paths inside the host:
+                        //   registered -> c(productId, name);  otherwise -> T.b(device, g()).
+                        Object mac = arity > 0 ? chain.getArg(0) : null;
+                        Object result = chain.proceed();
+                        MLog.event("bose.wl17.lookup",
+                                "mac", String.valueOf(mac),
+                                "is_null", result == null,
+                                "function_null", result == null || readField(result, "function") == null,
+                                "children", result == null ? "-" : describeChildren(result),
+                                "dto", result == null ? "null" : describeDto(result));
+                        return result;
+                    }
+                    if ("detailFrag17".equals(label)) {
+                        Object result = chain.proceed();
+                        Object frag = chain.getThisObject();
+                        MLog.event("bose.frag17",
+                                "class", frag == null ? "null"
+                                        : frag.getClass().getName(),
+                                "arg0", arity > 0 ? String.valueOf(chain.getArg(0)) : "-",
+                                "result", String.valueOf(result));
+                        // On onViewCreated the PreferenceScreen exists: report its real size.
+                        if (arity == 2 && frag != null) {
+                            try {
+                                Object screen = PrefRef.getPreferenceScreen(frag);
+                                MLog.event("bose.frag17.screen",
+                                        "screen", screen == null ? "null"
+                                                : screen.getClass().getSimpleName(),
+                                        "children", screen == null ? -1
+                                                : PrefRef.getPreferenceCount(screen));
+                            } catch (Throwable t) {
+                                MLog.event("bose.frag17.screen_error",
+                                        "error", MLog.compactThrowable(t));
+                            }
+                        }
                         return result;
                     }
                     if ("detailActivityCreate".equals(label)) {
@@ -2732,6 +2813,27 @@ public final class HookModule extends XposedModule {
      * actually renders. The chain is bounded so a cyclic or pathological parent link cannot
      * hang the main thread.
      */
+    /**
+     * Renders a DTO's {@code children} field for the 17.6.3 whitelist log.
+     *
+     * <p>17.6.3 splits rendering in two: {@code a(mac)} picks the entry by productId or MAC,
+     * then {@code G9/H.u(String)} consults {@code getFunction()} before any section is built.
+     * A DTO with {@code function == null} or an empty {@code children} list therefore renders
+     * nothing — which is exactly the blank-page symptom, and it is visible here.
+     */
+    private static String describeChildren(Object dto) {
+        try {
+            Object v = readField(dto, "children");
+            if (v == null) return "null";
+            if (v instanceof java.util.Collection) {
+                return "size=" + ((java.util.Collection<?>) v).size();
+            }
+            return v.getClass().getSimpleName();
+        } catch (Throwable t) {
+            return "err:" + t.getClass().getSimpleName();
+        }
+    }
+
     private static Object attachedAncestor(Object start) {
         Object current = start;
         for (int depth = 0; depth < 24 && current != null; depth++) {
