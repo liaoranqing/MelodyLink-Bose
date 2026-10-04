@@ -1175,8 +1175,17 @@ public final class HookModule extends XposedModule {
                             Object target = chain.getThisObject();
                             Object arg = arity > 0 ? chain.getArg(0) : null;
                             int visibility = arg instanceof Integer ? (Integer) arg : -1;
+                            // 0.5.70 CRITICAL: skip no-op calls FIRST. The branches below call
+                            // setVisibility() on the same view, which RE-ENTERS this hook.
+                            // Without this guard the scroll-view protection re-set VISIBLE on
+                            // an already-VISIBLE view forever: infinite recursion on the main
+                            // thread = the 0.5.69 freeze ("blank, back button dead") followed
+                            // by the StackOverflow crash. A call whose value equals the
+                            // current visibility changes nothing, so arbitrating it is both
+                            // pointless and the recursion entry point.
                             if (target instanceof View
-                                    && isInsideDetailContainer((View) target)) {
+                                    && isInsideDetailContainer((View) target)
+                                    && ((View) target).getVisibility() != visibility) {
                                 if (visibility != View.VISIBLE) {
                                     recordHideCaller((View) target, visibility);
                                 }
@@ -4117,23 +4126,47 @@ public final class HookModule extends XposedModule {
             if (!boseBonded() || headerImageApplied) return;
             Object rowView = readField(holder, "itemView");
             if (!(rowView instanceof View)) return;
-            View row = (View) rowView;
-            Object parent = row.getParent();
-            if (!(parent instanceof android.view.ViewGroup)) return;
-            android.view.ViewGroup list = (android.view.ViewGroup) parent;
-            for (int i = 0; i < list.getChildCount(); i++) {
-                View child = list.getChildAt(i);
-                if (child == null
-                        || !child.getClass().getName().endsWith("OneSpaceHeaderPreference")) {
-                    continue;
-                }
-                if (replaceBoseOneSpaceHeaderImage(child)) {
-                    headerImageApplied = true;
+            // 0.5.70: the header row is NOT necessarily a sibling of the bound row — it can
+            // sit in a container ABOVE the RecyclerView. Walk up to the page root, then do a
+            // bounded DFS for the header class. One-shot diagnostics tell us next round
+            // whether the header exists at all on this page.
+            View root = (View) rowView;
+            for (int hop = 0; hop < 10; hop++) {
+                Object parent = root.getParent();
+                if (!(parent instanceof View)) break;
+                root = (View) parent;
+            }
+            View header = findHeaderPreference(root, 0, new int[]{0});
+            if (header == null) {
+                if (headerMissingLogged.compareAndSet(false, true)) {
+                    MLog.event("bose.image.header_missing",
+                            "root", root.getClass().getSimpleName());
                 }
                 return;
             }
+            if (replaceBoseOneSpaceHeaderImage(header)) {
+                headerImageApplied = true;
+            }
         } catch (Throwable ignored) {
         }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean headerMissingLogged =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static View findHeaderPreference(View view, int depth, int[] budget) {
+        if (view == null || depth > 10 || budget[0] > 400) return null;
+        budget[0]++;
+        if (view.getClass().getName().endsWith("OneSpaceHeaderPreference")) return view;
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            int n = Math.min(group.getChildCount(), 40);
+            for (int i = 0; i < n; i++) {
+                View hit = findHeaderPreference(group.getChildAt(i), depth + 1, budget);
+                if (hit != null) return hit;
+            }
+        }
+        return null;
     }
 
     private volatile boolean headerImageApplied;
