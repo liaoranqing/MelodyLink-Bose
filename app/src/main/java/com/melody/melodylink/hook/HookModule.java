@@ -974,11 +974,17 @@ public final class HookModule extends XposedModule {
             hook(method)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
-                boolean melodyEarphoneLiveData = isMelodyEarphoneLiveData(chain.getThisObject());
+                // 0.5.71 HOT-PATH FIX. The ANR main-thread dump (2026-10-04 18:55) shows this
+                // hook body executing on EVERY View.setVisibility call. isMelodyEarphoneLiveData
+                // walks the whole class chain via readField, which throws a NoSuchFieldException
+                // per level (fillInStackTrace is expensive). A View has no "l"/"b" field, so the
+                // cost was paid dozens of times per setVisibility for a value only two LiveData
+                // labels ever read. Compute it lazily, and only for those two labels.
+                boolean liveDataLabel = "melodyEarphoneLiveDataRequest".equals(label)
+                        || "melodyEarphoneLiveDataResponse".equals(label);
                 boolean traceCall = shouldTrace(label, chain, arity);
-                if ("melodyEarphoneLiveDataRequest".equals(label)
-                        || "melodyEarphoneLiveDataResponse".equals(label)) {
-                    traceCall = melodyEarphoneLiveData;
+                if (liveDataLabel) {
+                    traceCall = isMelodyEarphoneLiveData(chain.getThisObject());
                 }
                 if (traceCall) {
                     log(Log.INFO, TAG, event(label + " before " + signature(method) + " args=" + describeArgs(chain, arity)));
@@ -1170,70 +1176,71 @@ public final class HookModule extends XposedModule {
                         return result;
                     }
                     if ("detailSetVisibility".equals(label)) {
+                        // 0.5.71 REWRITE. The 2026-10-04 18:55 ANR main-thread dump proves the
+                        // 0.5.69 body recursed without end: setVisibility(VISIBLE) inside the
+                        // hook re-entered the hook, which set VISIBLE again, forever, freezing
+                        // the main thread (DetailMainActivity). The 0.5.70 "no-op" guard was
+                        // placed AFTER chain.proceed(), where getVisibility() always equals the
+                        // requested value, so it silently disabled ALL arbitration (blank page
+                        // would return). The robust fix is an explicit re-entry flag: every
+                        // setVisibility WE issue from inside this hook is wrapped, so the
+                        // re-entrant frame returns immediately. Recursion depth is bounded to 2
+                        // regardless of how the host and our arbitration alternate.
+                        View target = chain.getThisObject() instanceof View
+                                ? (View) chain.getThisObject() : null;
+                        Object arg = arity > 0 ? chain.getArg(0) : null;
+                        int visibility = arg instanceof Integer ? (Integer) arg : -1;
+                        boolean reentrant = Boolean.TRUE.equals(detailArbitrating.get());
                         Object result = chain.proceed();
+                        if (target == null || reentrant || visibility < 0) return result;
                         try {
-                            Object target = chain.getThisObject();
-                            Object arg = arity > 0 ? chain.getArg(0) : null;
-                            int visibility = arg instanceof Integer ? (Integer) arg : -1;
-                            // 0.5.70 CRITICAL: skip no-op calls FIRST. The branches below call
-                            // setVisibility() on the same view, which RE-ENTERS this hook.
-                            // Without this guard the scroll-view protection re-set VISIBLE on
-                            // an already-VISIBLE view forever: infinite recursion on the main
-                            // thread = the 0.5.69 freeze ("blank, back button dead") followed
-                            // by the StackOverflow crash. A call whose value equals the
-                            // current visibility changes nothing, so arbitrating it is both
-                            // pointless and the recursion entry point.
-                            if (target instanceof View
-                                    && isInsideDetailContainer((View) target)
-                                    && ((View) target).getVisibility() != visibility) {
-                                if (visibility != View.VISIBLE) {
-                                    recordHideCaller((View) target, visibility);
+                            if (!isInsideDetailContainer(target)) return result;
+                            if (visibility != View.VISIBLE) {
+                                recordHideCaller(target, visibility);
+                            }
+                            if (!boseBonded()) return result;
+
+                            int desired = visibility; // default: leave whatever the host set
+                            if ("melody_ui_detail_scrollview".equals(idName(target))) {
+                                // The one view whose GONE blanks the whole page.
+                                desired = View.VISIBLE;
+                            } else if (isFullSizeView(target)) {
+                                // Page-level arbitration, full-size views only (never a row):
+                                //   VISIBLE + no content inside -> overlay/mask -> force GONE
+                                //   non-VISIBLE + content inside -> page hide  -> force VISIBLE
+                                boolean onContentPath = contentPathNow(target);
+                                if (visibility == View.VISIBLE && !onContentPath) {
+                                    desired = View.GONE;
+                                } else if (visibility != View.VISIBLE && onContentPath) {
+                                    desired = View.VISIBLE;
                                 }
-                                // 0.5.67: continuous protection for the ONE view whose GONE
-                                // makes the whole page blank — the detail scroll container.
-                                // The revive ticks (300/800/2000/5000ms) cannot cover a hide
-                                // that happens later (the host re-runs its visibility pass on
-                                // LiveData emits), so the scroll view is flipped straight
-                                // back here, at the moment of the hide.
-                                if (boseBonded()
-                                        && "melody_ui_detail_scrollview".equals(idName((View) target))) {
-                                    ((View) target).setVisibility(View.VISIBLE);
+                            }
+
+                            if (desired != target.getVisibility()) {
+                                detailArbitrating.set(Boolean.TRUE);
+                                try {
+                                    target.setVisibility(desired);
+                                } finally {
+                                    detailArbitrating.set(Boolean.FALSE);
+                                }
+                                if (desired == View.VISIBLE
+                                        && "melody_ui_detail_scrollview".equals(idName(target))) {
                                     if (scrollReviveLogged.compareAndSet(false, true)) {
                                         MLog.event("bose.detail.scrollview_revived",
                                                 "blocked_visibility", visibility);
                                     }
-                                }
-                                // 0.5.69 — page-level visibility arbitration. User reports
-                                // #1 (page appears, then vanishes after a few seconds) and #5
-                                // (taps on our rows do nothing) share one mechanism: seconds
-                                // after our revive the host's async path flips a FULL-SIZE
-                                // view. Either it hides the content container (page gone) or
-                                // it shows a mask / empty-state layer that swallows touches.
-                                // Row-sized views are never touched, so the host keeps its
-                                // per-row logic; only page-sized containers are arbitrated:
-                                //   * VISIBLE on a view with NO content inside  -> overlay,
-                                //     force it back to GONE;
-                                //   * non-VISIBLE on a view WITH content inside -> page hide,
-                                //     force it back to VISIBLE.
-                                if (boseBonded() && isFullSizeView((View) target)) {
-                                    boolean onContentPath = contentPathNow((View) target);
-                                    if (visibility == View.VISIBLE && !onContentPath) {
-                                        ((View) target).setVisibility(View.GONE);
-                                        if (overlayBlockLogged.compareAndSet(false, true)) {
-                                            MLog.event("bose.detail.overlay_blocked",
-                                                    "view", ((View) target).getClass()
-                                                            .getSimpleName(),
-                                                    "id", idName((View) target));
-                                        }
-                                    } else if (visibility != View.VISIBLE && onContentPath) {
-                                        ((View) target).setVisibility(View.VISIBLE);
-                                        if (pageHideBlockLogged.compareAndSet(false, true)) {
-                                            MLog.event("bose.detail.page_hide_blocked",
-                                                    "view", ((View) target).getClass()
-                                                            .getSimpleName(),
-                                                    "id", idName((View) target),
-                                                    "blocked_visibility", visibility);
-                                        }
+                                } else if (desired == View.GONE) {
+                                    if (overlayBlockLogged.compareAndSet(false, true)) {
+                                        MLog.event("bose.detail.overlay_blocked",
+                                                "view", target.getClass().getSimpleName(),
+                                                "id", idName(target));
+                                    }
+                                } else {
+                                    if (pageHideBlockLogged.compareAndSet(false, true)) {
+                                        MLog.event("bose.detail.page_hide_blocked",
+                                                "view", target.getClass().getSimpleName(),
+                                                "id", idName(target),
+                                                "blocked_visibility", visibility);
                                     }
                                 }
                             }
@@ -1456,7 +1463,7 @@ public final class HookModule extends XposedModule {
                         return result;
                     }
                     if ("melodyEarphoneLiveDataResponse".equals(label)
-                            && melodyEarphoneLiveData) {
+                            && isMelodyEarphoneLiveData(chain.getThisObject())) {
                         log(Log.INFO, TAG, event("Melody foreground ANC LiveData response dispatching"));
                         Object result = chain.proceed();
                         Object value = readLiveDataValue(chain.getThisObject());
@@ -1465,7 +1472,7 @@ public final class HookModule extends XposedModule {
                         return result;
                     }
                     if ("melodyEarphoneLiveDataRequest".equals(label)
-                            && melodyEarphoneLiveData) {
+                            && isMelodyEarphoneLiveData(chain.getThisObject())) {
                         log(Log.INFO, TAG, event("Melody foreground ANC LiveData request dispatching"));
                         return chain.proceed();
                     }
@@ -3056,6 +3063,16 @@ public final class HookModule extends XposedModule {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private static final java.util.concurrent.atomic.AtomicBoolean pageHideBlockLogged =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * 0.5.71 re-entry guard for the detailSetVisibility hook. Set while WE call
+     * setVisibility from inside the hook, so the re-entrant frame returns after proceed
+     * instead of arbitrating again. Without it the host and our arbitration alternate
+     * forever (the 2026-10-04 18:55 ANR). setVisibility runs on the main thread, so a
+     * ThreadLocal is safe and needs no locking.
+     */
+    private static final ThreadLocal<Boolean> detailArbitrating =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     /**
      * True when the view spans (nearly) the whole window, i.e. it is a page-level container
