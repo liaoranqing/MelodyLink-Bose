@@ -311,7 +311,8 @@ final class PrefRef {
         if (container == null) return null;
         Object r = invoke(container, "getPreference", new Class[]{int.class}, new Object[]{index});
         if (r != null) return r;
-        Method accessor = findIndexedAccessor(container.getClass());
+        Method accessor = findIndexedAccessor(
+                container.getClass().getClassLoader(), container.getClass());
         if (accessor != null) {
             try {
                 accessor.setAccessible(true);
@@ -326,18 +327,17 @@ final class PrefRef {
     }
 
     /** One-int-parameter, reference-returning accessor: the renamed {@code getPreference}. */
-    private static Method findIndexedAccessor(Class<?> type) {
+    private static Method findIndexedAccessor(ClassLoader cl, Class<?> type) {
         for (Class<?> cls = type; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
             for (Method m : cls.getDeclaredMethods()) {
                 if (m.getParameterCount() != 1) continue;
                 if (m.getParameterTypes()[0] != int.class) continue;
                 Class<?> ret = m.getReturnType();
                 if (ret.isPrimitive() || ret == void.class) continue;
-                if (!Preference.class.isAssignableFrom(ret)
-                        && !ret.getName().startsWith("com.oplus.")
-                        && !ret.getName().startsWith("com.coui.")) {
-                    continue;
-                }
+                // No compile-time androidx reference: the module has no androidx dependency,
+                // the class only exists inside Melody's own ClassLoader (and R8 keeps the
+                // package name, so matching on it is safe).
+                if (!isPreferenceType(cl, ret)) continue;
                 try {
                     m.setAccessible(true);
                     return m;
@@ -346,6 +346,26 @@ final class PrefRef {
             }
         }
         return null;
+    }
+
+    /**
+     * True when {@code type} is a Preference or one of the host's Preference subclasses.
+     *
+     * <p>0.5.50 shipped a compile-time {@code androidx.preference.Preference.class}
+     * reference, which broke the CI build: the module has no androidx dependency and the
+     * class only exists inside Melody's own ClassLoader. Resolution is done reflectively
+     * against the host loader instead, with the COUI/oplus packages accepted as a fallback
+     * because R8 keeps package names.
+     */
+    private static boolean isPreferenceType(ClassLoader cl, Class<?> type) {
+        if (type == null) return false;
+        try {
+            Class<?> base = Class.forName("androidx.preference.Preference", false, cl);
+            if (base.isAssignableFrom(type)) return true;
+        } catch (Throwable ignored) {
+        }
+        String name = type.getName();
+        return name.startsWith("com.oplus.") || name.startsWith("com.coui.");
     }
 
     /**
