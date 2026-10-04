@@ -618,11 +618,17 @@ public final class HookModule extends XposedModule {
             // G9/Q declares: onCreate(Bundle) / onDestroy() / onHiddenChanged(Z) / t() /
             // u(LayoutInflater,ViewGroup) returning a RecyclerView, plus the static
             // y:Ljava/util/List; field.
+            // G9/Q.t() is the whole detail page: its entire body is
+            //     invoke-virtual {p0, v0}, Landroidx/preference/g;->s(I)V
+            // i.e. setPreferencesFromResource(0x7f140012). That single call inflates the
+            // XML into the preference tree, so it is the exact moment the tree becomes
+            // real. 0.5.54 evidence: onCreate still reported screen=null, because
+            // onCreate only sets a flag (ui/base/b.u = false).
             hookAny(loader, "detailFrag17",
                     "G9.Q#onCreate#1",
+                    "G9.Q#onViewCreated#2",
                     "G9.Q#onHiddenChanged#1",
-                    "G9.Q#t#0",
-                    "G9.Q#onDestroy#0");
+                    "G9.Q#t#0");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "f", 4, "deviceInfo");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "c", 1, "deviceRegistryAdd");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "d", 1, "deviceRegistryGet");
@@ -1107,7 +1113,10 @@ public final class HookModule extends XposedModule {
                         // G9/Q is the real host (0.5.54). At onCreate the PreferenceFragment
                         // and its screen exist, so this is the one place that can report what
                         // the host tree really contains — the fact 20+ versions never had.
-                        if (arity == 1 && frag != null) {
+                        // arity == 0 is t() = setPreferencesFromResource(0x7f140012):
+                        // the one call that actually inflates the XML into the tree, so
+                        // this is the first moment the screen can be non-null.
+                        if (frag != null) {
                             try {
                                 Object screen = PrefRef.getPreferenceScreen(frag);
                                 int n = screen == null ? -1 : PrefRef.getPreferenceCount(screen);
@@ -1851,17 +1860,31 @@ public final class HookModule extends XposedModule {
      * with the device-info block and the 1356x1356 model view) and then went back to an
      * empty container.
      */
+    /**
+     * Chooses which page's anchor to inject against.
+     *
+     * <p>0.5.55. The old test was {@code isAttachedToWindow()}, and 0.5.54 logs prove that is
+     * always false for the detail page: {@code anchor_attached=false parent_attached=false}
+     * even though {@code children=6} shows the tree is fully built. A preference's view is
+     * only created when the adapter binds it, and the detail page binds late, so the test
+     * could never succeed and the generic-settings anchor always won. Worse, that anchor's
+     * tree had already been torn down by {@code G9/Q.onDestroy} (which walks
+     * {@code PreferenceGroup.c} calling {@code h(int)} on every child), so the row was
+     * written into a dead tree and vanished on the next visit — exactly the reported symptom.
+     *
+     * <p>Selection is therefore by which page is in front, using the activity that is
+     * actually resumed, with attach as a tie-breaker only. Both candidates are still
+     * accepted when neither can be classified; injection is idempotent per tree, so trying
+     * both is safe.
+     */
     private Object pickLiveAnchor() {
-        for (Object candidate : new Object[]{noiseEffectRow, oneSpaceNoiseEffectRow}) {
-            if (candidate == null) continue;
-            try {
-                Object context = PrefRef.invokeNoArg(candidate, "getContext");
-                if (!(context instanceof View)) continue;
-                View view = (View) context;
-                if (view.isAttachedToWindow()) return candidate;
-            } catch (Throwable ignored) {
-            }
-        }
+        boolean detailFront = detailActivity != null
+                && !detailActivity.isFinishing()
+                && detailActivity.hasWindowFocus();
+        Object preferred = detailFront ? noiseEffectRow : oneSpaceNoiseEffectRow;
+        Object other = detailFront ? oneSpaceNoiseEffectRow : noiseEffectRow;
+        if (preferred != null) return preferred;
+        if (other != null) return other;
         return noiseEffectRow != null ? noiseEffectRow : oneSpaceNoiseEffectRow;
     }
 
@@ -2902,19 +2925,28 @@ public final class HookModule extends XposedModule {
     }
 
     private static Object attachedAncestor(Object start) {
+        // 0.5.55: a preference view is only created when the adapter binds it, so
+        // isAttachedToWindow() is false for every node of a freshly built page
+        // (0.5.54 measured anchor_attached=false with children=6). Requiring attachment
+        // here made this always return null, so the "promote to a visible ancestor" repair
+        // silently never ran. The parent chain is walked unconditionally and the topmost
+        // group is preferred: PreferenceScreen is the root the panel renders, so injecting
+        // there is always on-screen, which is exactly what melodylink-master did by finding
+        // a screen-level anchor with findPreferenceByTitle.
         Object current = start;
+        Object top = start;
         for (int depth = 0; depth < 24 && current != null; depth++) {
-            if (isPreferenceAttached(current)) return current;
             Object next;
             try {
                 next = PrefRef.getParent(current);
             } catch (Throwable t) {
-                return null;
+                break;
             }
-            if (next == null || next == current) return null;
+            if (next == null || next == current) break;
             current = next;
+            top = next;
         }
-        return null;
+        return top;
     }
 
     private void hideAncStrengthPreference(Object preference) {
