@@ -722,6 +722,40 @@ public final class HookModule extends XposedModule {
             // page this row is a plain RecyclerView item, not a Preference, so it can never
             // be reached through the preference-screen injection path.
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceNoisePreference", "onBindViewHolder", 1, "onespaceNoiseBind");
+            // 0.5.67 — THE ROOT CAUSE OF "降噪效果 STILL THERE", found in smali, not guessed.
+            //
+            // res/cS.xml (0x7f140003, the 通用设置 screen) declares:
+            //   OneSpaceNoisePreference      key=pref_noise_switch          <- the 3-state widget
+            //   COUIPreferenceCategory       key=pref_noise_menu_category   <- field v
+            //     COUIMenuPreference         key=pref_noise_menu            <- field w
+            //                              android:title=@7F11038A = "降噪效果"
+            // Both category and row default to isPreferenceVisible="false"; the ONLY things
+            // that ever turn them on are two methods of OneSpaceListFragment
+            // (smali2/com/oplus/melody/onespace/b.smali):
+            //   w(ZZ)V        :2001  v.setVisible(p2)
+            //   x(List,Z)V    :3144  "checkShowNoiseMenuItem set visible true!"
+            //                      v.setVisible(childrenMode non-empty)
+            // x() is invoked from OneSpaceListFragment$initObserver$1, a LiveData observer on
+            // WhitelistConfigDTO reading dto.getFunction().getNoiseReductionMode().
+            //
+            // That list is non-empty FOR BOSE ONLY BECAUSE OF US: injectBoseCatalogEntry clones
+            // the richest Enco entry (which carries a four-level noiseReductionMode) and
+            // fillMissingChildren copies donor children into it. So our own injected catalog
+            // row is what convinces the host that Bose supports 深度/均衡/轻度/智能切换.
+            //
+            // We must NOT clear noiseReductionMode instead: the very same list also drives
+            // initObserver$1's "checkShowNoiseCardItem", which is what makes
+            // pref_noise_switch (the three-state widget) visible. Clearing it would delete the
+            // widget — exactly the 0.5.65 regression the user reported.
+            //
+            // So the fix is to let the host run and then re-hide only the menu category, on
+            // every emit. Hiding the CATEGORY (not the switch) drops the "降噪效果" row from the
+            // adapter's flattened list and leaves the three-state widget untouched.
+            // hideAncStrengthPreference() already targets these two keys but only runs from
+            // detailPreferenceAdd, i.e. once at XML inflate time — long before x() re-shows
+            // them, which is why it never had any visible effect.
+            hookNamed(loader, "com.oplus.melody.onespace.b", "x", 2, "onespaceNoiseMenuCheck");
+            hookNamed(loader, "com.oplus.melody.onespace.b", "w", 2, "onespaceNoiseSwitchShow");
             // Product image. Confirmed against Melody 17.6.3 smali: b(String) is the
             // 3D-model loader and c()Z is a low-memory check — neither touches the photo,
             // which is why 0.5.x reported a successful replacement that never showed up.
@@ -999,6 +1033,54 @@ public final class HookModule extends XposedModule {
                         // (guarded by a marker tag) and the slider is never duplicated.
                         Object result = chain.proceed();
                         attachCncSliderUnderOneSpaceNoise(chain.getThisObject(), chain.getArg(0));
+                        // 0.5.67 third belt for the 降噪效果 suppression. This hook is the one
+                        // path PROVEN to fire on the 通用设置 page in every recent version
+                        // (the CNC slider has always attached through it), while the
+                        // b.x/b.w hooks sit on final methods of a final class — 0.5.33 logged
+                        // exactly that combination failing to hook once. Re-hiding the menu
+                        // category from here survives both failure modes, and it re-runs on
+                        // every rebind, i.e. after every LiveData-driven setVisible(true).
+                        suppressNoiseMenuCategory(chain.getThisObject());
+                        return result;
+                    }
+                    if ("onespaceNoiseMenuCheck".equals(label)
+                            || "onespaceNoiseSwitchShow".equals(label)) {
+                        // 0.5.67. OneSpaceListFragment.x(List,Z) = checkShowNoiseMenuItem and
+                        // w(ZZ) = checkShowNoiseCardItem, both driven by the
+                        // WhitelistConfigDTO LiveData. x() sets field v
+                        // (pref_noise_menu_category) visible whenever the DTO carries a
+                        // non-empty noiseReductionMode list — which our own injected catalog
+                        // clone does. Let the host finish, then hide the category again by
+                        // KEY so this survives every re-emit and every COUI notifyChanged.
+                        // The three-state widget (pref_noise_switch, field u) is deliberately
+                        // left alone: w(true)/initObserver show it from the same list, and
+                        // hiding it caused the 0.5.65 regression.
+                        Object result = chain.proceed();
+                        try {
+                            if (!boseBonded()) return result;
+                            Object frag = chain.getThisObject();
+                            int hidden = 0;
+                            for (String field : new String[]{"v", "w"}) {
+                                Object pref = readField(frag, field);
+                                if (pref == null) continue;
+                                String key = PrefRef.getKey(pref);
+                                if (!"pref_noise_menu_category".equals(key)
+                                        && !"pref_noise_menu".equals(key)) continue;
+                                PrefRef.setVisible(pref, false);
+                                hidden++;
+                            }
+                            if (hidden > 0 && ancMenuSuppressed.compareAndSet(false, true)) {
+                                MLog.event("bose.anco.menu_suppressed",
+                                        "label", label,
+                                        "hidden", hidden,
+                                        "visible_after",
+                                        PrefRef.isVisible(readField(frag, "v")));
+                            }
+                        } catch (Throwable t) {
+                            MLog.event("bose.anco.menu_suppress_error",
+                                    "label", label,
+                                    "error", MLog.compactThrowable(t));
+                        }
                         return result;
                     }
                     if ("detailPreferenceAdd".equals(label)) {
@@ -1089,6 +1171,22 @@ public final class HookModule extends XposedModule {
                             if (target instanceof View && visibility != View.VISIBLE
                                     && isInsideDetailContainer((View) target)) {
                                 recordHideCaller((View) target, visibility);
+                                // 0.5.67: continuous protection for the ONE view whose GONE
+                                // makes the whole page blank — the detail scroll container.
+                                // The revive ticks (300/800/2000/5000ms) cannot cover a hide
+                                // that happens later (the host re-runs its visibility pass on
+                                // LiveData emits), so the scroll view is flipped straight
+                                // back here, at the moment of the hide. Everything else inside
+                                // the container keeps the host's own logic: overlays and
+                                // spinners must still be able to hide themselves.
+                                if (boseBonded()
+                                        && "melody_ui_detail_scrollview".equals(idName((View) target))) {
+                                    ((View) target).setVisibility(View.VISIBLE);
+                                    if (scrollReviveLogged.compareAndSet(false, true)) {
+                                        MLog.event("bose.detail.scrollview_revived",
+                                                "blocked_visibility", visibility);
+                                    }
+                                }
                             }
                         } catch (Throwable ignored) {
                         }
@@ -1129,11 +1227,23 @@ public final class HookModule extends XposedModule {
                     if ("ancRowBind".equals(label)) {
                         // 0.5.66: the RecyclerView adapter callback, i.e. the only place a
                         // bound row view actually exists. arity 2 = (ViewHolder, position).
+                        //
+                        // 0.5.67 CRITICAL FIX — 0.5.66's body could NEVER work, proven from
+                        // smali (androidx/preference/m.smali + h.smali:1704-1809):
+                        //   * the ViewHolder m has fields a/b/c/d/e ONLY — there is no field
+                        //     "f", so readField(holder,"f") was always null → title="" →
+                        //     isEncoAncTitle never matched a single row;
+                        //   * itemView is an inherited FIELD (RecyclerView$E.itemView), not a
+                        //     method, so invokeNoArg(holder,"itemView") always threw → every
+                        //     call exited through bind_noview.
+                        // Correct reads, straight from h.onBindViewHolder itself:
+                        //   :1712  invoke-virtual {p0, p2}, h->e(I)Preference  ← the row's pref
+                        //   :1720  iget-object RecyclerView$E->itemView        ← the row's view
                         Object result = chain.proceed();
                         try {
                             Object holder = arity > 0 ? chain.getArg(0) : null;
                             if (holder == null || !boseBonded()) return result;
-                            Object rowView = PrefRef.invokeNoArg(holder, "itemView");
+                            Object rowView = readField(holder, "itemView");
                             if (!(rowView instanceof View)) {
                                 if (!ancBindNoView.compareAndSet(false, true)) {
                                     MLog.event("bose.anc.bind_noview",
@@ -1142,23 +1252,41 @@ public final class HookModule extends XposedModule {
                                 return result;
                             }
                             View view = (View) rowView;
-                            String title = "";
-                            try {
-                                Object pref = readField(holder, "f");
-                                if (pref != null) title = String.valueOf(PrefRef.getTitle(pref));
-                            } catch (Throwable ignored) {
+                            // adapter.e(position) is exactly what the host itself calls at
+                            // :1712 to fetch the preference for this row.
+                            Object pref = null;
+                            Object posArg = arity > 1 ? chain.getArg(1) : null;
+                            if (posArg instanceof Integer) {
+                                pref = PrefRef.invoke1Arg(chain.getThisObject(), "e",
+                                        int.class, posArg);
                             }
-                            // Only the Enco ANC row is collapsed. Matching on the row title is
-                            // what actually identifies it: 0.5.65 proved setVisible(false)
-                            // works (visible_after=false) but could not touch a view, and
-                            // 0.5.65's own attempt also removed the three-state ANC widget that
-                            // lives in the same preference. Collapsing by title keeps the widget
-                            // and drops only the "降噪效果" label row.
-                            if (isEncoAncTitle(title)) {
+                            String title = "";
+                            String key = "";
+                            if (pref != null) {
+                                title = String.valueOf(PrefRef.getTitle(pref));
+                                key = String.valueOf(PrefRef.getKey(pref));
+                            }
+                            // 0.5.67: match on KEY first — smali (OneSpaceListFragment /
+                            // res/cS.xml) proves the 通用设置 "降噪效果" row is
+                            // pref_noise_menu inside pref_noise_menu_category, and its title
+                            // resource is 0x7f11038a. The detail page's copy carries the same
+                            // title, so the title check stays as the second matcher. The
+                            // three-state widget (pref_noise_switch / OneSpaceNoisePreference)
+                            // has a different key AND a different title, so it is never hit.
+                            if ("pref_noise_menu".equals(key)
+                                    || "pref_noise_menu_category".equals(key)
+                                    || isEncoAncTitle(title)) {
+                                // View-level ONLY. Preference.setVisible here would run
+                                // notifyItemRemoved from inside the RecyclerView layout pass
+                                // ("Cannot call this method while RecyclerView is computing a
+                                // layout") and can crash the host. The preference-level hide
+                                // is owned by suppressNoiseMenuCategory and the b.x/b.w
+                                // hooks, which run outside the layout pass.
                                 view.setVisibility(View.GONE);
                                 view.setEnabled(false);
                                 if (!ancBindHidden.compareAndSet(false, true)) {
                                     MLog.event("bose.anc.bind_hidden",
+                                            "key", key,
                                             "title", title,
                                             "holder", holder.getClass().getSimpleName());
                                 }
@@ -2776,6 +2904,24 @@ public final class HookModule extends XposedModule {
                     "found", boseRowClasses.size(),
                     "classes", String.valueOf(boseRowClasses));
 
+            // 0.5.67: the decisive device evidence for the blank page is
+            //   bose.detail.sections dump=scroll[1] host0=id-1(LinearLayout)[1440x1529 vis=8]
+            //       {2 kids: RelativeLayout#melody_ui_device_info[1440x1357 vis=8] ...}
+            // i.e. the content IS built and measured (non-zero sizes) but the whole subtree
+            // was switched to GONE. 0.5.25 already diagnosed the same thing from the decor
+            // tree ("BOTH of those children are View.GONE"). The host hides what it cannot
+            // populate for a device with no catalog entry; un-hiding is safe because an
+            // empty row renders empty instead of crashing, and every retry tick re-applies it
+            // after the host's own hide passes (300/800/2000/5000ms in detailActivityCreate).
+            // Guarded by boseBonded(): detailActivityCreate fires for EVERY brand's detail
+            // page, and un-hiding rows on a real Enco page would fight the host's own logic.
+            if (boseBonded()) {
+                int revived = reviveGoneDetailViews(container, 0);
+                if (revived > 0) {
+                    MLog.event("bose.detail.revived", "count", revived);
+                }
+            }
+
             // 0.5.47: the container holds a NestedScrollView, not a RecyclerView, so the
             // detail page is a custom layout rather than a PreferenceFragment. Its
             // LinearLayout has two children and the second one is where sections would go —
@@ -2789,6 +2935,41 @@ public final class HookModule extends XposedModule {
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose detail summary fill failed", t);
         }
+    }
+
+    /**
+     * Switches GONE views back to VISIBLE inside the detail subtree.
+     *
+     * <p>0.5.67. Bounded walk (depth 10 / 600 nodes). Skips views with no measured size —
+     * those were never laid out (off-screen templates) and flipping them would be noise.
+     * Reports a one-line sample of what it revived so the next log shows whether the culprit
+     * was the scroll view itself, the device-info header, or the section host.
+     */
+    private static int revivedReported = 0;
+
+    private static int reviveGoneDetailViews(View view, int depth) {
+        if (view == null || depth > 10) return 0;
+        int revived = 0;
+        if (view.getVisibility() == View.GONE
+                && view.getWidth() > 0 && view.getHeight() > 0) {
+            view.setVisibility(View.VISIBLE);
+            revived++;
+            if (revivedReported < 6) {
+                revivedReported++;
+                MLog.event("bose.detail.revive_one",
+                        "view", view.getClass().getSimpleName(),
+                        "id", idName(view),
+                        "size", view.getWidth() + "x" + view.getHeight());
+            }
+        }
+        if (view instanceof ViewGroup && revived < 200) {
+            ViewGroup group = (ViewGroup) view;
+            int n = Math.min(group.getChildCount(), 60);
+            for (int i = 0; i < n; i++) {
+                revived += reviveGoneDetailViews(group.getChildAt(i), depth + 1);
+            }
+        }
+        return revived;
     }
 
     /** True when this view is a MelodyUiCOUIJumpPreference row or a subclass of it. */
@@ -3076,6 +3257,14 @@ public final class HookModule extends XposedModule {
 
     /** One-shot marker for the "holder has no itemView" case. */
     private static final java.util.concurrent.atomic.AtomicBoolean ancBindNoView =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** One-shot marker so the menu-category suppression is reported once per process. */
+    private static final java.util.concurrent.atomic.AtomicBoolean ancMenuSuppressed =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** One-shot marker so the scroll-view revive is reported once per process. */
+    private static final java.util.concurrent.atomic.AtomicBoolean scrollReviveLogged =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private void hideEncoAncRowsInTree(Object group) {
@@ -3799,6 +3988,69 @@ public final class HookModule extends XposedModule {
      * <p>Called on every {@code onBindViewHolder}, hence the tag guard: the host re-binds on
      * scroll and on state changes, and a second slider would be a visible duplicate.
      */
+    /**
+     * Hides the 通用设置 "降噪效果" category by walking the fragment that owns this row.
+     *
+     * <p>0.5.67. Three independent paths call this:
+     * <ol>
+     *   <li>{@code onespaceNoiseMenuCheck} — hooked straight onto
+     *       OneSpaceListFragment.x(List,Z) ("checkShowNoiseMenuItem"), the method that
+     *       turns the category visible on every WhitelistConfigDTO LiveData emit.</li>
+     *   <li>{@code onespaceNoiseBind} — OneSpaceNoisePreference.onBindViewHolder, the one
+     *       hook PROVEN to fire on this page in every recent version (the CNC slider has
+     *       always attached through it).</li>
+     *   <li>{@code hideAncStrengthPreference} — the old detailPreferenceAdd path, which
+     *       fires only once at XML inflate time and is therefore too early on its own.</li>
+     * </ol>
+     * All three end here, so the category is re-hidden after every show, no matter which
+     * hook actually resolved at runtime (0.5.33 proved final-class methods can fail to hook).
+     *
+     * <p>The walk is by KEY (pref_noise_menu_category / pref_noise_menu) over the screen the
+     * row belongs to, never by field name of the fragment: keys survive R8 renames between
+     * Melody releases, obfuscated field names do not. The three-state widget
+     * (pref_noise_switch) is deliberately never touched — hiding it was the 0.5.65
+     * regression.
+     */
+    private void suppressNoiseMenuCategory(Object preferenceRow) {
+        try {
+            if (preferenceRow == null || !boseBonded()) return;
+            Object tree = findOneSpacePreferenceTree(preferenceRow);
+            if (tree == null) return;
+            // This runs from OneSpaceNoisePreference.onBindViewHolder, i.e. INSIDE the
+            // RecyclerView layout pass. Preference.setVisible(false) on an attached row
+            // fires notifyItemRemoved right there, which RecyclerView rejects with
+            // "Cannot call this method while RecyclerView is computing a layout". The walk
+            // is deferred one main-loop tick so the hide happens outside the pass.
+            final Object root = tree;
+            mainHandler.post(() -> {
+                try {
+                    int hidden = 0;
+                    for (String key : new String[]{"pref_noise_menu_category", "pref_noise_menu"}) {
+                        Object pref = PrefRef.findPreferenceRecursive(root, key);
+                        if (pref == null) continue;
+                        if (PrefRef.isVisible(pref)) {
+                            PrefRef.setVisible(pref, false);
+                            hidden++;
+                        }
+                    }
+                    if (hidden > 0 && ancMenuSuppressed.compareAndSet(false, true)) {
+                        MLog.event("bose.anco.menu_suppressed",
+                                "path", "tree_walk",
+                                "hidden", hidden);
+                    }
+                } catch (Throwable t) {
+                    MLog.event("bose.anco.menu_suppress_error",
+                            "path", "tree_walk",
+                            "error", MLog.compactThrowable(t));
+                }
+            });
+        } catch (Throwable t) {
+            MLog.event("bose.anco.menu_suppress_error",
+                    "path", "tree_walk",
+                    "error", MLog.compactThrowable(t));
+        }
+    }
+
     private void attachCncSliderUnderOneSpaceNoise(Object preference, Object holder) {
         try {
             if (!boseBonded()) return;
@@ -6899,22 +7151,20 @@ public final class HookModule extends XposedModule {
             // NOT in the Melody APK: a full scan of both decompiled dex trees (tools/smali1,
             // tools/smali2) finds no j2.smali — only "je". "j2" is libxposed's own hook
             // trampoline, so the walk stopped on the framework's bridging frame and never
-            // reached the host. Frames are now filtered by "is this a Melody class" instead
-            // of "is this not java/android", and the whole app-side prefix is reported rather
-            // than just the first frame.
+            // reached the host.
+            // 0.5.67: the same failure repeated with caller=l.proceed:35 — "l" is another
+            // trampoline, and the blacklist ("not java./android.") let it through. Verified
+            // against the decompiled trees: the host APK has ZERO root-level (no-package)
+            // classes — every host class lives in a package (com.oplus.*, com.coui.*, or an
+            // R8 package like Ba/G9/A9/l9). So the filter is finally a WHITELIST as lesson #9
+            // demands: a frame is host code only if its class name contains a package
+            // separator and is not a known framework/module prefix. Single-token names
+            // (j2, l, c2 without dot…) can never match a host class.
             StringBuilder chain = new StringBuilder();
             int appFrames = 0;
             for (StackTraceElement frame : new Throwable().getStackTrace()) {
                 String cls = frame.getClassName();
-                if (cls.startsWith("java.") || cls.startsWith("android.")
-                        || cls.startsWith("androidx.") || cls.startsWith("dalvik.")
-                        || cls.startsWith("com.android.")
-                        || cls.contains("melodylink")
-                        || cls.contains("lspd") || cls.contains("xposed")
-                        || cls.contains("proxy") || cls.contains("Proxy")
-                        || cls.equals("j2") || cls.startsWith("j2.")) {
-                    continue;
-                }
+                if (!isHostFrame(cls)) continue;
                 if (chain.length() > 0) chain.append(" <- ");
                 chain.append(cls).append('.').append(frame.getMethodName())
                         .append(':').append(frame.getLineNumber());
@@ -6932,6 +7182,32 @@ public final class HookModule extends XposedModule {
                     "caller", where);
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * Whitelist test for "this stack frame belongs to the Melody host APK".
+     *
+     * <p>0.5.67. The host has no root-level classes (verified over tools/smali1+smali2), so
+     * a frame is host code only when the class name has a package part and that package is
+     * neither framework nor our own module nor the hook runtime. R8 packages are typically
+     * 1-2 lower/upper-case tokens (Ba, G9, A9, l9, d3…), everything else is com.oplus/com.coui.
+     */
+    private static boolean isHostFrame(String cls) {
+        if (cls == null) return false;
+        int dot = cls.lastIndexOf('.');
+        if (dot <= 0) return false;                    // root-level class: trampoline, not host
+        if (cls.startsWith("java.") || cls.startsWith("javax.")
+                || cls.startsWith("android.") || cls.startsWith("androidx.")
+                || cls.startsWith("dalvik.") || cls.startsWith("libcore.")
+                || cls.startsWith("com.android.") || cls.startsWith("sun.")
+                || cls.startsWith("kotlin.") || cls.startsWith("kotlinx.")
+                || cls.startsWith("io.github.libxposed")
+                || cls.contains("melodylink")
+                || cls.contains("lspd") || cls.contains("xposed")
+                || cls.contains("Proxy") || cls.contains("$$")) {
+            return false;
+        }
+        return true;
     }
 
     /** Collapses repeated hide call sites so one culprit yields one line. */
