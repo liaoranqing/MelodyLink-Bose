@@ -251,37 +251,121 @@ final class PrefRef {
         return false;
     }
 
+    /**
+     * Number of children in a group.
+     *
+     * <p>0.5.49 evidence: the detail page reported {@code children=0} immediately after a
+     * successful insert, and {@code getPreferenceCount()} does not exist under that name in
+     * Melody 17.6.3 — R8 renamed it (smali only has {@code h(int)}, {@code i()}, {@code f},
+     * {@code g}, {@code j}, {@code k}). The call therefore always failed and the count was
+     * hard-zero, which silently disabled the post-insert read-back check and every tree
+     * walk. Resolution is now by shape: a no-arg method returning a primitive int.
+     */
     static int getPreferenceCount(Object container) {
+        if (container == null) return 0;
         Object r = invokeNoArg(container, "getPreferenceCount");
         if (r instanceof Integer) return (Integer) r;
+        Method counter = findNoArgIntMethod(container.getClass());
+        if (counter != null) {
+            try {
+                counter.setAccessible(true);
+                Object v = counter.invoke(container);
+                if (v instanceof Integer) return (Integer) v;
+            } catch (Throwable ignored) {
+            }
+        }
         java.util.List<?> children = getChildrenList(container);
         return children == null ? 0 : children.size();
     }
 
+    /**
+     * Finds the no-arg int-returning accessor. On 17.6.3 the only such method on
+     * {@code PreferenceGroup} is the renamed {@code getPreferenceCount()}; the void
+     * {@code i()} and the CharSequence/int ones are excluded by the return type.
+     */
+    private static Method findNoArgIntMethod(Class<?> type) {
+        for (Class<?> cls = type; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
+            for (Method m : cls.getDeclaredMethods()) {
+                if (m.getParameterCount() != 0) continue;
+                if (m.getReturnType() != int.class) continue;
+                if (m.getName().equals("hashCode") || m.getName().equals("size")) continue;
+                try {
+                    m.setAccessible(true);
+                    return m;
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Child at {@code index}.
+     *
+     * <p>Same R8 renaming problem as {@link #getPreferenceCount}: {@code getPreference(int)}
+     * is gone in 17.6.3 (smali has it as {@code h(int)}), so the direct call always returned
+     * null and every indexed walk produced nothing. Resolved by shape now: one int parameter,
+     * reference return type.
+     */
     static Object getPreference(Object container, int index) {
+        if (container == null) return null;
         Object r = invoke(container, "getPreference", new Class[]{int.class}, new Object[]{index});
         if (r != null) return r;
+        Method accessor = findIndexedAccessor(container.getClass());
+        if (accessor != null) {
+            try {
+                accessor.setAccessible(true);
+                Object v = accessor.invoke(container, index);
+                if (v != null) return v;
+            } catch (Throwable ignored) {
+            }
+        }
         java.util.List<?> list = getChildrenList(container);
         if (list != null && index >= 0 && index < list.size()) return list.get(index);
         return null;
     }
 
+    /** One-int-parameter, reference-returning accessor: the renamed {@code getPreference}. */
+    private static Method findIndexedAccessor(Class<?> type) {
+        for (Class<?> cls = type; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
+            for (Method m : cls.getDeclaredMethods()) {
+                if (m.getParameterCount() != 1) continue;
+                if (m.getParameterTypes()[0] != int.class) continue;
+                Class<?> ret = m.getReturnType();
+                if (ret.isPrimitive() || ret == void.class) continue;
+                if (!Preference.class.isAssignableFrom(ret)
+                        && !ret.getName().startsWith("com.oplus.")
+                        && !ret.getName().startsWith("com.coui.")) {
+                    continue;
+                }
+                try {
+                    m.setAccessible(true);
+                    return m;
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
     /**
-     * The {@code List<Preference>} a PreferenceGroup keeps its children in.
+     * The list a PreferenceGroup keeps its children in.
      *
-     * <p>0.5.48: the old version skipped empty lists outright ({@code if (list.isEmpty())
-     * continue}), so a freshly created, genuinely empty group — exactly the state the
-     * detail page was in — reported "no children list" instead of "zero children", and the
-     * post-insert read-back check could not confirm anything. A declared
-     * {@code List<Preference>} field is now accepted on type alone (with an optional
-     * element check when it happens to be non-empty), so an empty group still resolves.
+     * <p>0.5.49: the field scan required the declared type to be exactly {@code List}, but
+     * 17.6.3 declares the backing store as {@code ArrayList}
+     * ({@code .field public final c:Ljava/util/ArrayList;}), so the scan never matched and
+     * every structural walk saw "no children" even right after a successful insert. The
+     * check is now {@code List.isAssignableFrom(declaredType)} so ArrayList and other
+     * implementations are found, and a non-empty list is validated by its first element
+     * exposing {@code getKey()} (every Preference does) so unrelated lists are skipped.
      */
     private static java.util.List<?> getChildrenList(Object container) {
         if (container == null) return null;
         for (Class<?> cls = container.getClass(); cls != null && cls != Object.class;
                 cls = cls.getSuperclass()) {
             for (Field f : cls.getDeclaredFields()) {
-                if (!java.util.List.class.equals(f.getType())) continue;
+                if (!java.util.List.class.isAssignableFrom(f.getType())) continue;
+                if (f.getType() == java.util.LinkedList.class) continue;
                 java.util.List<?> list = null;
                 try {
                     f.setAccessible(true);
@@ -323,18 +407,22 @@ final class PrefRef {
      * is why the detail page stayed blank from 0.4.x all the way to 0.5.48 while dozens of
      * unrelated probes were added.
      *
-     * <p>Resolution is therefore by <em>return type</em>: the real {@code addPreference}
-     * returns {@code void}. A boolean-returning overload is a query ("is this already a
-     * child?"), never an insertion, so it is only used as a last-resort fallback.
+     * <p>Semantics, read from the smali bodies: {@code f} is the silent insert,
+     * {@code k} is the insert that reports whether the child was accepted, and {@code j}
+     * is {@code k} followed by {@code notifyHierarchyChanged()} — so {@code j} is the one
+     * that actually refreshes the panel. All three insert; none of them is a query.
      *
-     * <p>Every attempt is verified by reading the child list back, because R8 may also
-     * rename {@code addPreference} itself in other host builds.
+     * <p>Order therefore matters: try {@code j} first (insert + refresh), then {@code f},
+     * then {@code k}. Every attempt is confirmed by reading the child list back — a
+     * successful reflection call does not prove anything was stored, and that false
+     * positive is what 0.5.49 reported as {@code landed=true} with {@code children=0}.
      */
     static boolean addPreference(Object container, Object pref) {
         if (container == null || pref == null) return false;
         ClassLoader cl = container.getClass().getClassLoader();
         Method voidCandidate = null;
-        java.util.List<Method> booleanCandidates = new java.util.ArrayList<>();
+        Method notifyingCandidate = null;
+        java.util.List<Method> plainCandidates = new java.util.ArrayList<>();
         for (Class<?> cls = container.getClass(); cls != null && cls != Object.class;
                 cls = cls.getSuperclass()) {
             for (Method m : cls.getDeclaredMethods()) {
@@ -346,17 +434,34 @@ final class PrefRef {
                     if (voidCandidate == null) voidCandidate = m;
                 } else if (m.getReturnType() == boolean.class
                         || m.getReturnType() == Boolean.class) {
-                    booleanCandidates.add(m);
+                    // j(Preference)Z is k(Preference)Z plus notifyHierarchyChanged(): it is
+                    // the only overload that makes the panel actually repaint, so it goes
+                    // first. k(Preference)Z is the plain insert and is kept as a fallback.
+                    if (isHierarchyNotifying(m)) {
+                        if (notifyingCandidate == null) notifyingCandidate = m;
+                    } else {
+                        plainCandidates.add(m);
+                    }
                 }
             }
         }
-        // Preferred: the void-returning insert. Fall back to a boolean overload only when
-        // no void one exists anywhere in the hierarchy.
-        if (voidCandidate != null && tryAdd(container, pref, voidCandidate)) return true;
-        for (Method candidate : booleanCandidates) {
+        // Every candidate is confirmed by reading the tree back. 0.5.49 returned true
+        // straight after a successful invoke() of the void method, so the log reported
+        // landed=true while children stayed 0 — the reflection call had succeeded but
+        // nothing was stored, and that false positive is exactly what kept the detail page
+        // blank even after the insert channel was unblocked.
+        if (notifyingCandidate != null && tryAdd(container, pref, notifyingCandidate)
+                && containsChild(container, pref)) {
+            return true;
+        }
+        if (voidCandidate != null && tryAdd(container, pref, voidCandidate)
+                && containsChild(container, pref)) {
+            return true;
+        }
+        for (Method candidate : plainCandidates) {
             if (tryAdd(container, pref, candidate) && containsChild(container, pref)) return true;
         }
-        // Last resort: a renamed insert that returns something non-boolean.
+        // Last resort: a renamed insert that returns something non-primitive.
         for (Class<?> cls = container.getClass(); cls != null && cls != Object.class;
                 cls = cls.getSuperclass()) {
             for (Method m : cls.getDeclaredMethods()) {
@@ -379,6 +484,29 @@ final class PrefRef {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /**
+     * Detects the {@code addPreference} overload that also refreshes the panel.
+     *
+     * <p>On 17.6.3 that is {@code j}, whose body is {@code k(p) -> boolean} followed by
+     * {@code notifyHierarchyChanged()}. The refresh is what makes a row appear, so this
+     * overload must be preferred. It is identified structurally — a call to a
+     * no-arg, void, zero-parameter method on {@code Preference} that is not otherwise
+     * reachable — rather than by the R8 name, which differs per host build.
+     */
+    private static boolean isHierarchyNotifying(Method candidate) {
+        try {
+            Class<?> prefType = Class.forName("androidx.preference.Preference", false,
+                    candidate.getDeclaringClass().getClassLoader());
+            for (Method callee : prefType.getMethods()) {
+                if (callee.getParameterCount() != 0) continue;
+                if (callee.getReturnType() != void.class) continue;
+                if (callee.getName().equals("notifyHierarchyChanged")) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     /** Read-back check: did the child actually land in the group's list? */

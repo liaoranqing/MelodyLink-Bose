@@ -1698,9 +1698,20 @@ public final class HookModule extends XposedModule {
     /** True once any of our keys is present on the live screen. */
     private boolean isBoseInjected() {
         Object screen = boseLiveScreen();
-        if (screen == null) return false;
-        return PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
-                || PrefRef.findPreferenceRecursive(screen, BOSE_CNC_CARD_KEY) != null;
+        if (screen != null) {
+            return PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
+                    || PrefRef.findPreferenceRecursive(screen, BOSE_CNC_CARD_KEY) != null;
+        }
+        // 0.5.49: the screen set is weak and mixes both pages, so after the user leaves and
+        // re-enters a page the screen could be gone while the page's actual group is alive
+        // — the slider then vanished on re-entry. Ask the same parent the installer writes
+        // into, which is the only tree that matters.
+        Object row = pickLiveAnchor();
+        if (row == null) return false;
+        Object parent = PrefRef.getParent(row);
+        if (parent == null) return false;
+        return PrefRef.findPreferenceRecursive(parent, BOSE_CNC_KEY) != null
+                || PrefRef.findPreferenceRecursive(parent, BOSE_CNC_CARD_KEY) != null;
     }
 
     /** The PreferenceScreen of the fragment currently hosting our anchor. */
@@ -1774,6 +1785,24 @@ public final class HookModule extends XposedModule {
                     noiseRow.getClass().getSimpleName());
             return false;
         }
+        // 0.5.49: on the detail page the anchor's parent is a bare COUIPreferenceCategory
+        // card that is not attached to any window, so an insert there lands in an off-screen
+        // subtree and the page stays blank even though landed=true. Walk up to the first
+        // ancestor that IS on screen and inject there. This mirrors the original
+        // melodylink-master approach, which always resolved a screen-level anchor
+        // (findPreferenceByTitle on the PreferenceScreen) instead of trusting the row's
+        // immediate parent.
+        int before = PrefRef.getPreferenceCount(parent);
+        Object screenLevel = attachedAncestor(parent);
+        boolean promoted = screenLevel != null && screenLevel != parent;
+        if (promoted) {
+            MLog.event("bose.inject.promoted",
+                    "from", parent.getClass().getSimpleName(),
+                    "from_children", before,
+                    "to", screenLevel.getClass().getSimpleName(),
+                    "to_children", PrefRef.getPreferenceCount(screenLevel));
+            parent = screenLevel;
+        }
         if (screen != null) boseInjectedScreens.add(screen);
         if (PrefRef.findPreferenceRecursive(parent, BOSE_CNC_KEY) != null) return true;
 
@@ -1814,7 +1843,15 @@ public final class HookModule extends XposedModule {
                 "landed", landed,
                 "parent", parent.getClass().getSimpleName(),
                 "children", PrefRef.getPreferenceCount(parent),
-                "detail_page", detailPage);
+                "detail_page", detailPage,
+                // 0.5.49: the detail page reported landed=true / page=detail every run and
+                // was still blank, while 通用设置 worked. The difference is that the detail
+                // page's parent is a bare COUIPreferenceCategory card: the insert succeeded
+                // into a group that is not on screen. Anchor attachment separates "written
+                // but off-screen" from "not written" in a single field.
+                "anchor_attached", isPreferenceAttached(noiseRow),
+                "parent_attached", isPreferenceAttached(parent),
+                "activity_shown", activity != null && !activity.isFinishing());
         if (!landed) return false;
         MLog.event("bose.injected",
                 "page", detailPage ? "detail" : "general",
@@ -2662,6 +2699,53 @@ public final class HookModule extends XposedModule {
         } catch (Throwable t) {
             return "error:" + MLog.compactThrowable(t);
         }
+    }
+
+    /**
+     * True when a preference's own view is currently attached to a window.
+     *
+     * <p>A preference only becomes a view once its group is bound, so a successful insert
+     * into a group that is not on screen leaves {@code isAttachedToWindow()} false. This is
+     * the discriminator between "written but invisible" and "never written" — the two
+     * failure modes that 0.5.49 could not tell apart, which is why the detail page reported
+     * {@code landed=true} on every run and stayed blank.
+     */
+    private static boolean isPreferenceAttached(Object preference) {
+        if (preference == null) return false;
+        try {
+            Object context = PrefRef.invokeNoArg(preference, "getContext");
+            if (!(context instanceof View)) return false;
+            return ((View) context).isAttachedToWindow();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Walks up the preference tree and returns the first ancestor whose view is attached to a
+     * window, or {@code null} when the whole chain is off-screen.
+     *
+     * <p>0.5.49: this is what separates the two pages. 通用设置 injected into
+     * {@code PreferenceScreen} and the slider appeared; the detail page injected into a
+     * {@code COUIPreferenceCategory} card that was never laid out, so the write went into a
+     * detached subtree. Injecting one level up puts the row in the container the panel
+     * actually renders. The chain is bounded so a cyclic or pathological parent link cannot
+     * hang the main thread.
+     */
+    private static Object attachedAncestor(Object start) {
+        Object current = start;
+        for (int depth = 0; depth < 24 && current != null; depth++) {
+            if (isPreferenceAttached(current)) return current;
+            Object next;
+            try {
+                next = PrefRef.getParent(current);
+            } catch (Throwable t) {
+                return null;
+            }
+            if (next == null || next == current) return null;
+            current = next;
+        }
+        return null;
     }
 
     private void hideAncStrengthPreference(Object preference) {
@@ -6181,7 +6265,15 @@ public final class HookModule extends XposedModule {
         try {
             View v = view;
             for (int guard = 0; v != null && guard < 40; guard++) {
-                if ("melody_ui_fragment_container".equals(idName(v))) return true;
+                String id = idName(v);
+                if ("melody_ui_fragment_container".equals(id)) return true;
+                // 0.5.49: requiring the fragment container lost the very events we wanted.
+                // DetailMainActivity hides its NestedScrollView during teardown/rebuild, when
+                // the view is no longer under melody_ui_fragment_container, so the detail
+                // page produced no hidden_by line at all while 通用设置 did. The host's own
+                // detail ids are matched directly instead.
+                if ("melody_ui_detail_scrollview".equals(id)) return true;
+                if (v.getClass().getSimpleName().contains("MelodyDetailModelView")) return true;
                 Object parent = v.getParent();
                 if (parent instanceof View) {
                     v = (View) parent;
