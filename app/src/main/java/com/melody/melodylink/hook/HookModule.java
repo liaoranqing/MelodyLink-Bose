@@ -624,11 +624,16 @@ public final class HookModule extends XposedModule {
             // XML into the preference tree, so it is the exact moment the tree becomes
             // real. 0.5.54 evidence: onCreate still reported screen=null, because
             // onCreate only sets a flag (ui/base/b.u = false).
-            hookAny(loader, "detailFrag17",
-                    "G9.Q#onCreate#1",
-                    "G9.Q#onViewCreated#2",
-                    "G9.Q#onHiddenChanged#1",
-                    "G9.Q#t#0");
+            // 0.5.58: hookAny binds only the FIRST candidate that resolves, so listing four
+            // methods under one label meant only onCreate was ever hooked — t(), the method
+            // that actually inflates the XML into the tree, was silently skipped. That is why
+            // 0.5.54-0.5.57 all reported screen=null: the hook fired before the tree existed.
+            // Each method now gets its own label so all four are really hooked.
+            hookNamed(loader, "G9.Q", "onCreate", 1, "detailFragCreate");
+            hookNamed(loader, "G9.Q", "onViewCreated", 2, "detailFragViewCreated");
+            hookNamed(loader, "G9.Q", "onHiddenChanged", 1, "detailFragHidden");
+            // t() is the whole page: setPreferencesFromResource(0x7f140012).
+            hookNamed(loader, "G9.Q", "t", 0, "detailFragBuild");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "f", 4, "deviceInfo");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "c", 1, "deviceRegistryAdd");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "d", 1, "deviceRegistryGet");
@@ -1102,36 +1107,41 @@ public final class HookModule extends XposedModule {
                         }
                         return result;
                     }
-                    if ("detailFrag17".equals(label)) {
+                    if (label.startsWith("detailFrag")) {
                         Object result = chain.proceed();
                         Object frag = chain.getThisObject();
-                        MLog.event("bose.frag17",
+                        // Reported only for the build step (t()) and the later view step.
+                        // onCreate runs BEFORE the tree exists, so a null screen there is
+                        // expected and reporting it only produced misleading output.
+                        boolean report = "detailFragBuild".equals(label)
+                                || "detailFragViewCreated".equals(label);
+                        MLog.event("bose.frag",
+                                "step", label,
                                 "class", frag == null ? "null"
-                                        : frag.getClass().getName(),
-                                "arg0", arity > 0 ? String.valueOf(chain.getArg(0)) : "-",
-                                "result", String.valueOf(result));
-                        // G9/Q is the real host (0.5.54). At onCreate the PreferenceFragment
-                        // and its screen exist, so this is the one place that can report what
-                        // the host tree really contains — the fact 20+ versions never had.
-                        // arity == 0 is t() = setPreferencesFromResource(0x7f140012):
-                        // the one call that actually inflates the XML into the tree, so
-                        // this is the first moment the screen can be non-null.
-                        if (frag != null) {
+                                        : frag.getClass().getName());
+                        if (report && frag != null) {
                             try {
                                 Object screen = PrefRef.getPreferenceScreen(frag);
                                 int n = screen == null ? -1 : PrefRef.getPreferenceCount(screen);
-                                MLog.event("bose.frag17.screen",
+                                MLog.event("bose.frag.screen",
+                                        "step", label,
                                         "screen", screen == null ? "null"
                                                 : screen.getClass().getSimpleName(),
                                         "children", n,
                                         "view_attached", frag instanceof View
                                                 && ((View) frag).isAttachedToWindow());
                                 if (screen != null && n > 0) {
-                                    MLog.event("bose.frag17.keys",
+                                    MLog.event("bose.frag.keys",
+                                            "step", label,
                                             "keys", describeChildKeys(screen, 0));
                                 }
+                                if (screen != null
+                                        && "detailFragBuild".equals(label)) {
+                                    hideEncoAncRowsInTree(screen);
+                                }
                             } catch (Throwable t) {
-                                MLog.event("bose.frag17.screen_error",
+                                MLog.event("bose.frag.screen_error",
+                                        "step", label,
                                         "error", MLog.compactThrowable(t));
                             }
                         }
@@ -2898,6 +2908,61 @@ public final class HookModule extends XposedModule {
      * earlier version worked from an empty or fabricated tree, so there was never a way to
      * tell "the host created sections" from "the host created nothing".
      */
+    /**
+     * Hides the Enco ANC rows directly in the assembled tree.
+     *
+     * <p>0.5.58. The previous approach relied on the {@code detailPreferenceAdd} hook, which
+     * only fires for preferences the host adds programmatically. The detail page's
+     * {@code NoiseReductionItem} is created by the runtime builder (A8/i.1), never through
+     * {@code addPreference}, so the hook never saw it: 0.5.57 device logs contain zero
+     * {@code bose.anco.row.hidden} events for it and the four-level ANC picker stayed on
+     * screen. Walking the finished tree covers every construction path.
+     *
+     * <p>Only nodes whose class is one of the two known noise rows are touched, and our own
+     * {@code melodylink.*} rows are never hidden. The walk is depth- and count-bounded.
+     */
+    private void hideEncoAncRowsInTree(Object group) {
+        int[] hidden = {0};
+        hideEncoAncRowsInTree(group, 0, hidden);
+        if (hidden[0] > 0) {
+            MLog.event("bose.anc.tree_hidden", "count", hidden[0]);
+        }
+    }
+
+    private void hideEncoAncRowsInTree(Object group, int depth, int[] hidden) {
+        if (group == null || depth > 6 || hidden[0] >= 8) return;
+        int count;
+        try {
+            count = Math.min(PrefRef.getPreferenceCount(group), 64);
+        } catch (Throwable t) {
+            return;
+        }
+        for (int i = 0; i < count; i++) {
+            Object child;
+            try {
+                child = PrefRef.getPreference(group, i);
+            } catch (Throwable t) {
+                continue;
+            }
+            if (child == null) continue;
+            try {
+                String key = PrefRef.getKey(child);
+                // Never touch our own rows.
+                if (key == null || !key.startsWith("melodylink.")) {
+                    if (isBoseNoiseRowClass(child.getClass().getName())) {
+                        PrefRef.setVisible(child, false);
+                        MLog.event("bose.anc.tree_row_hidden",
+                                "key", key,
+                                "class", child.getClass().getSimpleName());
+                        hidden[0]++;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            hideEncoAncRowsInTree(child, depth + 1, hidden);
+        }
+    }
+
     private static String describeChildKeys(Object group, int depth) {
         if (group == null || depth > 2) return "";
         StringBuilder sb = new StringBuilder();
