@@ -2073,14 +2073,24 @@ public final class HookModule extends XposedModule {
         try {
             if (noiseRow == null || !boseBonded()) return;
             String className = noiseRow.getClass().getName();
-            // 0.5.56: BOTH copies are now hidden. The detail page's copy used to be skipped
-            // on purpose ("it anchors the section, hiding it stopped the section binding",
-            // 0.5.11) — but 0.5.55 proved that concern obsolete: the section binds fine and
-            // shows children=6 whether or not the anchor row is visible. Leaving the Enco
-            // four-level ANC picker on screen is user-visible wrong behaviour, and it is the
-            // one thing the user kept reporting alongside the blank page.
+            // 0.5.57 CRITICAL FIX. This method is invoked from the detailPreferenceAdd hook for
+            // EVERY preference the host adds, not just noise rows. 0.5.56 removed the class
+            // filter in order to also hide the detail page copy, and that wiped out the entire
+            // general-settings page:
+            //   bose.anco.row.hidden key=pref_noise_switch
+            //   bose.anco.row.hidden key=pref_noise_menu_category
+            //   bose.anco.row.hidden key=pref_more_setting_category
+            //   bose.anco.row.hidden key=pref_disconnect
+            //   bose.anco.row.hidden key=footer_preference
+            //   bose.anco.row.hidden key=pref_device_info        <- the earbud entry itself
+            //   bose.anco.row.hidden key=melodylink.bose.cnc      <- our own slider
+            // Only 3 rows survived. The class check is load-bearing and must never be removed.
+            if (!isBoseNoiseRowClass(className)) return;
+            String rowKey = PrefRef.getKey(noiseRow);
+            // Belt and braces: never hide anything we injected ourselves.
+            if (rowKey != null && rowKey.startsWith("melodylink.")) return;
             PrefRef.setVisible(noiseRow, false);
-            MLog.event("bose.anco.row.hidden", "key", PrefRef.getKey(noiseRow),
+            MLog.event("bose.anco.row.hidden", "key", rowKey,
                     "class", className);
         } catch (Throwable t) {
             MLog.event("bose.anco.row.hide_failed", "error", MLog.compactThrowable(t));
