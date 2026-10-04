@@ -216,11 +216,21 @@ final class PrefRef {
         return null;
     }
 
-    /** Depth-first search for a key anywhere under a group. */
+    /**
+     * Depth-first search for a key anywhere under a group.
+     *
+     * <p><b>Why the extra key check.</b> 0.5.48 evidence: {@code bose.inject.inline ok=true}
+     * was logged while {@code bose.injected} never was, and {@code parent} reported
+     * {@code COUIPreferenceCategory/0} — a group with zero children. The caller treats a
+     * non-null return as "we already injected", so a false positive there permanently
+     * short-circuits the whole install path. COUI's own {@code findPreference} has
+     * "most recently added" fallback semantics, so a hit does not prove the key matches.
+     * Therefore the found object's own key is verified before it is accepted.
+     */
     static Object findPreferenceRecursive(Object container, String key) {
         if (container == null || key == null) return null;
         Object direct = findPreference(container, key);
-        if (direct != null) return direct;
+        if (direct != null && keyMatches(direct, key)) return direct;
         int count = getPreferenceCount(container);
         for (int i = 0; i < count; i++) {
             Object child = getPreference(container, i);
@@ -229,6 +239,16 @@ final class PrefRef {
             if (hit != null) return hit;
         }
         return null;
+    }
+
+    /** True only when {@code pref}'s own key is exactly {@code key}. */
+    private static boolean keyMatches(Object pref, String key) {
+        try {
+            Object r = invoke(pref, "getKey", new Class[0], new Object[0]);
+            if (r instanceof String) return key.equals(r);
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     static int getPreferenceCount(Object container) {
@@ -246,27 +266,39 @@ final class PrefRef {
         return null;
     }
 
-    /** The {@code List<Preference>} a PreferenceGroup keeps its children in. */
+    /**
+     * The {@code List<Preference>} a PreferenceGroup keeps its children in.
+     *
+     * <p>0.5.48: the old version skipped empty lists outright ({@code if (list.isEmpty())
+     * continue}), so a freshly created, genuinely empty group — exactly the state the
+     * detail page was in — reported "no children list" instead of "zero children", and the
+     * post-insert read-back check could not confirm anything. A declared
+     * {@code List<Preference>} field is now accepted on type alone (with an optional
+     * element check when it happens to be non-empty), so an empty group still resolves.
+     */
     private static java.util.List<?> getChildrenList(Object container) {
         if (container == null) return null;
         for (Class<?> cls = container.getClass(); cls != null && cls != Object.class;
                 cls = cls.getSuperclass()) {
             for (Field f : cls.getDeclaredFields()) {
                 if (!java.util.List.class.equals(f.getType())) continue;
+                java.util.List<?> list = null;
                 try {
                     f.setAccessible(true);
                     Object v = f.get(container);
-                    if (!(v instanceof java.util.List)) continue;
-                    java.util.List<?> list = (java.util.List<?>) v;
-                    if (list.isEmpty()) continue;
-                    Object first = list.get(0);
-                    if (first == null) continue;
-                    // A Preference child exposes getKey; anything else is some other list.
-                    try {
-                        first.getClass().getMethod("getKey");
-                        return list;
-                    } catch (Throwable ignored) {
-                    }
+                    if (v instanceof java.util.List) list = (java.util.List<?>) v;
+                } catch (Throwable ignored) {
+                }
+                if (list == null) continue;
+                // An empty list is accepted: it is the natural state of a group we are about
+                // to inject into, and there is no element to type-check.
+                if (list.isEmpty()) return list;
+                Object first = list.get(0);
+                if (first == null) continue;
+                // A Preference child exposes getKey; anything else is some other list.
+                try {
+                    first.getClass().getMethod("getKey");
+                    return list;
                 } catch (Throwable ignored) {
                 }
             }
@@ -275,13 +307,34 @@ final class PrefRef {
     }
 
     /**
-     * {@code boolean addPreference(Preference)} — the name is R8-renamed, so it is resolved by
-     * signature: any 1-arg method whose parameter extends {@code androidx.preference.Preference}.
+     * Adds a child preference to a group.
+     *
+     * <p><b>Why this is not a simple signature scan.</b> On Melody 17.6.3
+     * {@code androidx.preference.PreferenceGroup} declares THREE methods that take a single
+     * {@code Preference} (verified in smali):
+     * <pre>
+     *   .method public final f(Landroidx/preference/Preference;)V   // addPreference
+     *   .method public final j(Landroidx/preference/Preference;)Z
+     *   .method public final k(Landroidx/preference/Preference;)Z
+     * </pre>
+     * Every COUI category inherits all three. The previous implementation bailed out with
+     * "ambiguous, do not guess" as soon as it saw a second candidate, so
+     * {@code addPreference} returned {@code false} for every container on every run — which
+     * is why the detail page stayed blank from 0.4.x all the way to 0.5.48 while dozens of
+     * unrelated probes were added.
+     *
+     * <p>Resolution is therefore by <em>return type</em>: the real {@code addPreference}
+     * returns {@code void}. A boolean-returning overload is a query ("is this already a
+     * child?"), never an insertion, so it is only used as a last-resort fallback.
+     *
+     * <p>Every attempt is verified by reading the child list back, because R8 may also
+     * rename {@code addPreference} itself in other host builds.
      */
     static boolean addPreference(Object container, Object pref) {
         if (container == null || pref == null) return false;
         ClassLoader cl = container.getClass().getClassLoader();
-        Method target = null;
+        Method voidCandidate = null;
+        java.util.List<Method> booleanCandidates = new java.util.ArrayList<>();
         for (Class<?> cls = container.getClass(); cls != null && cls != Object.class;
                 cls = cls.getSuperclass()) {
             for (Method m : cls.getDeclaredMethods()) {
@@ -289,18 +342,57 @@ final class PrefRef {
                 String pn = m.getParameterTypes()[0].getName();
                 if (!pn.equals("androidx.preference.Preference")
                         && !isPreferenceSubclass(cl, pn)) continue;
-                if (target != null) return false; // ambiguous, do not guess
-                target = m;
+                if (m.getReturnType() == void.class) {
+                    if (voidCandidate == null) voidCandidate = m;
+                } else if (m.getReturnType() == boolean.class
+                        || m.getReturnType() == Boolean.class) {
+                    booleanCandidates.add(m);
+                }
             }
         }
-        if (target == null) return false;
+        // Preferred: the void-returning insert. Fall back to a boolean overload only when
+        // no void one exists anywhere in the hierarchy.
+        if (voidCandidate != null && tryAdd(container, pref, voidCandidate)) return true;
+        for (Method candidate : booleanCandidates) {
+            if (tryAdd(container, pref, candidate) && containsChild(container, pref)) return true;
+        }
+        // Last resort: a renamed insert that returns something non-boolean.
+        for (Class<?> cls = container.getClass(); cls != null && cls != Object.class;
+                cls = cls.getSuperclass()) {
+            for (Method m : cls.getDeclaredMethods()) {
+                if (m.getParameterCount() != 1) continue;
+                if (m.getReturnType() == void.class || m.getReturnType().isPrimitive()) continue;
+                String pn = m.getParameterTypes()[0].getName();
+                if (!pn.equals("androidx.preference.Preference")
+                        && !isPreferenceSubclass(cl, pn)) continue;
+                if (tryAdd(container, pref, m) && containsChild(container, pref)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean tryAdd(Object container, Object pref, Method target) {
         try {
             target.setAccessible(true);
-            Object result = target.invoke(container, pref);
-            return !(result instanceof Boolean) || (Boolean) result;
+            target.invoke(container, pref);
+            return true;
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /** Read-back check: did the child actually land in the group's list? */
+    private static boolean containsChild(Object container, Object pref) {
+        try {
+            int count = getPreferenceCount(container);
+            for (int i = 0; i < count; i++) {
+                if (getPreference(container, i) == pref) return true;
+            }
+            java.util.List<?> children = getChildrenList(container);
+            if (children != null && children.contains(pref)) return true;
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private static boolean isPreferenceSubclass(ClassLoader cl, String className) {

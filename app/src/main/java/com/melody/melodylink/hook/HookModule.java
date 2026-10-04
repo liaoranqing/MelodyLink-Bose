@@ -1663,11 +1663,10 @@ public final class HookModule extends XposedModule {
             try {
                 if (!boseBonded()) return;
                 MLog.event("bose.retry.tick", "attempt", attempt,
-                "bonded", boseBonded(),
-                "injected", isBoseInjected(),
-                "anchor_class", noiseEffectRow == null ? "null"
-                        : noiseEffectRow.getClass().getSimpleName());
-        if (isBoseInjected()) return;
+                        "bonded", boseBonded(),
+                        "injected", isBoseInjected(),
+                        "anchor_class", describeParent());
+                if (isBoseInjected()) return;
                 if (installBoseIntoLiveScreen()) {
                     scheduleBoseInjectionRecheck(attempt);
                     return;
@@ -1806,6 +1805,17 @@ public final class HookModule extends XposedModule {
         }
         if (detailPage) addBoseExtraCategory(parent, loader, activity, target + 10);
 
+        // 0.5.48: the install used to return true on the strength of the helpers' own return
+        // value alone, and the run logged ok=true while bose.injected never appeared and the
+        // group stayed empty. Read the tree back and only report success if our key is
+        // physically present. A silent false positive here is what froze the detail page.
+        boolean landed = PrefRef.findPreferenceRecursive(parent, BOSE_CNC_KEY) != null;
+        MLog.event("bose.inject.verified",
+                "landed", landed,
+                "parent", parent.getClass().getSimpleName(),
+                "children", PrefRef.getPreferenceCount(parent),
+                "detail_page", detailPage);
+        if (!landed) return false;
         MLog.event("bose.injected",
                 "page", detailPage ? "detail" : "general",
                 "anchor", PrefRef.getKey(noiseRow),
@@ -2638,12 +2648,17 @@ public final class HookModule extends XposedModule {
     /** Short description of where the injection would land, for log triage. */
     private String describeParent() {
         try {
-            Object row = noiseEffectRow;
+            // 0.5.48 read the "no_anchor"/"COUIPreferenceCategory/0" pair from noiseEffectRow
+            // while the install path had actually picked oneSpaceNoiseEffectRow, so the log
+            // claimed a zero-child group on the wrong page. Report the anchor the installer
+            // would really use.
+            Object row = pickLiveAnchor();
             if (row == null) return "no_anchor";
             Object parent = PrefRef.getParent(row);
             if (parent == null) return "no_parent";
             return parent.getClass().getSimpleName() + "/"
-                    + PrefRef.getPreferenceCount(parent);
+                    + PrefRef.getPreferenceCount(parent)
+                    + "/anchor=" + row.getClass().getSimpleName();
         } catch (Throwable t) {
             return "error:" + MLog.compactThrowable(t);
         }
@@ -6189,15 +6204,32 @@ public final class HookModule extends XposedModule {
      */
     private static void recordHideCaller(View target, int visibility) {
         try {
-            String where = "";
+            // 0.5.48 reported caller=j2.intercept for every single call site. That class is
+            // NOT in the Melody APK: a full scan of both decompiled dex trees (tools/smali1,
+            // tools/smali2) finds no j2.smali — only "je". "j2" is libxposed's own hook
+            // trampoline, so the walk stopped on the framework's bridging frame and never
+            // reached the host. Frames are now filtered by "is this a Melody class" instead
+            // of "is this not java/android", and the whole app-side prefix is reported rather
+            // than just the first frame.
+            StringBuilder chain = new StringBuilder();
+            int appFrames = 0;
             for (StackTraceElement frame : new Throwable().getStackTrace()) {
                 String cls = frame.getClassName();
                 if (cls.startsWith("java.") || cls.startsWith("android.")
-                        || cls.contains("melodylink")) continue;
-                where = cls + "." + frame.getMethodName() + ":" + frame.getLineNumber();
-                break;
+                        || cls.startsWith("androidx.") || cls.startsWith("dalvik.")
+                        || cls.startsWith("com.android.")
+                        || cls.contains("melodylink")
+                        || cls.contains("lspd") || cls.contains("xposed")
+                        || cls.contains("proxy") || cls.contains("Proxy")
+                        || cls.equals("j2") || cls.startsWith("j2.")) {
+                    continue;
+                }
+                if (chain.length() > 0) chain.append(" <- ");
+                chain.append(cls).append('.').append(frame.getMethodName())
+                        .append(':').append(frame.getLineNumber());
+                if (++appFrames >= 4) break;
             }
-            if (where.isEmpty()) where = "unknown";
+            String where = chain.length() == 0 ? "no_app_frame" : chain.toString();
             String key = where + "@" + target.getClass().getSimpleName() + "/v" + visibility;
             if (!hideCallSites.add(key)) return;
             if (hideCallSites.size() > 24) return; // the useful set is small
