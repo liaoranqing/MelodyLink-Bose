@@ -2073,11 +2073,12 @@ public final class HookModule extends XposedModule {
         try {
             if (noiseRow == null || !boseBonded()) return;
             String className = noiseRow.getClass().getName();
-            // Only the 通用设置 (OneSpace) copy is hidden. The detail page's copy
-            // (NoiseReductionItem) stays visible: on that page this preference is the
-            // anchor the whole surrounding section hangs off, and 0.5.11 measured that
-            // hiding it made the entire section stop binding (see below).
-            if (!NOISE_ROW_CLASS_ONESPACE.equals(className)) return;
+            // 0.5.56: BOTH copies are now hidden. The detail page's copy used to be skipped
+            // on purpose ("it anchors the section, hiding it stopped the section binding",
+            // 0.5.11) — but 0.5.55 proved that concern obsolete: the section binds fine and
+            // shows children=6 whether or not the anchor row is visible. Leaving the Enco
+            // four-level ANC picker on screen is user-visible wrong behaviour, and it is the
+            // one thing the user kept reporting alongside the blank page.
             PrefRef.setVisible(noiseRow, false);
             MLog.event("bose.anco.row.hidden", "key", PrefRef.getKey(noiseRow),
                     "class", className);
@@ -2925,28 +2926,25 @@ public final class HookModule extends XposedModule {
     }
 
     private static Object attachedAncestor(Object start) {
-        // 0.5.55: a preference view is only created when the adapter binds it, so
-        // isAttachedToWindow() is false for every node of a freshly built page
-        // (0.5.54 measured anchor_attached=false with children=6). Requiring attachment
-        // here made this always return null, so the "promote to a visible ancestor" repair
-        // silently never ran. The parent chain is walked unconditionally and the topmost
-        // group is preferred: PreferenceScreen is the root the panel renders, so injecting
-        // there is always on-screen, which is exactly what melodylink-master did by finding
-        // a screen-level anchor with findPreferenceByTitle.
-        Object current = start;
-        Object top = start;
-        for (int depth = 0; depth < 24 && current != null; depth++) {
-            Object next;
-            try {
-                next = PrefRef.getParent(current);
-            } catch (Throwable t) {
-                break;
-            }
-            if (next == null || next == current) break;
-            current = next;
-            top = next;
+        // 0.5.56 REGRESSION FIX. 0.5.55 made this walk unconditionally to the topmost group
+        // and it broke the panel: Melody froze when leaving the detail page and 通用设置 would
+        // not reopen. The rewrite also contradicted its own evidence — 0.5.54 already showed
+        // parent=COUIPreferenceCategory with children=6, i.e. the immediate parent is a real,
+        // fully populated group that the host itself created. Promoting from there to
+        // PreferenceScreen rewrote the root's order values and broke COUI's card grouping.
+        //
+        // Promotion is now limited to the case it was invented for: the immediate parent is
+        // missing or empty, so there is nothing to write into. A non-empty parent is used
+        // as-is, which is the behaviour that produced a working slider in 0.5.53-0.5.55.
+        if (start == null) return null;
+        if (PrefRef.getPreferenceCount(start) > 0) return null;
+        try {
+            Object next = PrefRef.getParent(start);
+            if (next == null || next == start) return null;
+            return PrefRef.getPreferenceCount(next) > 0 ? next : null;
+        } catch (Throwable t) {
+            return null;
         }
-        return top;
     }
 
     private void hideAncStrengthPreference(Object preference) {

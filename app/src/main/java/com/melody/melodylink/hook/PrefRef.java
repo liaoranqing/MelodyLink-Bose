@@ -162,16 +162,94 @@ final class PrefRef {
 
     // ------------------------------------------------------------------ tree
 
+    /**
+     * The PreferenceScreen a fragment is showing.
+     *
+     * <p>0.5.56.0.5.55 reported {@code screen=null} for the real detail fragment even though
+     * its tree was fully built ({@code children=6} elsewhere). Cause, from 17.6.3 smali:
+     * <pre>
+     * androidx/preference/g.smali
+     *   .field public b:Landroidx/preference/k;      <- PreferenceManager, NOT the screen
+     * androidx/preference/k.smali
+     *   .field public g:Landroidx/preference/PreferenceScreen;
+     * </pre>
+     * So the fragment holds a *manager* of type {@code k}, and the screen is one more level
+     * down. The old scan looked for a field literally typed {@code PreferenceScreen} on the
+     * fragment itself and gave up, returning null.
+     *
+     * <p>Resolution now: named getter, then the manager's own getter, then a bounded
+     * two-step field walk that stops at the first {@code PreferenceScreen}-typed field on
+     * either the fragment or its manager. R8 keeps the field's type name, so the type test
+     * is reliable even when the field's own name is obfuscated.
+     */
     static Object getPreferenceScreen(Object fragment) {
         if (fragment == null) return null;
         Object screen = invokeNoArg(fragment, "getPreferenceScreen");
         if (screen != null) return screen;
         Object manager = invokeNoArg(fragment, "getPreferenceManager");
+        if (manager == null) manager = findPreferenceManagerField(fragment);
         if (manager != null) {
             Object via = invokeNoArg(manager, "getPreferenceScreen");
             if (via != null) return via;
+            Object scanned = findScreenField(manager, 2);
+            if (scanned != null) return scanned;
         }
-        return findPreferenceScreenInFields(fragment, 3);
+        return findScreenField(fragment, 3);
+    }
+
+    /**
+     * Finds the PreferenceManager: any field whose type's name ends in
+     * {@code androidx.preference.k} after R8 renaming, or any type exposing a
+     * {@code getPreferenceScreen()}.
+     */
+    private static Object findPreferenceManagerField(Object owner) {
+        if (owner == null) return null;
+        for (Class<?> cls = owner.getClass(); cls != null && cls != Object.class;
+                cls = cls.getSuperclass()) {
+            for (Field f : cls.getDeclaredFields()) {
+                if (f.getType() == String.class || f.getType().isPrimitive()) continue;
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(owner);
+                    if (v == null) continue;
+                    if (v instanceof java.util.Collection || v instanceof Context) continue;
+                    if (hasScreenAccessor(v.getClass())) return v;
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasScreenAccessor(Class<?> type) {
+        for (Class<?> cls = type; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
+            for (Method m : cls.getDeclaredMethods()) {
+                if (m.getParameterCount() != 0) continue;
+                if (m.getReturnType() != void.class && !m.getReturnType().isPrimitive()) {
+                    if (m.getName().equals("getPreferenceScreen")) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Depth-limited search for a PreferenceScreen-typed field. */
+    private static Object findScreenField(Object owner, int depth) {
+        if (owner == null || depth <= 0) return null;
+        for (Class<?> cls = owner.getClass(); cls != null && cls != Object.class;
+                cls = cls.getSuperclass()) {
+            for (Field f : cls.getDeclaredFields()) {
+                if (f.getType().getName().equals("androidx.preference.PreferenceScreen")) {
+                    try {
+                        f.setAccessible(true);
+                        Object v = f.get(owner);
+                        if (v != null) return v;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /** R8 preserves type names, so a field scan beats a renamed getter. */
