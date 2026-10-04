@@ -574,6 +574,7 @@ public final class HookModule extends XposedModule {
             }
             ClassLoader loader = param.getClassLoader();
             melodyClassLoader = loader;
+            hostLoaderRef = loader;
             if (isPrimaryProcess()) installProviderBridge(loader);
             hookAny(loader, "whitelist",
                     "com.oplus.melody.common.util.V#a#3",
@@ -1970,6 +1971,15 @@ public final class HookModule extends XposedModule {
         }
         int anchorOrder = PrefRef.getOrder(noiseRow);
         int target = anchorOrder < 0 ? 0 : anchorOrder + 1;
+        // 0.5.61: the detail page orders its sections from a STATIC table on G9/Q
+        // (field y == [disconnect, guide, product, battery, noise, devices, sound, ai,
+        // control, game]). settingListChanged in A9/f does y.indexOf(key) and feeds the
+        // result straight into setOrder(), so a key the table does not contain gets -1.
+        // Registering our keys there makes the host place them like any native section
+        // instead of leaving them outside the panel.
+        registerSectionKeys(detailPage ? BOSE_CNC_KEY : null,
+                detailPage ? BOSE_CNC_CARD_KEY : null,
+                detailPage ? BOSE_EXTRA_CATEGORY_KEY : null);
         // Make room before inserting, otherwise the new rows collide with the host's own
         // order values and COUI merges or drops entries.
         PrefRef.shiftPreferenceOrders(parent, target, +40);
@@ -1989,11 +1999,23 @@ public final class HookModule extends XposedModule {
         // group stayed empty. Read the tree back and only report success if our key is
         // physically present. A silent false positive here is what froze the detail page.
         boolean landed = PrefRef.findPreferenceRecursive(parent, BOSE_CNC_KEY) != null;
+        // 0.5.61: 0.5.60 finally produced a real screen report and it exposes the ordering
+        // rule. 17.6.3 DetailMainActivity's settingListChanged (A9/f) does:
+        //     PreferenceGroup.f(child);
+        //     child.setKey(key);
+        //     G9/Q.y.indexOf(key) -> child.setOrder(result)
+        // where G9/Q.y is a STATIC section table:
+        //     [disconnect, guide, product, battery, noise, devices, sound, ai, control, game]
+        // A key that is not in that table gets indexOf == -1, i.e. order = -1. Our rows use
+        // "melodylink.*" keys, so they always land outside the host ordering and COUI can drop
+        // them. This report shows the orders that actually stuck.
         MLog.event("bose.inject.verified",
                 "landed", landed,
                 "parent", parent.getClass().getSimpleName(),
                 "children", PrefRef.getPreferenceCount(parent),
                 "detail_page", detailPage,
+                "target_order", target,
+                "orders", describeChildOrders(parent),
                 // 0.5.49: the detail page reported landed=true / page=detail every run and
                 // was still blank, while 通用设置 worked. The difference is that the detail
                 // page's parent is a bare COUIPreferenceCategory card: the insert succeeded
@@ -2968,6 +2990,93 @@ public final class HookModule extends XposedModule {
             }
             hideEncoAncRowsInTree(child, depth + 1, hidden);
         }
+    }
+
+    /**
+     * Lists each child's order value, so a wrong or negative order is visible.
+     *
+     * <p>0.5.61. The host orders the detail page from a static table (G9/Q.y); anything the
+     * table does not know gets {@code indexOf == -1}. Reporting the real values is the only
+     * way to tell "the row is present but ordered out of the panel" from "the row is absent".
+     */
+    /**
+     * Appends our section keys to the host's static ordering table {@code G9/Q.y}.
+     *
+     * <p>0.5.61. The detail page sorts sections with {@code y.indexOf(key)} →
+     * {@code setOrder}. Keys missing from the table receive {@code -1} and COUI drops or
+     * misplaces them, which is why every injected row reported {@code landed=true} yet the
+     * page stayed blank. The table is a {@code List<String>} static field, so the values are
+     * added reflectively and are shared with the host for the rest of the process.
+     *
+     * <p>Order matters: the extra categories are appended after the native ones, so they
+     * render at the bottom of the page rather than displacing a host section.
+     */
+    private static void registerSectionKeys(String... keys) {
+        try {
+            // melodyClassLoader is an instance field; a static method cannot touch it.
+            ClassLoader host = hostLoaderRef;
+            if (host == null) {
+                MLog.w("section key registration skipped: host loader unknown");
+                return;
+            }
+            Class<?> type = Class.forName("G9.Q", false, host);
+            Object table = null;
+            for (Field f : type.getDeclaredFields()) {
+                if (f.getType() != java.util.List.class) continue;
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(null);
+                    if (v instanceof java.util.List) {
+                        table = v;
+                        break;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            if (!(table instanceof java.util.List)) {
+                MLog.w("section table not found on G9.Q");
+                return;
+            }
+            @SuppressWarnings("unchecked")
+            java.util.List<Object> list = (java.util.List<Object>) table;
+            int added = 0;
+            for (String key : keys) {
+                if (key == null) continue;
+                if (list.contains(key)) continue;
+                try {
+                    list.add(key);
+                    added++;
+                } catch (Throwable ignored) {
+                }
+            }
+            if (added > 0) {
+                MLog.event("bose.section_keys_added",
+                        "count", added, "size", list.size());
+            }
+        } catch (Throwable t) {
+            MLog.w("section key registration failed: " + MLog.compactThrowable(t));
+        }
+    }
+
+    /** Host ClassLoader captured when the hooks were installed. */
+    private static volatile ClassLoader hostLoaderRef;
+
+    private static String describeChildOrders(Object group) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            int count = Math.min(PrefRef.getPreferenceCount(group), 24);
+            for (int i = 0; i < count; i++) {
+                Object child = PrefRef.getPreference(group, i);
+                if (child == null) continue;
+                String key = PrefRef.getKey(child);
+                if (sb.length() > 0) sb.append(' ');
+                sb.append(key == null ? "null" : key)
+                  .append('=').append(PrefRef.getOrder(child));
+            }
+        } catch (Throwable t) {
+            sb.append("err:").append(t.getClass().getSimpleName());
+        }
+        return sb.toString().trim();
     }
 
     private static String describeChildKeys(Object group, int depth) {
