@@ -642,12 +642,17 @@ public final class HookModule extends XposedModule {
             // been bound yet at sweep time, so there was no view to collapse. The bind happens
             // later, per RecyclerView pass, which is why the picker came back. Hiding the row
             // again right after every bind closes the loop.
-            hookNamed(loader,
-                    "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem",
-                    "onBindViewHolder", 1, "detailAncBind");
-            hookNamed(loader,
-                    "com.oplus.melody.onespace.items.OneSpaceNoisePreference",
-                    "onBindViewHolder", 1, "onespaceAncBind");
+            // 0.5.66: 0.5.65 hooked NoiseReductionItem.onBindViewHolder and it never fired
+            // (no bose.anc.bind_hidden event at all, and no hook.miss either, so the hook was
+            // registered). Reason found in smali: nothing in the APK ever *calls*
+            // Preference.onBindViewHolder with a preference receiver — only
+            // invoke-super chains exist. The real entry point is the RecyclerView adapter:
+            //     androidx/preference/h.smali:1704
+            //       onBindViewHolder(RecyclerView$E, I)V
+            //       :1809 invoke-virtual {p1}, Landroidx/preference/Preference;->onBindViewHolder(...)
+            // So the adapter method is hooked instead, and the row view is taken straight from
+            // the ViewHolder's itemView, which always exists at that point.
+            hookNamed(loader, "androidx.preference.h", "onBindViewHolder", 2, "ancRowBind");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "f", 4, "deviceInfo");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "c", 1, "deviceRegistryAdd");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "d", 1, "deviceRegistryGet");
@@ -1121,54 +1126,41 @@ public final class HookModule extends XposedModule {
                         }
                         return result;
                     }
-                    if ("onespaceAncBind".equals(label)) {
-                        // 0.5.65: same reasoning for 通用设置, where the "降噪效果" row the
-                        // user keeps seeing actually lives. Its onBindViewHolder is declared
-                        // final on OneSpaceNoisePreference, which is still hookable.
+                    if ("ancRowBind".equals(label)) {
+                        // 0.5.66: the RecyclerView adapter callback, i.e. the only place a
+                        // bound row view actually exists. arity 2 = (ViewHolder, position).
                         Object result = chain.proceed();
                         try {
-                            Object pref = chain.getThisObject();
-                            if (pref != null && boseBonded()) {
-                                PrefRef.setVisible(pref, false);
-                                Object view = PrefRef.invokeNoArg(pref, "getView");
-                                boolean gone = false;
-                                if (view instanceof View) {
-                                    ((View) view).setVisibility(View.GONE);
-                                    ((View) view).setEnabled(false);
-                                    gone = true;
+                            Object holder = arity > 0 ? chain.getArg(0) : null;
+                            if (holder == null || !boseBonded()) return result;
+                            Object rowView = PrefRef.invokeNoArg(holder, "itemView");
+                            if (!(rowView instanceof View)) {
+                                if (!ancBindNoView.compareAndSet(false, true)) {
+                                    MLog.event("bose.anc.bind_noview",
+                                            "holder", holder.getClass().getSimpleName());
                                 }
-                                if (!onespaceBindReported.compareAndSet(false, true)) {
-                                    MLog.event("bose.anc.onespace_bind_hidden",
-                                            "class", pref.getClass().getSimpleName(),
-                                            "view_gone", gone);
-                                }
+                                return result;
                             }
-                        } catch (Throwable t) {
-                            MLog.event("bose.anc.onespace_bind_error",
-                                    "error", MLog.compactThrowable(t));
-                        }
-                        return result;
-                    }
-                    if ("detailAncBind".equals(label)) {
-                        // Runs on every RecyclerView pass, so it is idempotent by nature: the
-                        // row is re-hidden each time it is bound. This is the only point where
-                        // a real View exists, which the tree sweep could not use.
-                        Object result = chain.proceed();
-                        try {
-                            Object pref = chain.getThisObject();
-                            if (pref != null && boseBonded()) {
-                                PrefRef.setVisible(pref, false);
-                                Object view = PrefRef.invokeNoArg(pref, "getView");
-                                boolean gone = false;
-                                if (view instanceof View) {
-                                    ((View) view).setVisibility(View.GONE);
-                                    ((View) view).setEnabled(false);
-                                    gone = true;
-                                }
-                                if (!ancBindReported.compareAndSet(false, true)) {
+                            View view = (View) rowView;
+                            String title = "";
+                            try {
+                                Object pref = readField(holder, "f");
+                                if (pref != null) title = String.valueOf(PrefRef.getTitle(pref));
+                            } catch (Throwable ignored) {
+                            }
+                            // Only the Enco ANC row is collapsed. Matching on the row title is
+                            // what actually identifies it: 0.5.65 proved setVisible(false)
+                            // works (visible_after=false) but could not touch a view, and
+                            // 0.5.65's own attempt also removed the three-state ANC widget that
+                            // lives in the same preference. Collapsing by title keeps the widget
+                            // and drops only the "降噪效果" label row.
+                            if (isEncoAncTitle(title)) {
+                                view.setVisibility(View.GONE);
+                                view.setEnabled(false);
+                                if (!ancBindHidden.compareAndSet(false, true)) {
                                     MLog.event("bose.anc.bind_hidden",
-                                            "class", pref.getClass().getSimpleName(),
-                                            "view_gone", gone);
+                                            "title", title,
+                                            "holder", holder.getClass().getSimpleName());
                                 }
                             }
                         } catch (Throwable t) {
@@ -2201,7 +2193,13 @@ public final class HookModule extends XposedModule {
             String rowKey = PrefRef.getKey(noiseRow);
             // Belt and braces: never hide anything we injected ourselves.
             if (rowKey != null && rowKey.startsWith("melodylink.")) return;
-            PrefRef.setVisible(noiseRow, false);
+            // 0.5.66 REGRESSION FIX: 0.5.65 hid the whole preference, and because the Enco
+            // picker and the three-state widget (降噪 /关闭 / 通透) live in the SAME
+            // preference, the user lost the widget. The preference must stay visible; only the
+            // "降噪效果" label row is collapsed, and that happens in ancRowBind by title.
+            if (NOISE_EFFECT_TITLE.equals(String.valueOf(PrefRef.getTitle(noiseRow)))) {
+                return;
+            }
             // 0.5.59: setVisible returning without error is not proof — 0.5.58 device logs show
             // bose.anco.row.hidden fired for pref_noise_switch yet the "降噪效果" title was
             // still drawn. Reading the flag back separates "the setter did nothing" from
@@ -3073,11 +3071,11 @@ public final class HookModule extends XposedModule {
     private volatile boolean ancSweepScheduled;
 
     /** One-shot marker so the bind-time hide is reported once, not on every pass. */
-    private static final java.util.concurrent.atomic.AtomicBoolean ancBindReported =
+    private static final java.util.concurrent.atomic.AtomicBoolean ancBindHidden =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    /** One-shot marker for the 通用设置 bind-time hide. */
-    private static final java.util.concurrent.atomic.AtomicBoolean onespaceBindReported =
+    /** One-shot marker for the "holder has no itemView" case. */
+    private static final java.util.concurrent.atomic.AtomicBoolean ancBindNoView =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private void hideEncoAncRowsInTree(Object group) {
@@ -3120,12 +3118,12 @@ public final class HookModule extends XposedModule {
                         // is therefore collapsed as well, which works regardless of what the
                         // adapter consults, and the preference is disabled so no click target
                         // remains.
-                        View rowView = PrefRef.invokeNoArg(child, "getView") instanceof View
-                                ? (View) PrefRef.invokeNoArg(child, "getView") : null;
-                        if (rowView != null) {
-                            rowView.setVisibility(View.GONE);
-                            rowView.setEnabled(false);
-                        }
+                        // 0.5.66: the view collapse is REMOVED here. 0.5.65 logs showed
+                        // view_gone=false — getView() is null at sweep time, so it never
+                        // fired; and had it fired it would have taken the three-state widget
+                        // down with it, since both live in the same preference. The collapse
+                        // now happens in ancRowBind, which runs per row and matches on title.
+                        View rowView = null;
                         MLog.event("bose.anc.tree_row_hidden",
                                 "key", key,
                                 "class", child.getClass().getSimpleName(),
@@ -3242,6 +3240,21 @@ public final class HookModule extends XposedModule {
 
     /** Host ClassLoader captured when the hooks were installed. */
     private static volatile ClassLoader hostLoaderRef;
+
+    /**
+     * True for the "降噪效果" label row, matched by its visible title.
+     *
+     * <p>0.5.66. The Enco four-level ANC picker and the three-state widget
+     * (降噪 / 关闭 / 通透) live in the SAME preference, so hiding the preference
+     * removed both — the user reported the widget disappearing. Only the label row
+     * should go, so the match is on the title text and the view collapse happens
+     * after the adapter has finished binding, never on the preference itself.
+     */
+    private static boolean isEncoAncTitle(String title) {
+        if (title == null) return false;
+        String t = title.trim();
+        return NOISE_EFFECT_TITLE.equals(t) || "ANC \u6548\u679c".equals(t);
+    }
 
     private static String describeChildOrders(Object group) {
         StringBuilder sb = new StringBuilder();
