@@ -1136,9 +1136,13 @@ public final class HookModule extends XposedModule {
                                             "step", label,
                                             "keys", describeChildKeys(screen, 0));
                                 }
-                                if (screen != null
-                                        && "detailFragBuild".equals(label)) {
-                                    hideEncoAncRowsInTree(screen);
+                                if (screen != null) {
+                                    // 0.5.62: t() reports children=1, so at that moment the
+                                    // tree holds only its root; the real sections are added by
+                                    // the host afterwards through settingListChanged. Walking
+                                    // here found nothing and never ran again. The walk is
+                                    // therefore deferred and retried a few times.
+                                    scheduleAncTreeSweep(screen);
                                 }
                             } catch (Throwable t) {
                                 MLog.event("bose.frag.screen_error",
@@ -1977,9 +1981,17 @@ public final class HookModule extends XposedModule {
         // result straight into setOrder(), so a key the table does not contain gets -1.
         // Registering our keys there makes the host place them like any native section
         // instead of leaving them outside the panel.
-        registerSectionKeys(detailPage ? BOSE_CNC_KEY : null,
-                detailPage ? BOSE_CNC_CARD_KEY : null,
-                detailPage ? BOSE_EXTRA_CATEGORY_KEY : null);
+        if (detailPage) {
+            // The table has to contain BOTH our own keys and the key of the anchor we are
+            // inserting next to. 0.5.61 device logs show the detail page uses plain class
+            // names as section keys ("NoiseReductionItem", "pref_device_info") while the
+            // static table lists short names ("noise", "product", ...), so indexOf() on a
+            // real section already returns -1 and the host orders everything to 0.
+            // Registering the anchor's key too keeps relative ordering intact once our rows
+            // are placed after it.
+            registerSectionKeys(BOSE_CNC_KEY, BOSE_CNC_CARD_KEY, BOSE_EXTRA_CATEGORY_KEY,
+                    PrefRef.getKey(noiseRow));
+        }
         // Make room before inserting, otherwise the new rows collide with the host's own
         // order values and COUI merges or drops entries.
         PrefRef.shiftPreferenceOrders(parent, target, +40);
@@ -2950,6 +2962,44 @@ public final class HookModule extends XposedModule {
      * <p>Only nodes whose class is one of the two known noise rows are touched, and our own
      * {@code melodylink.*} rows are never hidden. The walk is depth- and count-bounded.
      */
+    /**
+     * Retries the ANC sweep after the host has finished adding its sections.
+     *
+     * <p>0.5.62. At {@code detailFragBuild} the screen reports {@code children=1} (just the
+     * root), because the sections are appended afterwards by {@code settingListChanged}.
+     * A single walk at that point therefore had nothing to hide and was never repeated —
+     * hence the four-level Enco ANC picker stayed on screen. A short bounded retry covers the
+     * window in which the host finishes building the page.
+     */
+    private void scheduleAncTreeSweep(final Object screen) {
+        if (ancSweepScheduled) return;
+        ancSweepScheduled = true;
+        long[] delays = {0L, 120L, 400L, 900L, 1800L};
+        for (int i = 0; i < delays.length; i++) {
+            final int attempt = i;
+            mainHandler.postDelayed(() -> {
+                try {
+                    if (screen == null) return;
+                    int before = PrefRef.getPreferenceCount(screen);
+                    hideEncoAncRowsInTree(screen);
+                    int after = PrefRef.getPreferenceCount(screen);
+                    if (attempt == 0 || after > 0) {
+                        MLog.event("bose.anc.sweep",
+                                "attempt", attempt,
+                                "children", after,
+                                "changed", after != before);
+                    }
+                    if (after > 0) ancSweepScheduled = false;
+                } catch (Throwable t) {
+                    MLog.event("bose.anc.sweep_error",
+                            "attempt", attempt, "error", MLog.compactThrowable(t));
+                }
+            }, delays[i]);
+        }
+    }
+
+    private volatile boolean ancSweepScheduled;
+
     private void hideEncoAncRowsInTree(Object group) {
         int[] hidden = {0};
         hideEncoAncRowsInTree(group, 0, hidden);
@@ -3013,6 +3063,14 @@ public final class HookModule extends XposedModule {
      */
     private static void registerSectionKeys(String... keys) {
         try {
+            // 0.5.62: report the table as it stands, together with the keys we are about to
+            // add. 0.5.61 device logs show the detail page's real section keys are plain
+            // class names ("NoiseReductionItem", "pref_device_info") with order 0, while
+            // G9/Q.y holds short names ("noise", "product", ...). If the two key spaces are
+            // genuinely different, indexOf() can never match a real section and the host
+            // orders every row to 0 — which is a different root cause from "our keys are
+            // missing" and needs a different fix. This line decides between the two.
+            logSectionTable("before", keys);
             // melodyClassLoader is an instance field; a static method cannot touch it.
             ClassLoader host = hostLoaderRef;
             if (host == null) {
@@ -3053,8 +3111,34 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.section_keys_added",
                         "count", added, "size", list.size());
             }
+            logSectionTable("after", keys);
         } catch (Throwable t) {
             MLog.w("section key registration failed: " + MLog.compactThrowable(t));
+        }
+    }
+
+    /** Dumps the host section table so the two key spaces can be compared directly. */
+    private static void logSectionTable(String stage, String[] keys) {
+        try {
+            Class<?> type = Class.forName("G9.Q", false, hostLoaderRef);
+            for (Field f : type.getDeclaredFields()) {
+                if (f.getType() != java.util.List.class) continue;
+                Object v;
+                try {
+                    f.setAccessible(true);
+                    v = f.get(null);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (!(v instanceof java.util.List)) continue;
+                MLog.event("bose.section_table",
+                        "stage", stage,
+                        "size", ((java.util.List<?>) v).size(),
+                        "contents", String.valueOf(v),
+                        "adding", String.valueOf(java.util.Arrays.toString(keys)));
+                return;
+            }
+        } catch (Throwable ignored) {
         }
     }
 
