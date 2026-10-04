@@ -587,14 +587,17 @@ public final class HookModule extends XposedModule {
             //     2) fallback: Lr7/m;->h(mac) -> BluetoothDevice, then T.b(device, g())
             //   g() -> i() -> WhitelistContentDO.getWhiteList(); EMPTY_LIST when null.
             //   i() waits CompletableFuture.get(500ms) then reads a LiveData snapshot,
-            //   so the content is ASYNC and can legitimately be absent on first read.
+            // so the content is ASYNC and can legitimately be absent on first read.
             // These hooks only report; nothing is rewritten yet.
+            //
+            // 0.5.52 REGRESSION FIX: g() and i() were BOTH hooked in 0.5.51. g() calls i()
+            // internally, and the host hits this path dozens of times per second, so the two
+            // probes plus their MLog writes produced 46 events in a single second and stalled
+            // the main thread badly enough that even 通用设置 would not open. Only the
+            // low-frequency a(String) entry point is hooked now; the catalog size and content
+            // readiness are read from inside that one event instead of via extra hooks.
             hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
                     "a", 1, "wl17Lookup");
-            hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
-                    "g", 0, "wl17Catalog");
-            hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
-                    "i", 0, "wl17Content");
             // The detail page's PreferenceFragment. In 16.x the original module looked for
             // class "v9.z"; that class does NOT exist in 17.6.3. The real one is
             // G9/H.smali, .source "DetailMainPreferenceFragment.java",
@@ -997,14 +1000,20 @@ public final class HookModule extends XposedModule {
                         Object mac = arity > 0 ? chain.getArg(0) : null;
                         boolean isBoseTarget = mac instanceof String
                                 && isTargetAddress((String) mac);
-                        MLog.event("bose.detail.whitelist",
-                                "mac", String.valueOf(mac),
-                                "config", result == null ? "NULL" : result.getClass().getSimpleName(),
-                                // 0.5.41: the lookup returns our entry, yet the page still
-                                // builds no sections. Dump the entry so we can see exactly
-                                // which fields the host would read.
-                                "dump", result == null ? "-" : describeDto(result),
-                                "bose", isBoseTarget);
+                        // 0.5.52 regression fix: this dumps the whole DTO and the host calls
+                        // it in a tight loop, so it was one of the contributors to the panel
+                        // stall. Reported per distinct (mac, outcome) pair instead.
+                        String wlKey = mac + "|" + (result == null ? "NULL" : "DTO") + "|" + isBoseTarget;
+                        if (wl17Seen.add("old:" + wlKey)) {
+                            MLog.event("bose.detail.whitelist",
+                                    "mac", String.valueOf(mac),
+                                    "config", result == null ? "NULL" : result.getClass().getSimpleName(),
+                                    // 0.5.41: the lookup returns our entry, yet the page still
+                                    // builds no sections. Dump the entry so we can see exactly
+                                    // which fields the host would read.
+                                    "dump", result == null ? "-" : describeDto(result),
+                                    "bose", isBoseTarget);
+                        }
                         if (isBoseTarget) pendingDetailMac = (String) mac;
                         if (result == null && isBoseTarget) {
                             // The catalog entry is added in whitelistConfigList. If the match
@@ -1051,32 +1060,27 @@ public final class HookModule extends XposedModule {
                                 "args", String.valueOf(describeArgs(chain, arity)));
                         return result;
                     }
-                    // ---- 17.6.3 whitelist source diagnosis (report only) ----
-                    if ("wl17Catalog".equals(label) || "wl17Content".equals(label)) {
-                        // g() -> i() -> WhitelistContentDO.getWhiteList(); the snapshot is
-                        // filled asynchronously (CompletableFuture + 500 ms wait), so a null
-                        // here on the first read is expected, not a bug to chase.
-                        Object result = chain.proceed();
-                        MLog.event("bose.wl17.source",
-                                "method", label,
-                                "is_null", result == null,
-                                "size", result instanceof java.util.Collection
-                                        ? ((java.util.Collection<?>) result).size() : -1,
-                                "class", result == null ? "null"
-                                        : result.getClass().getSimpleName());
-                        return result;
-                    }
                     if ("wl17Lookup".equals(label)) {
                         // a(String mac) -> WhitelistConfigDTO. Two paths inside the host:
                         //   registered -> c(productId, name);  otherwise -> T.b(device, g()).
                         Object mac = arity > 0 ? chain.getArg(0) : null;
                         Object result = chain.proceed();
-                        MLog.event("bose.wl17.lookup",
-                                "mac", String.valueOf(mac),
-                                "is_null", result == null,
-                                "function_null", result == null || readField(result, "function") == null,
-                                "children", result == null ? "-" : describeChildren(result),
-                                "dto", result == null ? "null" : describeDto(result));
+                        // 0.5.51 logged this unconditionally and the host calls it dozens of
+                        // times per second (46 in one measured second), which on its own was
+                        // enough to stall the panel. Collapsed by signature: one line per
+                        // distinct outcome instead of one per call.
+                        String outcome = (result == null ? "null"
+                                : ("fn=" + (readField(result, "function") == null)
+                                        + " " + describeChildren(result)));
+                        if (wl17Seen.add(outcome)) {
+                            MLog.event("bose.wl17.lookup",
+                                    "mac", String.valueOf(mac),
+                                    "is_null", result == null,
+                                    "function_null",
+                                    result == null || readField(result, "function") == null,
+                                    "children", result == null ? "-" : describeChildren(result),
+                                    "dto", result == null ? "null" : describeDto(result));
+                        }
                         return result;
                     }
                     if ("detailFrag17".equals(label)) {
@@ -6396,6 +6400,16 @@ public final class HookModule extends XposedModule {
      * are collapsed by signature — the host hides rows in loops, and without deduplication one
      * culprit produces dozens of identical lines.
      */
+    /**
+     * Distinct outcomes already reported by the 17.6.3 whitelist probe.
+     *
+     * <p>0.5.51 regression: {@code whitelist.a.a(String)} is on the host's hot path and was
+     * logged on every call (46 events in one second), which stalled the panel badly enough
+     * that 通用设置 stopped opening. The probe now reports each distinct outcome once.
+     */
+    private static final java.util.Set<String> wl17Seen =
+            java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
+
     private static void recordHideCaller(View target, int visibility) {
         try {
             // 0.5.48 reported caller=j2.intercept for every single call site. That class is
