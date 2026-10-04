@@ -771,6 +771,16 @@ public final class HookModule extends XposedModule {
             // way a view goes from laid-out to invisible, so intercepting it and reporting the
             // caller for targets inside the detail container names the culprit directly.
             hookNamed(loader, "android.view.View", "setVisibility", 1, "detailSetVisibility");
+            // 0.5.73 — the detail page vanishes seconds after rendering. The t+5000
+            // container dump still shows a complete, fully VISIBLE content tree, and the
+            // only hidden_by entries are DecorView INVISIBLE size 0x0 caller=no_app_frame:
+            // the WINDOW is being torn down, i.e. the Activity is finishing — not a view
+            // being hidden. Every hook that was supposed to intercept the host's state
+            // checks (v9.a.getConnectionState, DetailMainViewModel.f) misses in 17.6.3,
+            // so instead of guessing again: hook Activity.finish, log the host caller
+            // chain, and block finish() on OUR detail activity when the caller is host
+            // auto-close logic (lesson #3: capture the stack, don't read obfuscated code).
+            hookNamed(loader, "android.app.Activity", "finish", 0, "detailActivityFinish");
             hookAny(loader, "repositoryObserve",
                     "com.oplus.melody.model.repository.earphone.U#z#1",
                     "com.oplus.melody.model.repository.earphone.J#A#1");
@@ -1026,6 +1036,14 @@ public final class HookModule extends XposedModule {
                     }
                     if ("sonyCardBind".equals(label)) {
                         Object result = chain.proceed();
+                        // 0.5.73: thisObject IS the OneSpaceHeaderPreference whose bind is
+                        // PROVEN to fire on the 通用设置 page (the row exists — the user sees
+                        // the blank circle). i() ("sonyCardImage") is LiveData-observer
+                        // driven and may never run for a device with no catalog entry, so
+                        // this bind is the reliable moment to install the photo.
+                        if (replaceBoseOneSpaceHeaderImage(chain.getThisObject())) {
+                            return result;
+                        }
                         replaceConfiguredProductImage(chain.getThisObject(), "b", "c", "d", "e", "d",
                                 "card", findCardImageView(chain.getArg(0)));
                         return result;
@@ -1047,13 +1065,15 @@ public final class HookModule extends XposedModule {
                         // category from here survives both failure modes, and it re-runs on
                         // every rebind, i.e. after every LiveData-driven setVisible(true).
                         suppressNoiseMenuCategory(chain.getThisObject());
-                        // 0.5.69 — 通用设置 photo fallback (user report #2). The host's own
-                        // loader (OneSpaceHeaderPreference.i) is hooked as "sonyCardImage",
-                        // but for a device with no catalog entry it may never run, which is
-                        // why the card stayed blank. This bind hook is PROVEN to fire on this
-                        // page, so walk from the bound row up to the list and apply our photo
-                        // to the header row directly.
-                        applyBoseHeaderFromRowView(chain.getArg(0));
+                        // 0.5.73: removed the applyBoseHeaderFromRowView fallback. Proven
+                        // dead: OneSpaceHeaderPreference is a Preference (extends
+                        // COUIPreference), never a View, so the View-tree DFS for a class
+                        // named *OneSpaceHeaderPreference could not find anything and the
+                        // whole body was swallowed by catch(Throwable ignored) — zero log
+                        // events, exactly what the 20:16 capture shows. The real entry is
+                        // sonyCardBind (OneSpaceHeaderPreference.onBindViewHolder, thisObject
+                        // = the header itself), which now calls
+                        // replaceBoseOneSpaceHeaderImage directly.
                         return result;
                     }
                     if ("onespaceNoiseMenuCheck".equals(label)
@@ -1233,6 +1253,33 @@ public final class HookModule extends XposedModule {
                         }
                         return result;
                     }
+                    if ("detailActivityFinish".equals(label)) {
+                        // 0.5.73 forensic + guard. Log WHO finishes our detail activity.
+                        // User-initiated exits (back key / toolbar back / menu) must always
+                        // pass through — memory proves the host's back key just calls
+                        // finish(). Everything else on OUR tracked activity is host
+                        // auto-close logic (the checkBluetoothAddress-failed path in
+                        // G9/H.onActivityCreated is one proven candidate); swallow it, but
+                        // cap the blocks so the user can never be trapped in an unclosable
+                        // page (lesson #13: destructive host interception needs guards).
+                        Object self = chain.getThisObject();
+                        if (!(self instanceof Activity) || self != detailActivity
+                                || !boseBonded()) {
+                            return chain.proceed();
+                        }
+                        String caller = hostCallerChain(6);
+                        boolean userInitiated = caller.contains("onBackPressed")
+                                || caller.contains("onKeyDown")
+                                || caller.contains("onKeyUp")
+                                || caller.contains("onClick")
+                                || caller.contains("onNavigateUp")
+                                || caller.contains("onOptionsItemSelected");
+                        MLog.event("bose.detail.finish",
+                                "blocked", !userInitiated, "caller", caller);
+                        if (userInitiated) return chain.proceed();
+                        if (detailFinishBlocked.incrementAndGet() > 6) return chain.proceed();
+                        return null; // swallow the host's auto-finish
+                    }
                     if ("detailFragmentCreated".equals(label)) {
                         Object result = chain.proceed();
                         Object frag = chain.getThisObject();
@@ -1385,6 +1432,8 @@ public final class HookModule extends XposedModule {
                         Object result = chain.proceed();
                         if (chain.getThisObject() instanceof Activity) {
                             detailActivity = (Activity) chain.getThisObject();
+                            // 0.5.73: fresh visit, fresh finish-guard budget.
+                            detailFinishBlocked.set(0);
                             // Local final alias: the delayed lambdas below capture it, and a
                             // field reference would work too but this keeps the compiler
                             // honest about the capture (0.5.26 referenced an 'activity'
@@ -2810,7 +2859,16 @@ public final class HookModule extends XposedModule {
                 field.setAccessible(true);
                 try {
                     Object value = field.get(template);
-                    if (value instanceof android.os.Parcelable) continue; // deep copy is not needed
+                    // 0.5.73: do NOT skip Parcelable fields. WhitelistConfigDTO$Function
+                    // implements Parcelable, so the old `continue` dropped the entire
+                    // function config from the clone. That is exactly why
+                    // stripEncoSubLevels always saw function==null (the log printed
+                    // bose.catalog.strip_skip why=no_function x12) and the Enco
+                    // sub-levels (降噪强度 3档+智能 / 增强人声) survived into the Bose
+                    // entry. Copy by reference instead; stripEncoSubLevels then
+                    // shallow-copies the function->modes->children chain and clears it
+                    // on the copies only, so the host's real Enco entries are never
+                    // mutated. static fields (CREATOR etc.) are already excluded above.
                     field.set(copy, value);
                 } catch (Throwable ignored) {
                 }
@@ -3127,6 +3185,15 @@ public final class HookModule extends XposedModule {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private static final java.util.concurrent.atomic.AtomicBoolean pageHideBlockLogged =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * 0.5.73 cap for the Activity.finish guard: at most 6 host auto-finishes are
+     * swallowed per detail-page visit (reset on every detailActivityCreate), so the user
+     * can never be trapped in an unclosable page. User-initiated finishes pass through
+     * unconditionally.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger detailFinishBlocked =
+            new java.util.concurrent.atomic.AtomicInteger(0);
 
     /**
      * 0.5.71 re-entry guard for the detailSetVisibility hook. Set while WE call
@@ -4194,71 +4261,26 @@ public final class HookModule extends XposedModule {
      *
      * @return true when the photo was installed, so the caller skips the host's own load.
      */
-    /**
-     * 0.5.69. Applies the Bose product photo from the onespace bind path.
-     *
-     * <p>The holder argument is the bound row's ViewHolder; its itemView lives inside the
-     * page's RecyclerView. The header row (OneSpaceHeaderPreference) is a sibling further up
-     * the same list, so walking the RecyclerView children and matching the class name finds
-     * it without depending on any R8-renamed field of the fragment.
-     */
-    private void applyBoseHeaderFromRowView(Object holder) {
-        try {
-            if (!boseBonded() || headerImageApplied) return;
-            Object rowView = readField(holder, "itemView");
-            if (!(rowView instanceof View)) return;
-            // 0.5.70: the header row is NOT necessarily a sibling of the bound row — it can
-            // sit in a container ABOVE the RecyclerView. Walk up to the page root, then do a
-            // bounded DFS for the header class. One-shot diagnostics tell us next round
-            // whether the header exists at all on this page.
-            View root = (View) rowView;
-            for (int hop = 0; hop < 10; hop++) {
-                Object parent = root.getParent();
-                if (!(parent instanceof View)) break;
-                root = (View) parent;
-            }
-            View header = findHeaderPreference(root, 0, new int[]{0});
-            if (header == null) {
-                if (headerMissingLogged.compareAndSet(false, true)) {
-                    MLog.event("bose.image.header_missing",
-                            "root", root.getClass().getSimpleName());
-                }
-                return;
-            }
-            if (replaceBoseOneSpaceHeaderImage(header)) {
-                headerImageApplied = true;
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private static final java.util.concurrent.atomic.AtomicBoolean headerMissingLogged =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
-
-    private static View findHeaderPreference(View view, int depth, int[] budget) {
-        if (view == null || depth > 10 || budget[0] > 400) return null;
-        budget[0]++;
-        if (view.getClass().getName().endsWith("OneSpaceHeaderPreference")) return view;
-        if (view instanceof android.view.ViewGroup) {
-            android.view.ViewGroup group = (android.view.ViewGroup) view;
-            int n = Math.min(group.getChildCount(), 40);
-            for (int i = 0; i < n; i++) {
-                View hit = findHeaderPreference(group.getChildAt(i), depth + 1, budget);
-                if (hit != null) return hit;
-            }
-        }
-        return null;
-    }
-
-    private volatile boolean headerImageApplied;
-
     private boolean replaceBoseOneSpaceHeaderImage(Object owner) {
         try {
             if (!boseBonded()) return false;
-            if (!(owner instanceof View)) return false;
+            // 0.5.73 — TWO bugs fixed here, both proven from OneSpaceHeaderPreference.smali:
+            // (a) owner is the OneSpaceHeaderPreference INSTANCE (a Preference, NOT a View),
+            //     passed via chain.getThisObject() from sonyCardImage(i()) / sonyCardBind
+            //     (onBindViewHolder). The old `owner instanceof View` guard therefore always
+            //     returned false, which is why the log NEVER showed surface=onespace and the
+            //     card stayed blank. The product ImageView lives in field e.
+            // (b) the loading spinner is field d (LottieAnimationView), NOT e. i() itself does
+            //     `iput d ... const/16 0x8 (GONE)` on d. Passing "e" as the loadingField made
+            //     applyBoseImage GONE the product image it had just installed.
+            if (owner == null) {
+                MLog.event("bose.image.skip", "surface", "onespace", "reason", "null_owner");
+                return false;
+            }
             Object field = readField(owner, "e");
             if (!(field instanceof ImageView)) {
-                MLog.event("bose.image.skip", "surface", "onespace", "reason", "no_image_view");
+                MLog.event("bose.image.skip", "surface", "onespace", "reason", "no_image_view",
+                        "owner", owner.getClass().getSimpleName());
                 return false;
             }
             File file = materializeBoseImage();
@@ -4266,12 +4288,13 @@ public final class HookModule extends XposedModule {
                 MLog.event("bose.image.skip", "surface", "onespace", "reason", "asset_unavailable");
                 return false;
             }
-            applyBoseImage((ImageView) field, file, owner, "e");
+            applyBoseImage((ImageView) field, file, owner, "d");
             pinBoseImageView((ImageView) field);
             MLog.event("bose.image.applied", "surface", "onespace");
             return true;
         } catch (Throwable t) {
-            log(Log.WARN, TAG, "Bose 通用设置 photo install failed", t);
+            MLog.event("bose.image.error", "surface", "onespace",
+                    "error", MLog.compactThrowable(t));
             return false;
         }
     }
@@ -7474,6 +7497,26 @@ public final class HookModule extends XposedModule {
     private static final java.util.Set<String> wl17Seen =
             java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
 
+    /**
+     * Builds a "<- "-joined chain of up to {@code max} host stack frames, skipping the
+     * hook runtime trampolines. Extracted 0.5.73 from recordHideCaller so the Activity
+     * finish probe can name the caller too (lesson #3: hook the system API and read the
+     * stack instead of guessing from obfuscated code).
+     */
+    private static String hostCallerChain(int max) {
+        StringBuilder chain = new StringBuilder();
+        int appFrames = 0;
+        for (StackTraceElement frame : new Throwable().getStackTrace()) {
+            String cls = frame.getClassName();
+            if (!isHostFrame(cls)) continue;
+            if (chain.length() > 0) chain.append(" <- ");
+            chain.append(cls).append('.').append(frame.getMethodName())
+                    .append(':').append(frame.getLineNumber());
+            if (++appFrames >= max) break;
+        }
+        return chain.length() == 0 ? "no_app_frame" : chain.toString();
+    }
+
     private static void recordHideCaller(View target, int visibility) {
         try {
             // 0.5.48 reported caller=j2.intercept for every single call site. That class is
@@ -7489,17 +7532,7 @@ public final class HookModule extends XposedModule {
             // demands: a frame is host code only if its class name contains a package
             // separator and is not a known framework/module prefix. Single-token names
             // (j2, l, c2 without dot…) can never match a host class.
-            StringBuilder chain = new StringBuilder();
-            int appFrames = 0;
-            for (StackTraceElement frame : new Throwable().getStackTrace()) {
-                String cls = frame.getClassName();
-                if (!isHostFrame(cls)) continue;
-                if (chain.length() > 0) chain.append(" <- ");
-                chain.append(cls).append('.').append(frame.getMethodName())
-                        .append(':').append(frame.getLineNumber());
-                if (++appFrames >= 4) break;
-            }
-            String where = chain.length() == 0 ? "no_app_frame" : chain.toString();
+            String where = hostCallerChain(4);
             String key = where + "@" + target.getClass().getSimpleName() + "/v" + visibility;
             if (!hideCallSites.add(key)) return;
             if (hideCallSites.size() > 24) return; // the useful set is small
