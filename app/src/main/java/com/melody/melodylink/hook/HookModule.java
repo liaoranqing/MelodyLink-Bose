@@ -2100,8 +2100,14 @@ public final class HookModule extends XposedModule {
             // Belt and braces: never hide anything we injected ourselves.
             if (rowKey != null && rowKey.startsWith("melodylink.")) return;
             PrefRef.setVisible(noiseRow, false);
-            MLog.event("bose.anco.row.hidden", "key", rowKey,
-                    "class", className);
+            // 0.5.59: setVisible returning without error is not proof — 0.5.58 device logs show
+            // bose.anco.row.hidden fired for pref_noise_switch yet the "降噪效果" title was
+            // still drawn. Reading the flag back separates "the setter did nothing" from
+            // "the setter worked but the row was re-shown later".
+            MLog.event("bose.anco.row.hidden",
+                    "key", rowKey,
+                    "class", className,
+                    "visible_after", PrefRef.isVisible(noiseRow));
         } catch (Throwable t) {
             MLog.event("bose.anco.row.hide_failed", "error", MLog.compactThrowable(t));
         }

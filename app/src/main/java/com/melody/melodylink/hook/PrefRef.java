@@ -213,7 +213,12 @@ final class PrefRef {
                     Object v = f.get(owner);
                     if (v == null) continue;
                     if (v instanceof java.util.Collection || v instanceof Context) continue;
-                    if (hasScreenAccessor(v.getClass())) return v;
+                    // 0.5.59: the previous test asked the candidate for a method literally named
+                    // getPreferenceScreen, which R8 has renamed, so it returned false for every
+                    // candidate and the manager was never found — hence screen=null even at
+                    // detailFragBuild, after the tree was fully inflated. The test is now
+                    // structural: does the candidate hold a PreferenceScreen-typed field?
+                    if (declaresScreenField(v.getClass())) return v;
                 } catch (Throwable ignored) {
                 }
             }
@@ -221,13 +226,11 @@ final class PrefRef {
         return null;
     }
 
-    private static boolean hasScreenAccessor(Class<?> type) {
+    /** True when the type (or a supertype) declares a PreferenceScreen-typed field. */
+    private static boolean declaresScreenField(Class<?> type) {
         for (Class<?> cls = type; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
-            for (Method m : cls.getDeclaredMethods()) {
-                if (m.getParameterCount() != 0) continue;
-                if (m.getReturnType() != void.class && !m.getReturnType().isPrimitive()) {
-                    if (m.getName().equals("getPreferenceScreen")) return true;
-                }
+            for (Field f : cls.getDeclaredFields()) {
+                if (f.getType().getName().equals("androidx.preference.PreferenceScreen")) return true;
             }
         }
         return false;
