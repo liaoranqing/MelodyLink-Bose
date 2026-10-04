@@ -1337,8 +1337,21 @@ public final class HookModule extends XposedModule {
                         // real teardown trigger stays observable.
                         Object self = chain.getThisObject();
                         if (self instanceof Activity && self == detailActivity) {
-                            if (finishCallSites.add(hostCallerChain(4))) {
-                                MLog.event("bose.detail.finish", "caller", hostCallerChain(6));
+                            // 0.5.76. 0.5.75 装机日志 detail.finish 只有两条 caller=no_app_frame，
+                            // 但 finishCallSites 的去重把"几秒后消失"的频率信息吞掉了——如果宿主每秒
+                            // finish 一次，去重后也只剩一行。no_app_frame 还说明 finish 的栈里没有
+                            // 宿主帧：要么是框架/系统层直接 finish，要么宿主通过 R8 短名 lambda
+                            // （isHostFrame 会漏掉）异步调用。这里记三样东西：单调递增的 finish 序号
+                            // （看频率）、过滤后的宿主链、以及未过滤的完整原始栈（前 10 帧，定位
+                            // no_app_frame 到底是谁）。序号每进程每页都会单调增长，去重只作用于
+                            // 完全相同的原始栈。
+                            int seq = ++finishSeq;
+                            String raw = rawCallerChain(10);
+                            if (finishCallSites.add(raw)) {
+                                MLog.event("bose.detail.finish",
+                                        "seq", seq,
+                                        "host", hostCallerChain(6),
+                                        "raw", raw);
                             }
                         }
                         return chain.proceed();
@@ -7889,6 +7902,30 @@ public final class HookModule extends XposedModule {
         }
         return chain.length() == 0 ? "no_app_frame" : chain.toString();
     }
+
+    /**
+     * 0.5.76. Unfiltered stack, for the {@code no_app_frame} finish diagnosis. Unlike
+     * {@link #hostCallerChain}, this keeps framework frames AND R8 short-name lambdas
+     * (the host's Kotlin lambdas compile to classes like {@code A8/A}, whose name has a
+     * slash in smali but a dot at runtime), so it names the real trigger when the host
+     * calls finish() asynchronously off a lambda. Bounded to {@code max} frames.
+     */
+    private static String rawCallerChain(int max) {
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (StackTraceElement frame : new Throwable().getStackTrace()) {
+            String cls = frame.getClassName();
+            if (cls.startsWith("java.") || cls.startsWith("sun.")
+                    || cls.startsWith("com.melody.melodylink")) continue;
+            if (sb.length() > 0) sb.append(" <- ");
+            sb.append(cls).append('.').append(frame.getMethodName())
+                    .append(':').append(frame.getLineNumber());
+            if (++n >= max) break;
+        }
+        return sb.length() == 0 ? "empty" : sb.toString();
+    }
+
+    private int finishSeq;
 
     private static void recordHideCaller(View target, int visibility) {
         try {
