@@ -1329,16 +1329,25 @@ public final class HookModule extends XposedModule {
                         return result;
                     }
                     if ("detailActivityFinishAfterTransition".equals(label)) {
-                        // 0.5.76. The close-trigger itself. Unlike finish(), this fires at
-                        // the DECISION point (before the transition), so the raw stack here
-                        // names the host method that chose to close the detail page.
+                        // 0.5.76b. The close-trigger fires TWICE per close: once at the
+                        // DECISION point (host code calls finishAfterTransition), and once
+                        // more from Activity$RequestFinishCallback.run (the transition
+                        // pre-draw callback, which calls finishAfterTransition again; that
+                        // second call is what actually reaches finish()). The raw stack of
+                        // the SECOND call is dominated by Handler/Looper, which is why the
+                        // real host caller (the first call) was never named. Distinguish
+                        // them by the presence of RequestFinishCallback in the raw chain,
+                        // and log the decision-point call with a deeper raw stack.
                         Object self = chain.getThisObject();
                         if (self instanceof Activity) {
+                            String raw = rawCallerChain(20);
+                            boolean isCallback = raw.contains("RequestFinishCallback");
                             MLog.event("bose.detail.finish_after_transition",
                                     "seq", ++finishSeq,
                                     "self", self.getClass().getSimpleName(),
-                                    "host", hostCallerChain(6),
-                                    "raw", rawCallerChain(12));
+                                    "kind", isCallback ? "transition_callback" : "decision",
+                                    "host", hostCallerChain(8),
+                                    "raw", raw);
                         }
                         return chain.proceed();
                     }
