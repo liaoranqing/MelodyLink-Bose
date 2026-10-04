@@ -658,6 +658,10 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "onFinishInflate", 0, "sonyDetailInflated");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "setViewModel", 1, "sonyDetailViewModel");
             hookNamed(loader, "androidx.preference.PreferenceGroup", "f", 1, "detailPreferenceAdd");
+            // 0.5.48: stop guessing who hides the detail content. setVisibility is the only
+            // way a view goes from laid-out to invisible, so intercepting it and reporting the
+            // caller for targets inside the detail container names the culprit directly.
+            hookNamed(loader, "android.view.View", "setVisibility", 1, "detailSetVisibility");
             hookAny(loader, "repositoryObserve",
                     "com.oplus.melody.model.repository.earphone.U#z#1",
                     "com.oplus.melody.model.repository.earphone.J#A#1");
@@ -992,6 +996,20 @@ public final class HookModule extends XposedModule {
                                 MLog.event("bose.detail.children_filled",
                                         "into", String.valueOf(readField(result, "name")));
                             }
+                        }
+                        return result;
+                    }
+                    if ("detailSetVisibility".equals(label)) {
+                        Object result = chain.proceed();
+                        try {
+                            Object target = chain.getThisObject();
+                            Object arg = arity > 0 ? chain.getArg(0) : null;
+                            int visibility = arg instanceof Integer ? (Integer) arg : -1;
+                            if (target instanceof View && visibility != View.VISIBLE
+                                    && isInsideDetailContainer((View) target)) {
+                                recordHideCaller((View) target, visibility);
+                            }
+                        } catch (Throwable ignored) {
                         }
                         return result;
                     }
@@ -6137,6 +6155,65 @@ public final class HookModule extends XposedModule {
         return type.isPrimitive() || type.isEnum() || type == String.class || Number.class.isAssignableFrom(type)
                 || type == Boolean.class || type == Character.class || type == Class.class;
     }
+
+    /**
+     * True when this view lives inside the detail page's content container.
+     *
+     * <p>0.5.48. Walks up the parent chain looking for the container id, so it catches
+     * descendants at any depth rather than only direct children.
+     */
+    private static boolean isInsideDetailContainer(View view) {
+        try {
+            View v = view;
+            for (int guard = 0; v != null && guard < 40; guard++) {
+                if ("melody_ui_fragment_container".equals(idName(v))) return true;
+                Object parent = v.getParent();
+                if (parent instanceof View) {
+                    v = (View) parent;
+                } else {
+                    return v.getClass().getSimpleName().contains("DecorView");
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /**
+     * Logs who hid a view, naming the call site responsible.
+     *
+     * <p>0.5.48. This is the question every previous version was guessing at. The stack is
+     * filtered to app frames so the answer names the class and method responsible, and repeats
+     * are collapsed by signature — the host hides rows in loops, and without deduplication one
+     * culprit produces dozens of identical lines.
+     */
+    private static void recordHideCaller(View target, int visibility) {
+        try {
+            String where = "";
+            for (StackTraceElement frame : new Throwable().getStackTrace()) {
+                String cls = frame.getClassName();
+                if (cls.startsWith("java.") || cls.startsWith("android.")
+                        || cls.contains("melodylink")) continue;
+                where = cls + "." + frame.getMethodName() + ":" + frame.getLineNumber();
+                break;
+            }
+            if (where.isEmpty()) where = "unknown";
+            String key = where + "@" + target.getClass().getSimpleName() + "/v" + visibility;
+            if (!hideCallSites.add(key)) return;
+            if (hideCallSites.size() > 24) return; // the useful set is small
+            MLog.event("bose.detail.hidden_by",
+                    "view", target.getClass().getSimpleName(),
+                    "id", idName(target),
+                    "size", target.getWidth() + "x" + target.getHeight(),
+                    "visibility", visibility,
+                    "caller", where);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Collapses repeated hide call sites so one culprit yields one line. */
+    private static final java.util.Set<String> hideCallSites =
+            java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
 
     /**
      * Walks to the view that would host the detail sections and describes it in depth.
