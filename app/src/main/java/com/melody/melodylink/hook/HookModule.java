@@ -19,6 +19,7 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.widget.ImageView;
 
 import com.melody.melodylink.observer.MethodCallObserver;
@@ -704,6 +705,37 @@ public final class HookModule extends XposedModule {
             // touching any final method.
             hookNamed(loader, "L6/a", "b", 0, "whitelistConfigList");
             hookNamed(loader, "L6/a", "a", 1, "detailWhitelistLookup");
+            // 0.5.75 — THE REAL #4 PATH, proven from smali (no more guessing):
+            //
+            //   NoiseReductionItem.<init>(Context, DetailMainViewModel, LifecycleOwner)
+            //     -> new Ba/m(ctx, viewModel)                       [NRI:313-321]
+            //   Ba/m.a(List, int, Ba/z)  builds Ba/x (四级降噪选择器) and
+            //     Ba/A (增强人声) ONLY when a mode's getChildrenMode() is non-empty
+            //     [Ba/m:519-550, 355/511 getChildrenMode, 475 new Ba/x, 646 new Ba/A]
+            //   The list comes from Ba/z.getNoiseReductionModeList() [NRI:549, 4052]
+            //   Ba/z.<init>(EarphoneDTO) fills it from
+            //     c9/a.f().c(productId, name).getFunction().getNoiseReductionMode()
+            //     [Ba/z:207-292] and stores the SAME List reference — no copy.
+            //
+            // Two facts kill every earlier fix:
+            //  (1) the lookup that feeds this page is c9/a.c(PRODUCT_ID, NAME), keyed by
+            //      product id + bluetooth name — NOT by MAC. That is why the Bose MAC
+            //      (68:F2:1F:3D:41:D7) never appeared in any L6/a lookup in 455 events:
+            //      L6/a (SupportConfigManager) and c9/a (WhitelistRepository) are two
+            //      separate catalogs. Our injected clone lives in L6/a's list only.
+            //  (2) because Ba/z holds the catalog's own List, stripEncoSubLevels on a
+            //      shallow copy never touches the modes the UI reads — and clearing in
+            //      place would corrupt the user's GENUINE Enco X3 page, since
+            //      Ba/z:521 calls setChildrenMode() on those shared mode objects.
+            //
+            // So: intercept the getter, and return a list of per-mode shallow copies with
+            // childrenMode cleared through the KEEP-NAMED public setter. The catalog is
+            // never mutated; only this VO's view of it is. Guarded by detailPageIsBose()
+            // (the intent MAC of the live DetailMainActivity), so the real Enco X3 keeps
+            // its four-level picker. getChildrenMode/setChildrenMode/childrenMode are all
+            // keep-named (s1dto WhitelistConfigDTO$NoiseReductionMode:1611/1781/97), and
+            // getNoiseReductionModeList is public non-final, so it hooks.
+            hookNamed(loader, "Ba/z", "getNoiseReductionModeList", 0, "noiseReductionVOList");
             // The fragment that the callback is supposed to populate. Watching its lifecycle
             // tells us whether it is created at all once the config resolves.
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainFragment",
@@ -1193,30 +1225,45 @@ public final class HookModule extends XposedModule {
                                         "into", String.valueOf(readField(result, "name")));
                             }
                         }
-                        // 0.5.74 — THE ACTUAL ROOT CAUSE OF #4 (Enco 交互残留), finally
-                        // pinned down by the log instead of guessed:
+                        // 0.5.74 — THE ACTUAL ROOT CAUSE OF #4 (Enco 交互残留), and a
+                        // trap I had to correct before shipping:
                         //
                         //   evt=bose.detail.whitelist mac=40:72:18:C7:75:70
-                        //       config=WhitelistConfigDTO
-                        //       dump=brand=oppo;id=067410;name=OPPO Enco X3;function=Function@b445412
+                        //       config=WhitelistConfigDTO dump=...id=067410;name=OPPO Enco X3
                         //
-                        // The detail page renders from THIS ORIGINAL host DTO. Our clone
-                        // (the one stripEncoSubLevels correctly cleans — the log shows
-                        // "sublevels_stripped modes=4 cleared=4") is never consulted for it,
-                        // so the Enco four-level ANC picker (Ba/x) and the 增强人声 switch
-                        // (Ba/A) keep being built from function.noiseReductionMode[].childrenMode.
-                        // Ba/m.smali:519-550 proves the guard is exactly that: an empty
-                        // childrenMode skips the Ba/x construction entirely.
+                        // The Bose MAC (68:F2:1F:3D:41:D7) NEVER appears in any lookup in the
+                        // whole 455-event capture, while the user's real Enco X3 does. So a
+                        // guard of "boseBonded() && !isExcluded(mac)" would have fired on
+                        // 40:72:18 as well (it is bonded-but-not-excluded only by luck) and
+                        // stripped a GENUINE OPPO earphone's own four-level ANC picker.
+                        // The only safe predicate is a POSITIVE one: strip only when the
+                        // looked-up address is the Bose unit itself.
                         //
-                        // Guard: NEVER strip for the user's real Enco X3 (40:72:18:C7:75:70,
-                        // field-verified via dumpsys bluetooth_manager) — that would break a
-                        // genuine OPPO earphone page. Only the Bose side is rewritten.
-                        if (result != null && boseBonded()
-                                && !com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
-                                        .isExcluded(mac instanceof String ? (String) mac : null)) {
+                        // Ba/m.smali:519-550 proves the mechanism: an empty childrenMode skips
+                        // the Ba/x (four-level picker) and Ba/A (增强人声) construction entirely.
+                        if (result != null && isBoseAddressArg(mac)) {
                             stripEncoSubLevels(result);
+                            MLog.event("bose.detail.lookup_stripped",
+                                    "mac", String.valueOf(mac),
+                                    "into", String.valueOf(readField(result, "name")));
+                        } else if (result != null && boseBonded()) {
+                            // 0.5.74 diagnostic: the Bose MAC never appears in any lookup in
+                            // the 455-event capture, so we cannot yet prove which DTO the
+                            // Bose detail page renders from. Log the non-Bose lookups that
+                            // happen while Bose is bonded, so the next round names the real
+                            // source instead of guessing again.
+                            if (wl17Seen.add("nb:" + mac)) {
+                                MLog.event("bose.detail.lookup_nonbose",
+                                        "mac", String.valueOf(mac),
+                                        "name", String.valueOf(readField(result, "name")),
+                                        "fn", String.valueOf(readField(result, "function") != null));
+                            }
                         }
                         return result;
+                    }
+                    if ("noiseReductionVOList".equals(label)) {
+                        Object result = chain.proceed();
+                        return stripChildrenForBosePage(result);
                     }
                     if ("detailSetVisibility".equals(label)) {
                         // 0.5.71 REWRITE. The 2026-10-04 18:55 ANR main-thread dump proves the
@@ -2904,6 +2951,252 @@ public final class HookModule extends XposedModule {
     }
 
     /**
+     * 0.5.75 — the actual fix for #4 (Enco 四级降噪选择器 + 增强人声 leaking into the Bose
+     * detail page).
+     *
+     * <p>Intercepts {@code Ba/z.getNoiseReductionModeList()} (NoiseReductionVO). The smali
+     * chain that makes this the right place:
+     * <pre>
+     *   Ba/z.&lt;init&gt;(EarphoneDTO)                                   [Ba/z:41]
+     *     cfg = c9/a.f().c(dto.getProductId(), dto.getName())        [Ba/z:207-214]
+     *     mNoiseReductionModeList = cfg.getFunction()
+     *                                  .getNoiseReductionMode()      [Ba/z:284-292]  (NO COPY)
+     *   NoiseReductionItem: v2 = baZ.getNoiseReductionModeList()     [NRI:549, 4052]
+     *   Ba/m.a(list, idx, baZ)                                       [Ba/m:218]
+     *     if (mode.getChildrenMode() non-empty) -> new Ba/x (四级)    [Ba/m:475, 519-550]
+     *                                           -> new Ba/A (增强人声) [Ba/m:646]
+     * </pre>
+     *
+     * <p>Every earlier attempt failed for a concrete, now-proven reason:
+     * <ul>
+     *   <li>The lookup feeding this page is keyed by <b>productId + name</b>, not by MAC,
+     *       and it lives in {@code c9/a} (WhitelistRepository) — a different catalog from
+     *       {@code L6/a} (SupportConfigManager) where our clone is injected. That is why
+     *       the Bose MAC never appeared in any of the 455 captured lookup events.</li>
+     *   <li>{@code Ba/z} stores the catalog's own List, and {@code Ba/z:521} even calls
+     *       {@code setChildrenMode()} back onto those shared mode objects. Clearing in
+     *       place would therefore corrupt the user's GENUINE Enco X3 page — he owns both
+     *       (40:72:18:C7:75:70 is a real OPPO Enco X3).</li>
+     *   <li>{@code stripEncoSubLevels} on a shallow-copied catalog entry never reached the
+     *       instances the UI reads.</li>
+     * </ul>
+     *
+     * <p>This returns a list of per-mode shallow copies whose {@code childrenMode} is
+     * cleared through the KEEP-NAMED public setter, so the catalog is never mutated — only
+     * this VO's view of it. {@code Ba/m} then sees empty children and skips both extra
+     * widgets entirely. Cached by list identity because the VO getter is polled during
+     * layout, and allocation there is exactly the kind of hot-path cost that caused the
+     * 0.5.69 ANR.
+     */
+    private Object stripChildrenForBosePage(Object list) {
+        try {
+            if (!(list instanceof java.util.List)) return list;
+            if (!boseBonded()) return list;
+            java.util.List<?> source = (java.util.List<?>) list;
+            if (source.isEmpty()) return list;
+            // Cheap test first, expensive guard second: this getter is polled during layout
+            // (5 call sites, incl. onespace/b and OneSpaceListFragment$initObserver$2), so
+            // reading the intent on every call would be a hot-path probe.
+            boolean anyChildren = false;
+            for (Object mode : source) {
+                if (mode != null && readChildrenMode(mode) != null) {
+                    anyChildren = true;
+                    break;
+                }
+            }
+            if (!anyChildren) {
+                if (wl17Seen.add("vo:no_children")) {
+                    MLog.event("bose.vo.no_children", "modes", source.size());
+                }
+                return list;
+            }
+            if (!detailPageIsBose()) {
+                // 0.5.75 SAFETY. The user owns a GENUINE OPPO Enco X3 (40:72:18:C7:75:70)
+                // whose four-level picker must survive. This getter is shared by the 通用设置
+                // page too, and detailActivity can outlive the page it belonged to, so the
+                // guard is the FOCUSED Bose detail page only. Logging the skip names which
+                // page still shows children, instead of guessing and mutating a real Enco.
+                if (wl17Seen.add("vo:skip_guard")) {
+                    MLog.event("bose.vo.skip_guard", "modes", source.size(),
+                            "detail", detailActivity == null ? "null"
+                                    : (detailActivity.hasWindowFocus() ? "focused" : "background"));
+                }
+                return list;
+            }
+
+            synchronized (boseStrippedModeLists) {
+                Object cached = boseStrippedModeLists.get(source);
+                if (cached != null) return cached;
+                java.util.List<Object> stripped = new java.util.ArrayList<>(source.size());
+                int cleared = 0;
+                for (Object mode : source) {
+                    if (mode == null) continue;
+                    Object children = readChildrenMode(mode);
+                    Object copy = shallowCopyObject(mode);
+                    if (copy == null) {
+                        stripped.add(mode);
+                        continue;
+                    }
+                    if (children != null && writeChildrenMode(copy, null)) {
+                        cleared++;
+                    }
+                    stripped.add(copy);
+                }
+                if (boseStrippedModeLists.size() > 8) boseStrippedModeLists.clear();
+                boseStrippedModeLists.put(source, stripped);
+                MLog.event("bose.vo.stripped",
+                        "modes", stripped.size(),
+                        "cleared", cleared);
+                return stripped;
+            }
+        } catch (Throwable t) {
+            MLog.event("bose.vo.strip_error", "error", MLog.compactThrowable(t));
+            return list;
+        }
+    }
+
+    /** Original mode list -> stripped copy. Identity-keyed: the catalog list is shared. */
+    private static final java.util.IdentityHashMap<Object, Object> boseStrippedModeLists =
+            new java.util.IdentityHashMap<>();
+
+    /**
+     * Reads {@code NoiseReductionMode.getChildrenMode()}. Keep-named in 17.6.3
+     * (s1dto WhitelistConfigDTO$NoiseReductionMode.smali:1611); resolved by signature so a
+     * rename in a future host build degrades to "no children" instead of a crash.
+     */
+    private static Object readChildrenMode(Object mode) {
+        for (Method candidate : allMethods(mode.getClass())) {
+            if ("getChildrenMode".equals(candidate.getName())
+                    && candidate.getParameterCount() == 0) {
+                try {
+                    candidate.setAccessible(true);
+                    return candidate.invoke(mode);
+                } catch (Throwable ignored) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Writes {@code setChildrenMode(List)} (keep-named, :1781). True when it landed. */
+    private static boolean writeChildrenMode(Object mode, Object value) {
+        for (Method candidate : allMethods(mode.getClass())) {
+            if ("setChildrenMode".equals(candidate.getName())
+                    && candidate.getParameterCount() == 1) {
+                try {
+                    candidate.setAccessible(true);
+                    candidate.invoke(mode, value);
+                    return true;
+                } catch (Throwable ignored) {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True only when the live {@code DetailMainActivity} was opened FOR the Bose unit.
+     *
+     * <p>The page's MAC comes from its launch intent — {@code A9/r.smali:524} reads the
+     * {@code "device"} extra (falling back to {@code "device_mac_info"}). A positive
+     * predicate is mandatory here: {@code boseBonded()} alone is not enough, because the
+     * user also owns a real OPPO Enco X3 whose page must keep its four-level picker.
+     */
+    private boolean detailPageIsBose() {
+        try {
+            Activity activity = detailActivity;
+            if (activity == null || activity.isFinishing()) return false;
+            // 0.5.75: focus is cheap and changes over time, so it is tested OUTSIDE the
+            // cache — caching a "not focused" verdict would pin it forever and the page
+            // would never be stripped once it did come to the foreground.
+            if (!activity.hasWindowFocus()) return false;
+            // 0.5.75 PERFORMANCE GUARD. getNoiseReductionModeList() is polled during the
+            // detail page's layout, and reading the intent + iterating its extras on every
+            // call is exactly the kind of expensive probe on a hot path that caused the
+            // 0.5.69 ANR. Cache the intent verdict per Activity instance; a new page (or a
+            // destroyed one) invalidates it automatically. The intent never changes for the
+            // lifetime of an Activity, so caching it is sound.
+            if (activity == detailPageBoseActivity) return detailPageBoseVerdict;
+            boolean verdict = readDetailPageIsBose(activity);
+            detailPageBoseActivity = activity;
+            detailPageBoseVerdict = verdict;
+            return verdict;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** Cached verdict + the Activity instance it belongs to. */
+    private volatile Activity detailPageBoseActivity;
+    private volatile boolean detailPageBoseVerdict;
+
+    /** Reads the launch-intent MAC once per Activity. Caller has already checked focus. */
+    private boolean readDetailPageIsBose(Activity activity) {
+        try {
+            android.content.Intent intent = activity.getIntent();
+            if (intent == null) return false;
+            android.os.Bundle extras = intent.getExtras();
+            // One-shot forensic dump of every string extra: the page's MAC key was only
+            // proven for A9/r ("device"), and guessing it again is what burned 0.5.44-0.5.74.
+            if (extras != null && detailPageMacLogged.add("dump")) {
+                StringBuilder sb = new StringBuilder();
+                for (String key : extras.keySet()) {
+                    Object value = extras.get(key);
+                    if (value instanceof String) {
+                        sb.append(key).append('=').append(value).append(';');
+                    }
+                }
+                MLog.event("bose.detail.intent_extras",
+                        "all", sb.length() == 0 ? "none" : sb.toString());
+            }
+            for (String key : new String[]{"device", "device_mac_info", "second_navigation"}) {
+                String value = intent.getStringExtra(key);
+                if (value == null || value.isEmpty()) continue;
+                if (detailPageMacLogged.add(key + "=" + value)) {
+                    MLog.event("bose.detail.intent_mac", "key", key, "mac", value,
+                            "bose", BoseDeviceConfig.INSTANCE.matchesAddress(value));
+                }
+                // The first readable key decides it: a non-Bose page must NOT be stripped,
+                // because the user also owns a genuine OPPO Enco X3.
+                return isTargetAddress(value)
+                        || BoseDeviceConfig.INSTANCE.matchesAddress(value);
+            }
+            // Fallback: no known key present. Scan every string extra for a MAC-shaped
+            // value so the guard still works if the host renamed the key in this build.
+            if (extras != null) {
+                for (String key : extras.keySet()) {
+                    Object raw = extras.get(key);
+                    if (!(raw instanceof String)) continue;
+                    String value = (String) raw;
+                    if (!MAC_PATTERN.matcher(value).find()) continue;
+                    boolean bose = isTargetAddress(value)
+                            || BoseDeviceConfig.INSTANCE.matchesAddress(value);
+                    if (detailPageMacLogged.add("scan:" + value)) {
+                        MLog.event("bose.detail.intent_mac", "key", "scan:" + key,
+                                "mac", value, "bose", bose);
+                    }
+                    return bose;
+                }
+            }
+            if (detailPageMacLogged.add("none")) {
+                MLog.event("bose.detail.intent_mac", "key", "none");
+            }
+            return false;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** {@code AA:BB:CC:DD:EE:FF}, case-insensitive, anywhere inside the value. */
+    private static final java.util.regex.Pattern MAC_PATTERN = java.util.regex.Pattern.compile(
+            "(?i)\\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\\b");
+
+    private static final java.util.Set<String> detailPageMacLogged =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+
+    /**
      * 0.5.69 — removes the Enco sub-level lists our clone inherited.
      *
      * <p>0.5.72 REWRITE: the field-name version never fired. #4 persisted on device because
@@ -4126,6 +4419,72 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    /**
+     * 0.5.75 — read-back verification for #2 (通用设置 still shows no earphone photo even
+     * though {@code bose.image.applied surface=onespace} fires repeatedly).
+     *
+     * <p>"Applied" only proves we called setImageURI on field {@code e}. It does NOT prove
+     * the pixels are on screen: the view can be detached, zero-sized, GONE, or hidden
+     * behind an ancestor that the host collapsed. Per the standing rule (a diagnostic must
+     * read the value back, and report the artefact's real existence, not just the success
+     * flag), this walks the parent chain and reports the FIRST ancestor that would make the
+     * image invisible, plus the ImageView's own attached/size/visibility/drawable state.
+     * Fires once per (surface, view) so it never joins the layout-pass hot path.
+     */
+    private void reportBoseImageViewTruth(ImageView view, String surface) {
+        if (view == null) return;
+        // Bind time is BEFORE layout, so an immediate read would always report 0x0 and
+        // look like a false failure. Sample once shortly after settle and once late.
+        for (long delay : new long[]{700L, 2500L}) {
+            if (!boseImageTruthLogged.add(surface + "@" + delay)) continue;
+            mainHandler.postDelayed(() -> readBoseImageViewTruth(view, surface, delay), delay);
+        }
+    }
+
+    private void readBoseImageViewTruth(ImageView view, String surface, long delay) {
+        try {
+            if (!view.isAttachedToWindow()) {
+                MLog.event("bose.image.truth", "surface", surface, "t", delay,
+                        "attached", false);
+                return;
+            }
+            String blocker = "none";
+            View node = view;
+            for (int depth = 0; depth < 12 && node != null; depth++) {
+                ViewParent parent = node.getParent();
+                if (!(parent instanceof View)) {
+                    blocker = "root:" + (node.getClass().getSimpleName());
+                    break;
+                }
+                View p = (View) parent;
+                if (p.getVisibility() != View.VISIBLE) {
+                    blocker = p.getClass().getSimpleName() + ":vis=" + p.getVisibility();
+                    break;
+                }
+                if (p.getWidth() == 0 || p.getHeight() == 0) {
+                    blocker = p.getClass().getSimpleName() + ":0x0";
+                    break;
+                }
+                node = p;
+            }
+            MLog.event("bose.image.truth",
+                    "surface", surface,
+                    "t", delay,
+                    "attached", true,
+                    "size", view.getWidth() + "x" + view.getHeight(),
+                    "vis", view.getVisibility(),
+                    "drawable", view.getDrawable() != null,
+                    "tagged", BOSE_IMAGE_TAG.equals(view.getTag()),
+                    "blocker", blocker);
+        } catch (Throwable t) {
+            MLog.event("bose.image.truth_error", "surface", surface,
+                    "error", MLog.compactThrowable(t));
+        }
+    }
+
+    private static final java.util.Set<String> boseImageTruthLogged =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+
     private File materializeBoseImage() {
         Application application = currentApplication();
         AssetManager assets = sonyModuleAssets;
@@ -4304,6 +4663,7 @@ public final class HookModule extends XposedModule {
             applyBoseImage((ImageView) field, file, owner, "d");
             pinBoseImageView((ImageView) field);
             MLog.event("bose.image.applied", "surface", "onespace");
+            reportBoseImageViewTruth((ImageView) field, "onespace");
             return true;
         } catch (Throwable t) {
             MLog.event("bose.image.error", "surface", "onespace",
