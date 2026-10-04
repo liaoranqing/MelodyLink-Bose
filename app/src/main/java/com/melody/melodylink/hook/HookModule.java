@@ -1193,6 +1193,29 @@ public final class HookModule extends XposedModule {
                                         "into", String.valueOf(readField(result, "name")));
                             }
                         }
+                        // 0.5.74 — THE ACTUAL ROOT CAUSE OF #4 (Enco 交互残留), finally
+                        // pinned down by the log instead of guessed:
+                        //
+                        //   evt=bose.detail.whitelist mac=40:72:18:C7:75:70
+                        //       config=WhitelistConfigDTO
+                        //       dump=brand=oppo;id=067410;name=OPPO Enco X3;function=Function@b445412
+                        //
+                        // The detail page renders from THIS ORIGINAL host DTO. Our clone
+                        // (the one stripEncoSubLevels correctly cleans — the log shows
+                        // "sublevels_stripped modes=4 cleared=4") is never consulted for it,
+                        // so the Enco four-level ANC picker (Ba/x) and the 增强人声 switch
+                        // (Ba/A) keep being built from function.noiseReductionMode[].childrenMode.
+                        // Ba/m.smali:519-550 proves the guard is exactly that: an empty
+                        // childrenMode skips the Ba/x construction entirely.
+                        //
+                        // Guard: NEVER strip for the user's real Enco X3 (40:72:18:C7:75:70,
+                        // field-verified via dumpsys bluetooth_manager) — that would break a
+                        // genuine OPPO earphone page. Only the Bose side is rewritten.
+                        if (result != null && boseBonded()
+                                && !com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
+                                        .isExcluded(mac instanceof String ? (String) mac : null)) {
+                            stripEncoSubLevels(result);
+                        }
                         return result;
                     }
                     if ("detailSetVisibility".equals(label)) {
@@ -1254,31 +1277,24 @@ public final class HookModule extends XposedModule {
                         return result;
                     }
                     if ("detailActivityFinish".equals(label)) {
-                        // 0.5.73 forensic + guard. Log WHO finishes our detail activity.
-                        // User-initiated exits (back key / toolbar back / menu) must always
-                        // pass through — memory proves the host's back key just calls
-                        // finish(). Everything else on OUR tracked activity is host
-                        // auto-close logic (the checkBluetoothAddress-failed path in
-                        // G9/H.onActivityCreated is one proven candidate); swallow it, but
-                        // cap the blocks so the user can never be trapped in an unclosable
-                        // page (lesson #13: destructive host interception needs guards).
+                        // 0.5.74 ROLLBACK of the 0.5.73 interception — FORENSIC ONLY.
+                        // The 0.5.73 log named the caller: DetailMainActivity.onCreate:60,
+                        // which is the host's "finish previous instance" singleton guard
+                        // (smali: WeakReference to the previous DetailMainActivity, finish()
+                        // when a new one is created). Swallowing it broke the host's own
+                        // self-consistency: the old instance stayed alive while a new one was
+                        // created, producing the exact multi-instance fight the user saw as
+                        // "flash -> blank -> reappear -> vanish" (7 consecutive no_app_frame
+                        // finishes followed, once our 6-block cap was exhausted).
+                        // Never block finish() again. Keep the caller chain in the log so the
+                        // real teardown trigger stays observable.
                         Object self = chain.getThisObject();
-                        if (!(self instanceof Activity) || self != detailActivity
-                                || !boseBonded()) {
-                            return chain.proceed();
+                        if (self instanceof Activity && self == detailActivity) {
+                            if (finishCallSites.add(hostCallerChain(4))) {
+                                MLog.event("bose.detail.finish", "caller", hostCallerChain(6));
+                            }
                         }
-                        String caller = hostCallerChain(6);
-                        boolean userInitiated = caller.contains("onBackPressed")
-                                || caller.contains("onKeyDown")
-                                || caller.contains("onKeyUp")
-                                || caller.contains("onClick")
-                                || caller.contains("onNavigateUp")
-                                || caller.contains("onOptionsItemSelected");
-                        MLog.event("bose.detail.finish",
-                                "blocked", !userInitiated, "caller", caller);
-                        if (userInitiated) return chain.proceed();
-                        if (detailFinishBlocked.incrementAndGet() > 6) return chain.proceed();
-                        return null; // swallow the host's auto-finish
+                        return chain.proceed();
                     }
                     if ("detailFragmentCreated".equals(label)) {
                         Object result = chain.proceed();
@@ -1432,8 +1448,6 @@ public final class HookModule extends XposedModule {
                         Object result = chain.proceed();
                         if (chain.getThisObject() instanceof Activity) {
                             detailActivity = (Activity) chain.getThisObject();
-                            // 0.5.73: fresh visit, fresh finish-guard budget.
-                            detailFinishBlocked.set(0);
                             // Local final alias: the delayed lambdas below capture it, and a
                             // field reference would work too but this keeps the compiler
                             // honest about the capture (0.5.26 referenced an 'activity'
@@ -3187,13 +3201,12 @@ public final class HookModule extends XposedModule {
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     /**
-     * 0.5.73 cap for the Activity.finish guard: at most 6 host auto-finishes are
-     * swallowed per detail-page visit (reset on every detailActivityCreate), so the user
-     * can never be trapped in an unclosable page. User-initiated finishes pass through
-     * unconditionally.
+     * 0.5.74: dedup set for the Activity.finish forensic log (replaces the 0.5.73
+     * block counter — interception was rolled back after it was proven to break the
+     * host's finish-previous-instance singleton guard).
      */
-    private static final java.util.concurrent.atomic.AtomicInteger detailFinishBlocked =
-            new java.util.concurrent.atomic.AtomicInteger(0);
+    private static final java.util.Set<String> finishCallSites =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
 
     /**
      * 0.5.71 re-entry guard for the detailSetVisibility hook. Set while WE call

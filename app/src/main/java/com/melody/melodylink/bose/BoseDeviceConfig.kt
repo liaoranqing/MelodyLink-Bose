@@ -24,6 +24,22 @@ object BoseDeviceConfig {
      */
     val KNOWN_MACS: Set<String> = setOf("68:F2:1F:3D:41:D7")
 
+    /**
+     * 0.5.74. Field-verified on the user's Find X8 Ultra (dumpsys bluetooth_manager):
+     * 40:72:18:C7:75:70 is a REAL OPPO Enco X3 the user also owns — not the Bose.
+     * The host's whitelist lookup answers for it with the genuine
+     * {@code id=067410 name=OPPO Enco X3} DTO, and stripping the Enco four-level ANC
+     * sub-levels there would break that earphone's own page. Everything we do to a
+     * lookup result must therefore EXCLUDE this address.
+     */
+    val EXCLUDED_MACS: Set<String> = setOf("40:72:18:C7:75:70")
+
+    /** True when [address] is a device we must never rewrite. */
+    fun isExcluded(address: String?): Boolean {
+        if (address.isNullOrBlank()) return false
+        return EXCLUDED_MACS.any { it.equals(address, ignoreCase = true) }
+    }
+
     /** ColorOS-facing mode constants verified on the device. */
     const val MODE_QUIET = 0
     const val MODE_AWARE = 1
