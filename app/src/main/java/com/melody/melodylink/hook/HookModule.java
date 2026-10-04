@@ -635,6 +635,19 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "G9.Q", "onHiddenChanged", 1, "detailFragHidden");
             // t() is the whole page: setPreferencesFromResource(0x7f140012).
             hookNamed(loader, "G9.Q", "t", 0, "detailFragBuild");
+            // 0.5.65: 0.5.64 device logs are decisive —
+            //   evt=bose.anc.tree_row_hidden key=NoiseReductionItem
+            //       visible_after=false view_gone=false
+            // setVisible(false) DID work, but getView() returned null, i.e. the row had not
+            // been bound yet at sweep time, so there was no view to collapse. The bind happens
+            // later, per RecyclerView pass, which is why the picker came back. Hiding the row
+            // again right after every bind closes the loop.
+            hookNamed(loader,
+                    "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem",
+                    "onBindViewHolder", 1, "detailAncBind");
+            hookNamed(loader,
+                    "com.oplus.melody.onespace.items.OneSpaceNoisePreference",
+                    "onBindViewHolder", 1, "onespaceAncBind");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "f", 4, "deviceInfo");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "c", 1, "deviceRegistryAdd");
             hookNamed(loader, "com.oplus.melody.btsdk.api.manager.DeviceInfoManager", "d", 1, "deviceRegistryGet");
@@ -1105,6 +1118,61 @@ public final class HookModule extends XposedModule {
                                     result == null || readField(result, "function") == null,
                                     "children", result == null ? "-" : describeChildren(result),
                                     "dto", result == null ? "null" : describeDto(result));
+                        }
+                        return result;
+                    }
+                    if ("onespaceAncBind".equals(label)) {
+                        // 0.5.65: same reasoning for 通用设置, where the "降噪效果" row the
+                        // user keeps seeing actually lives. Its onBindViewHolder is declared
+                        // final on OneSpaceNoisePreference, which is still hookable.
+                        Object result = chain.proceed();
+                        try {
+                            Object pref = chain.getThisObject();
+                            if (pref != null && boseBonded()) {
+                                PrefRef.setVisible(pref, false);
+                                Object view = PrefRef.invokeNoArg(pref, "getView");
+                                boolean gone = false;
+                                if (view instanceof View) {
+                                    ((View) view).setVisibility(View.GONE);
+                                    ((View) view).setEnabled(false);
+                                    gone = true;
+                                }
+                                if (!onespaceBindReported.compareAndSet(false, true)) {
+                                    MLog.event("bose.anc.onespace_bind_hidden",
+                                            "class", pref.getClass().getSimpleName(),
+                                            "view_gone", gone);
+                                }
+                            }
+                        } catch (Throwable t) {
+                            MLog.event("bose.anc.onespace_bind_error",
+                                    "error", MLog.compactThrowable(t));
+                        }
+                        return result;
+                    }
+                    if ("detailAncBind".equals(label)) {
+                        // Runs on every RecyclerView pass, so it is idempotent by nature: the
+                        // row is re-hidden each time it is bound. This is the only point where
+                        // a real View exists, which the tree sweep could not use.
+                        Object result = chain.proceed();
+                        try {
+                            Object pref = chain.getThisObject();
+                            if (pref != null && boseBonded()) {
+                                PrefRef.setVisible(pref, false);
+                                Object view = PrefRef.invokeNoArg(pref, "getView");
+                                boolean gone = false;
+                                if (view instanceof View) {
+                                    ((View) view).setVisibility(View.GONE);
+                                    ((View) view).setEnabled(false);
+                                    gone = true;
+                                }
+                                if (!ancBindReported.compareAndSet(false, true)) {
+                                    MLog.event("bose.anc.bind_hidden",
+                                            "class", pref.getClass().getSimpleName(),
+                                            "view_gone", gone);
+                                }
+                            }
+                        } catch (Throwable t) {
+                            MLog.event("bose.anc.bind_error", "error", MLog.compactThrowable(t));
                         }
                         return result;
                     }
@@ -3003,6 +3071,14 @@ public final class HookModule extends XposedModule {
     }
 
     private volatile boolean ancSweepScheduled;
+
+    /** One-shot marker so the bind-time hide is reported once, not on every pass. */
+    private static final java.util.concurrent.atomic.AtomicBoolean ancBindReported =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** One-shot marker for the 通用设置 bind-time hide. */
+    private static final java.util.concurrent.atomic.AtomicBoolean onespaceBindReported =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private void hideEncoAncRowsInTree(Object group) {
         int[] hidden = {0};
