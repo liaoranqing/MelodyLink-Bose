@@ -2974,7 +2974,11 @@ public final class HookModule extends XposedModule {
     private void scheduleAncTreeSweep(final Object screen) {
         if (ancSweepScheduled) return;
         ancSweepScheduled = true;
-        long[] delays = {0L, 120L, 400L, 900L, 1800L};
+        // 0.5.63: last attempt ended at 1800 ms, but the host keeps appending sections for
+        // as long as the whitelist content resolves, and the Enco ANC row is one of the last
+        // ones. A couple of later, cheap retries close that window; each one only reads the
+        // tree and hides matching classes, so an extra pass is harmless.
+        long[] delays = {0L, 120L, 400L, 900L, 1800L, 3000L, 5000L};
         for (int i = 0; i < delays.length; i++) {
             final int attempt = i;
             mainHandler.postDelayed(() -> {
@@ -3155,7 +3159,11 @@ public final class HookModule extends XposedModule {
                 String key = PrefRef.getKey(child);
                 if (sb.length() > 0) sb.append(' ');
                 sb.append(key == null ? "null" : key)
-                  .append('=').append(PrefRef.getOrder(child));
+                  .append('=').append(PrefRef.getOrder(child))
+                  // 0.5.63: the key alone is ambiguous because 0.5.61 logs showed names like
+                  // "NoiseReductionItem" while G9/Q.y holds "noise". Printing the class too
+                  // makes it unambiguous which of the two spaces a row lives in.
+                  .append('@').append(child.getClass().getSimpleName());
             }
         } catch (Throwable t) {
             sb.append("err:").append(t.getClass().getSimpleName());
