@@ -1,20 +1,23 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
 > **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 12:47 · 当前版本 **2.0.0 / versionCode 200**（Bose 专用精简版）· 1.0.0 已发布 GitHub Release；1.0.1/2.0.0 待推送。  
+> 生成时间：2026-10-05 19:50 · 当前版本 **2.0.1 / versionCode 201**（Bose 专用精简版）· 本地领先远端 4 个提交（1.0.1/2.0.0-fix×2/2.0.1），**用户尚未 push，CI 未验证 2.0.0 之后任何版本**。
 > 这份文档是**唯一权威交接入口**，接手后先通读全文，再动手。配套文档在仓库 `docs/` 目录与本地 `.workbuddy/memory/` 日志。
+> **交接状态**：上一任模型 token 耗尽。2.0.1 已提交但未装机验证，最高优先级事项见 §8。
 
 ---
 
 ## 0. 一页速览（30 秒上手）
 
 - **项目是什么**：一个 LSPosed 模块，让 Bose QC Ultra Earbuds 2 在 OPPO/一加的耳机管理应用 Melody（`com.oplus.melody` 17.6.3）里原生工作（识别、产品图、降噪三态、CNC、电量）。
-- **当前状态**：三个历史 bug（#1 详情页闪屏 / #2 通用设置无图 / #4 Enco 降噪残留）**全部修复并实机验证**，已发布 1.0.0 正式版。
-- **唯一遗留**：通用设置页的「降噪等级」滑条（`cnc.onespace.skip reason=no_tree`），低优先级，用户未报，见 §8。
-- **最重要的 3 件事**：
+- **当前状态**：2.0.0 起为 Bose 专用精简版（删光 Sony/Huawei/Xiaomi/Samsung 适配层、Compose UI、约 8200 行）。1.0.0 已发布；**1.0.1 之后的提交均在本地未 push**。
+- **最优先未完成事项（2.0.1 待验证）**：详情页 3D 模型 —— 2.0.0 发现宿主模型格式是自研 `.vfxms` 容器而非裸 glb，2.0.1 已把 Bose glb 打包成 vfxms（套 X3 的场景 JSON + IBL/skybox KTX），**尚未装机验证**。详见 §8。
+- **最重要的 5 件事**（比旧版多 2 条，都是血的教训）：
   1. 所有 Hook 在 `hook/HookModule.java`（~8000 行），按 `label` 统一分发。
   2. 宿主有**两套设备目录**（`L6/a` 按 MAC、`c9/a` 按 productId+name），查错目录 = 白干。
   3. 进程有**主进程 + `:fg` 两个进程**，跨进程状态不能用内存字段。
+  4. **宿主模型格式是 `.vfxms` 容器，不是裸 glb**（2.0.0 取证）：`ModelScene.loadSceneFromBuffer` → `Head.read` 解析 10 个大端 u32（configStart/Length、glbStart/Length、iblStart/Length、skyboxStart/Length、animationStart/Length）→ 之后是 JSON 场景配置 + glb + KTX IBL + KTX skybox。裸 glb 会让 "glTF" magic 被读成 configStart(≈17亿)，配置读取越界，被 try/catch 静默吞掉 → 空白页。参考文件已拉到本地 `bose3d/detail_model.vfxms`（X3 的），打包脚本 `bose3d/make_vfxms2.py`。
+  5. **Bose 会话 colorId 必须伪装成 3**（2.0.0 修复）：宿主按 (productId, colorId) 索引资源包，Bose 默认 colorId=-1 查不到任何资源 → detailSource=null → 3D/图片全不走。hook `EarphoneDTO.getColorId()` 对 Bose MAC 返回 3。副作用：宿主会第一次拿到 X3 全套资源并主动渲染 X3，我们的替换必须全部就绪才能盖住它。
 - **文档体系**：README + docs/（ARCHITECTURE / REVERSING / TROUBLESHOOTING / PORTING / TOOLS）已在 GitHub 上。
 
 ---
@@ -24,9 +27,12 @@
 1. **不本地编译 APK**：本机无 Android SDK/Gradle，构建全走 GitHub Actions（`.github/workflows/build.yml`）。本地只改代码 + 静态检查 + 提交。
 2. **严禁 adb reboot / 任何重启手机**：用户 OPPO Find X8 Ultra 是**临时 root**（漏洞提权，重启即失效且极难重新获取）。诊断只用 force-stop、读日志、查数据库。
 3. **每次改动递增版本号**：`app/build.gradle.kts` 的 `versionCode` + `versionName`。
-4. **push 走 GitHub API（不是 git push）**：`github.com` 直连和沙箱代理都被墙（502），只有 `api.github.com` 稳定可达（200）。所以 push 必须用 **Git Data API**（见 §9.3），不能用 `git push`。这是 2026-10-05 新确立的方式，取代旧的「用户手动 push」铁律。
+4. **push 靠用户 GitHub Desktop**：本仓库已加进 GitHub Desktop（D 盘路径）。`github.com` 直连被墙，但 GitHub Desktop 内部走自己的代理能 push（本次 1.0.1/2.0.0 都推成功）。命令行 `git push` 会失败。若用户不在，才退回 Git Data API（api.github.com 可达，见 §9.3）。
 5. **不要猜契约**：用户多次因猜测翻车。正确节奏 = dexdump/日志取证 → 小步修复 → 用户实测 → 迭代。交付时写清楚版本号、待推送提交、验证清单。
 6. CI 失败时用户会下载 Actions 日志 zip → 解压看构建步骤日志。
+7. **源码文件严禁用 Windows PowerShell 的 Get-Content/Set-Content 编辑**：5.1 按 GBK 读 UTF-8 中文文件再写回会①全部中文注释变乱码 ②吞换行，甚至把代码挤进注释（曾致 CI `cannot find symbol`）。读用 Edit/Read 工具或 python utf-8 读，写用 Edit/Write 工具或 python `io.open(...,encoding='utf-8')`。PowerShell 只用来做无害的查询（行数、Select-String 只读）。
+8. **删代码后必须验证"顺手重试/维护状态"的隐性依赖还在**：2.0.0 剥离 whitelist 分支的 `isRegisteredSonyName()` 时，顺带删掉了它作为 initializeSonyConfig 重试者的副作用，导致 onPackageReady 初始化失败后再无人重试、所有资产不可用。删任何调用点前先问"这个调用点保障了什么状态"。
+9. **剥离/批量删除用脚本时**：多行字段（匿名监听器）和注册语句（多行 hookAny）要单独处理；正则删分支容易误切内层 `}` 造成失衡；删完跑 `static_check.py` + 残留引用扫描（`bose3d/dangling_refs.py`）+ 乱码/符号检查（`bose3d/final_verify.py`）三道闸。
 
 ---
 
@@ -127,10 +133,16 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ---
 
-## 8. 当前待办（按优先级）
+## 8. 当前待办（按优先级，2026-10-05 19:50）
 
-1. **CNC 通用设置滑条**（低优先级，唯一遗留）：`cnc.onespace.skip reason=no_tree` —— 通用设置页降噪等级滑条没挂载，`findOneSpacePreferenceTree` 遍历 fragment 找含 `pref_noise_switch` 的 screen 返回 null。详情页降噪控制正常，用户未报。**不主动改**（铁律：一次只引入一个变量）。
-2. 若用户后续要求：Sony WF-1000XM5 等具体机型的「移植实操」已写了通用框架（docs/PORTING.md），可按需展开。
+1. **最高优先级：2.0.1 装机验证（模型 vfxms 打包）**。已提交 `45726ef` 但**本地未 push、CI 未构建、未装机**。用户需先 push（GitHub Desktop → Push origin，4 个待推提交：1.0.1 `009def5`、2.0.0 `98a64f2`→被 `401c305` 重建、`9f60d92`、2.0.1 `45726ef`）。装机后打开详情页确认：
+   - 期望：Bose 3D 模型出现（不再空白、不再变 X3）。日志应有 `bose.colorid.override` → `bose.model.swap`，宿主进程应出现 `Filament: FEngine created` + `loadModelFromBuffer` 后无异常。
+   - 若仍空白：在 `boseDetailModel` 分支加一个 `ModelScene.loadSceneFromBuffer` 的 hook，把传入 ByteBuffer 的前 40 字节 + catch 到的异常打到 MLog（`bose.model.loadbuf`），再抓日志定位 Head.read 具体崩在哪。脚本 `bose3d/make_vfxms2.py` 里 `modelScale`/`light` 字段可调。
+   - 若模型显示但取景不对（过大/过小/角度怪）：调 vfxms JSON 的 `modelScale`，重新打包，bump 缓存名 v3。
+2. **通用设置图片**：2.0.0 已确认修复（`bose.image.applied surface=onespace`），随 2.0.1 一并验证。
+3. **转圈**：2.0.0 已确认修复（`bose.header.spinner_killed`），随 2.0.1 验证。
+4. **CNC 通用设置滑条**（低优先级，历史遗留）：`cnc.onespace.skip reason=no_tree`。详情页降噪控制正常，用户未报。**不主动改**（铁律：一次只引入一个变量）。
+5. 2.0.0 剥离后 `hook/MelodyDeviceBridge.kt`/vendor 等已删；若未来要加回其他品牌，参考 git 历史 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
 
 ---
 
@@ -180,6 +192,10 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 2.0.0 (versionCode 200)   Bose 专用精简版：删除 Sony/Huawei/Xiaomi/Samsung 全部适配层/assets/Compose UI（-8200 行）；
                           修 3D 模型（根因=Bose 会话 colorId=-1，hook EarphoneDTO.getColorId()→3 借用 X3 color 3 资源包）；
                           修通用设置转圈（根因=onShowAnimationEnd 重播 Lottie，透明图暴露；hook 杀掉）
+2.0.1 (versionCode 201)   模型资产改 .vfxms 容器（裸 glb 会让 Head.read 把 glTF magic 误当 configStart 越界）；缓存名 v2.vfxms，长度 13239307。待装机验证
+2.0.0 (versionCode 200)   Bose 专用精简版：删 Sony/Huawei/Xiaomi/Samsung 全部适配层+Compose UI（-8200 行，266 文件）；
+                          hook EarphoneDTO.getColorId→3（colorId=-1 致 detailSource=null）；hook onShowAnimationEnd 杀转圈；
+                          initializeSonyConfig 失败重试（onPackageReady 早于 attach，剥离后失去顺手重试）。本地未 push
 1.0.1 (versionCode 106)   详情页 3D 模型移植：hook b(String) 换内置 Bose glb（Filament/gltfio）+ 产品图抠透明背景（v3）
 1.0.0 (versionCode 105)   正式版发布：README+docs+tools 文档体系、Release v1.0.0
 0.5.78 (104)              #2 真修复 hideLoadingView 类型判断 + #1 DecorView raw 栈
