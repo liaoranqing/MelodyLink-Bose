@@ -1,9 +1,9 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
 > **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 20:50 由接管模型（Qoder）更新** · 当前版本 **2.0.3 / versionCode 203**（Bose 专用精简版）· 本地 HEAD=`ad8691c` **未 push**；2.0.2 已装机复验失败（照片/蓝/小），2.0.3 据 fresh 日志+视频取证重修。
+> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 22:05 由接管模型（Qoder）更新** · 当前版本 **2.0.5 / versionCode 205**（Bose 专用精简版）· **origin/main=`a4a3b8a`（2.0.5 已 push），等 CI+装机复验**。详情页"只留模型去照片"已反复失败（2.0.2~2.0.5），血泪教训见 §1.10。
 > 这份文档是**技术权威交接入口**，接手后先通读全文，再动手。**接管流程/日志规范先看工作区根目录 `ONCALL-PROTOCOL.md` 与 `opslog/STATUS.md`**（当前状态快照以 STATUS.md 为准）。
-> **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管。2.0.1 已提交已 push、未装机验证，最高优先级事项见 §8。
+> **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管。当前 2.0.5 已 push 待验证，遗留 bug1(ANC图标)/bug2(内容偶发消失) 待取证。最高优先级见 §8。
 
 ---
 
@@ -33,6 +33,7 @@
 7. **源码文件严禁用 Windows PowerShell 的 Get-Content/Set-Content 编辑**：5.1 按 GBK 读 UTF-8 中文文件再写回会①全部中文注释变乱码 ②吞换行，甚至把代码挤进注释（曾致 CI `cannot find symbol`）。读用 Edit/Read 工具或 python utf-8 读，写用 Edit/Write 工具或 python `io.open(...,encoding='utf-8')`。PowerShell 只用来做无害的查询（行数、Select-String 只读）。
 8. **删代码后必须验证"顺手重试/维护状态"的隐性依赖还在**：2.0.0 剥离 whitelist 分支的 `isRegisteredSonyName()` 时，顺带删掉了它作为 initializeSonyConfig 重试者的副作用，导致 onPackageReady 初始化失败后再无人重试、所有资产不可用。删任何调用点前先问"这个调用点保障了什么状态"。
 9. **剥离/批量删除用脚本时**：多行字段（匿名监听器）和注册语句（多行 hookAny）要单独处理；正则删分支容易误切内层 `}` 造成失衡；删完跑 `static_check.py` + 残留引用扫描（`bose3d/dangling_refs.py`）+ 乱码/符号检查（`bose3d/final_verify.py`）三道闸。
+10. **隐藏详情页 3D 模型旁边的照片 ImageView(field d) 绝不能用 GONE/INVISIBLE**：实机取证（2.0.1/2.0.2 d=VISIBLE→模型正常；2.0.3 d=GONE、2.0.4 d=INVISIBLE→产品容器占位还在但模型不渲染，见 logs/now_detail.png）证明**模型渲染依赖 d 处于 VISIBLE**。要去掉照片只能让 d 保持 VISIBLE 再把 **alpha 钳到 0**（`bosePhotoAlphaClamp` + `detailSetVisibility` 顶回 VISIBLE），即 2.0.5 方案。改 visibility 会连带杀掉模型——已因此连续失败两次。
 
 ---
 
@@ -133,19 +134,21 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ---
 
-## 8. 当前待办（按优先级，2026-10-05 20:50）
+## 8. 当前待办（按优先级，2026-10-05 22:05）
 
-> 2.0.2 装机复验失败（照片仍闪现且卡在模型后、模型偏蓝、偏小）。已用 fresh 日志(logs/0582)+复现视频取证重修为 **2.0.3（commit `ad8691c`）**，待 push+CI+复验。实时状态见 `opslog/STATUS.md`。
+> 实时状态以 `opslog/STATUS.md` 为准。详情页"只留模型、去照片"这条已反复失败多次，血泪教训见 §1.10。当前 **2.0.5（`a4a3b8a`）已 push，等 CI+装机复验**。
 
-1. **最高优先级：2.0.3 复验**。`ad8691c` 未 push。取证结论（防回退）：
-   - **2.0.2 的 setAlpha 钳制是错方案**：它把宿主自己的照片淡出钉回 alpha=1.0（照片卡模型后＝bug2 真因），且延迟淡出依赖 `ModelScene.loadSceneFromBuffer`——日志显示 8 次 model.swap 只触发 1 次（重复打开宿主 `initModel,mModelViewer is not null` 提前返回）。已全部回退。
-   - **新方案**：详情页只留 3D 模型。照片 ImageView（field d，与模型容器 a 是 findViewById 并列兄弟）登记进 `boseDetailPhotos`，在既有 `detailSetVisibility`(View.setVisibility) 集中拦截点把宿主 d()/e()/f() 的 VISIBLE 一律改判 GONE。只往 GONE、只针对已知 view，不重蹈 0.5.69 遮罩回归。
-   - **偏蓝＝模型资产**：glb 的 `*_Moonstone` 材质 baseColorFactor=[0.434,0.68,1.0]（纯蓝无贴图）→ 已在 glb 白化为 [0.92,0.92,0.92]。
-   - **偏小**：modelScale 1.25→1.5。资产 v4、`BOSE_MODEL_LENGTH`=13239202、缓存名 `bose_qcue2_v4.vfxms`。
-   - 复验点：详情页应只有 3D 模型（冷启动可能短暂空白再出模型——若不接受，改回"与模型同色照片做原生 crossfade"）；模型白色；比 2.0.2 大 20%。尺寸再调改 `bose3d/make_vfxms4.py` 的 `MODEL_SCALE` 重打包 v5。
-2. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.3 回归。
-3. **CNC 通用设置滑条**（低优先级，历史遗留）：`cnc.onespace.skip reason=no_tree`。详情页降噪控制正常，用户未报。**不主动改**（铁律：一次只引入一个变量）。
-4. 2.0.0 剥离后 `hook/MelodyDeviceBridge.kt`/vendor 等已删；若未来要加回其他品牌，参考 git 历史 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
+1. **最高优先级：2.0.5 装机复验**。`a4a3b8a` 已 push（origin/main=`a4a3b8a`）。详情页去照片的演进（务必读懂，别再走回头路）：
+   - 2.0.2 setAlpha 钳到 1（照片钉在模型前）→ 错，照片卡后面。已回退。
+   - 2.0.3 照片 field d 设 GONE → 模型消失。2.0.4 设 INVISIBLE → 模型仍不渲染（截图 logs/now_detail.png：产品容器占位在、纯黑）。
+   - **实锤规律（§1.10）：模型渲染依赖 d 处于 VISIBLE**。2.0.5 改为：d 保持 VISIBLE + `setAlpha` 钳到 0（`bosePhotoAlphaClamp`，单 volatile View 引用无锁比较）+ `detailSetVisibility` 把 d 顶回 VISIBLE。照片透明不可见、模型照常渲染。
+   - 复验点：详情页应=白色、放大的 3D 模型、无照片、模型不消失。**若 2.0.5 模型仍不出现**：不要再折腾 visibility/alpha，直接回退到 2.0.1 已知可用行为（`replaceBoseDetailImageNow` 装 PNG、宿主原生 crossfade，照片会闪现但模型稳定），把"去照片"降级为待研究的独立课题。
+   - 资产 v4（`BOSE_MODEL_LENGTH`=13239202、`bose_qcue2_v4.vfxms`）：glb 的 `*_Moonstone` 材质白化为 [0.92,0.92,0.92]（去蓝）、modelScale 1.5。再调尺寸改 `bose3d/make_vfxms4.py` 的 `MODEL_SCALE` 重打包。
+2. **bug1：ANC 三态按钮图标不更新**（点击有反应/或无反应，但选中态图标不变）。已取证：点击时 `nativeNoiseReductionClick` 触发但 `noiseModeWrite`/`opsReductionSwitchToCurrentMode` 0 次；`dispatchCustomAncWrite` 只写 Bose 不刷新宿主选中态。`nativeNoiseReductionClick`/`dtoNoiseReductionMode` 处理与 1.0.1 逐字相同 → 回归点疑在 2.0.0 剥离删掉的"写后驱动宿主重读/重绑图标"隐性依赖（§1.8 lesson#8）。**需 fresh 日志+smali 单独取证**，勿猜。用户称很久前修过。
+3. **bug2：Bose 注入内容偶发消失**（详情页，概率低）。用户也无法稳定复现，挂起观察，需现场日志。
+4. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.5 回归。
+5. **CNC 通用设置滑条**（低优先级）：`cnc.onespace.skip reason=no_tree`。不主动改（一次只引入一个变量）。
+6. 2.0.0 剥离后 vendor 等已删；加回其他品牌参考 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
 
 ---
 
