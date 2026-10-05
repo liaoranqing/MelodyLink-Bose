@@ -1,7 +1,7 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
 > **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 20:10 由接管模型（Qoder）更新** · 当前版本 **2.0.2 / versionCode 202**（Bose 专用精简版）· 本地 main=`8db6c45` **领先 origin/main=`929ccad`，2.0.2 未 push**；2.0.1 已装机（模型可出，遗留三瑕疵，2.0.2 修复中）。
+> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 20:50 由接管模型（Qoder）更新** · 当前版本 **2.0.3 / versionCode 203**（Bose 专用精简版）· 本地 HEAD=`ad8691c` **未 push**；2.0.2 已装机复验失败（照片/蓝/小），2.0.3 据 fresh 日志+视频取证重修。
 > 这份文档是**技术权威交接入口**，接手后先通读全文，再动手。**接管流程/日志规范先看工作区根目录 `ONCALL-PROTOCOL.md` 与 `opslog/STATUS.md`**（当前状态快照以 STATUS.md 为准）。
 > **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管。2.0.1 已提交已 push、未装机验证，最高优先级事项见 §8。
 
@@ -133,16 +133,17 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ---
 
-## 8. 当前待办（按优先级，2026-10-05 20:10）
+## 8. 当前待办（按优先级，2026-10-05 20:50）
 
-> 2.0.1 已装机：3D 模型能出（vfxms 方案有效），但用户实测发现三处小瑕疵，已在 **2.0.2（commit `8db6c45`）** 修复，待 push+CI+复验。实时状态见工作区根 `opslog/STATUS.md`。
+> 2.0.2 装机复验失败（照片仍闪现且卡在模型后、模型偏蓝、偏小）。已用 fresh 日志(logs/0582)+复现视频取证重修为 **2.0.3（commit `ad8691c`）**，待 push+CI+复验。实时状态见 `opslog/STATUS.md`。
 
-1. **最高优先级：2.0.2 复验三修复**。提交 `8db6c45` **未 push**（本地领先 origin/main=`929ccad`）。用户 GitHub Desktop push → CI 构建 → 装机确认：
-   - **照片闪现**（2.0.1：打开详情页照片先淡到空白、模型后冒）：根因＝宿主 `MelodyDetailModelView.b()` 一被调用就对照片 ImageView 起 600ms alpha 淡出，而 13MB 模型要异步读盘+`loadSceneFromBuffer` 才出现。修复＝冻结期把该 view 的 `View.setAlpha` 钳在 1.0（`bosePhotoAlphaClamp`，volatile `photoFreezeActive` 短路护热路径），改由 `ModelScene.loadSceneFromBuffer`（`boseSceneLoaded`）返回后主线程重放淡出；5s 兜底。期望：照片在模型就绪后才平滑淡出，不再先空。
-   - **模型偏小**：`modelScale` 1.0→1.25（updateScale 证得渲染尺寸∝modelScale，线性）。
-   - **过曝**：`iblIntensity` 33000→18000、`enableBloom` true→false。
-   - 三者均在 `bose3d/make_vfxms3.py` 顶部常量可调（MODEL_SCALE/IBL_INTENSITY/BLOOM），重打包后 bump 缓存名 v4 + 同步 `BOSE_MODEL_LENGTH`。**注意：几何体未删**——Plane 节点世界坐标很小（整场景仅 0.18 单位），删它们既不解决尺寸又可能误删金色件，别重蹈覆辙。
-2. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.2 一并回归。
+1. **最高优先级：2.0.3 复验**。`ad8691c` 未 push。取证结论（防回退）：
+   - **2.0.2 的 setAlpha 钳制是错方案**：它把宿主自己的照片淡出钉回 alpha=1.0（照片卡模型后＝bug2 真因），且延迟淡出依赖 `ModelScene.loadSceneFromBuffer`——日志显示 8 次 model.swap 只触发 1 次（重复打开宿主 `initModel,mModelViewer is not null` 提前返回）。已全部回退。
+   - **新方案**：详情页只留 3D 模型。照片 ImageView（field d，与模型容器 a 是 findViewById 并列兄弟）登记进 `boseDetailPhotos`，在既有 `detailSetVisibility`(View.setVisibility) 集中拦截点把宿主 d()/e()/f() 的 VISIBLE 一律改判 GONE。只往 GONE、只针对已知 view，不重蹈 0.5.69 遮罩回归。
+   - **偏蓝＝模型资产**：glb 的 `*_Moonstone` 材质 baseColorFactor=[0.434,0.68,1.0]（纯蓝无贴图）→ 已在 glb 白化为 [0.92,0.92,0.92]。
+   - **偏小**：modelScale 1.25→1.5。资产 v4、`BOSE_MODEL_LENGTH`=13239202、缓存名 `bose_qcue2_v4.vfxms`。
+   - 复验点：详情页应只有 3D 模型（冷启动可能短暂空白再出模型——若不接受，改回"与模型同色照片做原生 crossfade"）；模型白色；比 2.0.2 大 20%。尺寸再调改 `bose3d/make_vfxms4.py` 的 `MODEL_SCALE` 重打包 v5。
+2. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.3 回归。
 3. **CNC 通用设置滑条**（低优先级，历史遗留）：`cnc.onespace.skip reason=no_tree`。详情页降噪控制正常，用户未报。**不主动改**（铁律：一次只引入一个变量）。
 4. 2.0.0 剥离后 `hook/MelodyDeviceBridge.kt`/vendor 等已删；若未来要加回其他品牌，参考 git 历史 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
 
