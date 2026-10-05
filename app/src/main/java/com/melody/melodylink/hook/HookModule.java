@@ -475,13 +475,18 @@ public final class HookModule extends XposedModule {
             // reaches b() when c() (device capability) passes AND the DTO's model
             // file exists (o.h), and for a Bose session the DTO is the stripped Enco
             // X3 one, so the host would play the X3 model. Swap the path to our
-            // bundled Bose glb instead; the 2D photo (field d) is forced GONE so only
-            // the 3D model shows (see boseDetailPhotos / replaceBoseDetailImageNow).
+            // bundled Bose glb instead; the 2D photo (field d) is kept VISIBLE but
+            // transparent so only the 3D model shows (see boseTransparentPhoto /
+            // replaceBoseDetailImageNow).
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "b", 1, "boseDetailModel");
-            // 2.0.3: the detail 2D photo is suppressed by forcing field-d GONE from
-            // the existing detailSetVisibility choke point (see boseDetailPhotos), not
-            // by a setAlpha clamp — the 2.0.2 clamp broke the host's own fade-out and
-            // left the photo stuck behind the model. No new hook needed here.
+            // 2.0.5: keep the detail photo VISIBLE (the model only renders while field d
+            // is VISIBLE) but pinned transparent. The host's b() sets d alpha 1 then
+            // cross-fades to 0; we clamp every setAlpha on the current detail photo to
+            // 0f so it never becomes visible. Single volatile-ref compare (no lock), so
+            // the hot View.setAlpha path stays cheap even when active (ANR lesson #7).
+            hookNamed(loader, "android.view.View", "setAlpha", 1, "bosePhotoAlphaClamp");
+            // 2.0.5: detailSetVisibility additionally forces the same photo back to
+            // VISIBLE if the host tries to GONE it (which would again blank the model).
             // 2.0.0 bug fix (3D model not loading): the host logs
             // "picFilePath not match, productId: 067410, colorId: -1" for a Bose
             // session — the device DTO carries the default colorId -1 while the
@@ -752,17 +757,14 @@ public final class HookModule extends XposedModule {
                         if (com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(modelAddress)) {
                             File modelFile = materializeBoseModel();
                             if (modelFile != null) {
-                                // 2.0.3: hide the 2D detail photo (INVISIBLE, not GONE) so
-                                // only the 3D model shows. Register field d (a sibling
-                                // ImageView of the model container) so detailSetVisibility
-                                // keeps it invisible even when the host re-shows it from
-                                // d()/e()/f(), and hide it now.
+                                // 2.0.5: keep the 2D photo VISIBLE (model render condition)
+                                // but transparent, so only the 3D model shows. Register
+                                // field d (sibling ImageView of the model container); the
+                                // setAlpha clamp + detailSetVisibility keep it VISIBLE+alpha0.
                                 try {
                                     Object photo = readField(modelOwner, "d");
                                     if (photo instanceof ImageView) {
-                                        ImageView photoView = (ImageView) photo;
-                                        boseDetailPhotos.add(photoView);
-                                        hideBoseDetailPhoto(photoView);
+                                        makeBosePhotoTransparent((ImageView) photo);
                                     }
                                 } catch (Throwable ignored) {
                                 }
@@ -774,6 +776,13 @@ public final class HookModule extends XposedModule {
                             MLog.event("bose.model.skip", "reason", "asset_unavailable");
                         }
                         // non-Bose session (the real Enco X3): host behavior unchanged.
+                    }
+                    if ("bosePhotoAlphaClamp".equals(label)) {
+                        if (chain.getThisObject() == boseTransparentPhoto) {
+                            // Pin the transparent photo: ignore the host's alpha value.
+                            return chain.proceed(new Object[]{0f});
+                        }
+                        return chain.proceed();
                     }
                     if ("boseColorId".equals(label)) {
                         Object result = chain.proceed();
@@ -1038,16 +1047,16 @@ public final class HookModule extends XposedModule {
                             }
                             if (!boseBonded()) return result;
 
-                            // 2.0.4: keep the Bose detail 2D photo invisible — only the 3D
-                            // model should occupy the product area. The host re-shows
-                            // field d from d()/e()/f(); every such VISIBLE request on a
-                            // registered photo is overridden to INVISIBLE (NOT GONE, which
-                            // collapses the container and blanks the model). Re-entry
-                            // guard (detailArbitrating) prevents recursion.
-                            if (boseDetailPhotos.contains(target) && visibility == View.VISIBLE) {
+                            // 2.0.5: the model only renders while the detail photo (field
+                            // d) is VISIBLE, so keep the transparent photo VISIBLE (the
+                            // setAlpha clamp makes it invisible). If the host tries to
+                            // GONE/INVISIBLE it, force it back to VISIBLE. Re-entry guard
+                            // (detailArbitrating) prevents recursion.
+                            if (target == boseTransparentPhoto && visibility != View.VISIBLE) {
                                 detailArbitrating.set(Boolean.TRUE);
                                 try {
-                                    target.setVisibility(View.INVISIBLE);
+                                    target.setVisibility(View.VISIBLE);
+                                    target.setAlpha(0f);
                                 } finally {
                                     detailArbitrating.set(Boolean.FALSE);
                                 }
@@ -4103,36 +4112,27 @@ public final class HookModule extends XposedModule {
     private static final long BOSE_MODEL_LENGTH = 13239202L;
 
     /**
-     * 2.0.3: the detail page should show ONLY the 3D model. The host loads a 2D
-     * product photo into MelodyDetailModelView field {@code d} (a sibling ImageView
-     * of the model container {@code a}) and cross-fades it out when the model is
-     * ready. That photo is the wrong-looking "flash" the user reported (and in 2.0.2
-     * my setAlpha-clamp left it stuck behind the model). So we register every Bose
-     * detail photo ImageView here and force it INVISIBLE from {@code detailSetVisibility}
-     * (never GONE — GONE collapses the container and blanks the model, the 2.0.3
-     * regression). Only ever toward INVISIBLE, only for this specific known view, so
-     * it cannot recreate the 0.5.69 "forced an unknown full-size view" grey-mask class
-     * of regression.
+     * 2.0.5: the detail page should show ONLY the 3D model, no 2D photo. Evidence
+     * (2.0.1/2.0.2 logs + 2.0.3/2.0.4 screenshots): the model renders only while the
+     * photo ImageView (field d) is VISIBLE — setting d GONE (2.0.3) or INVISIBLE (2.0.4)
+     * left the product container blank. So we keep d VISIBLE (model render condition)
+     * but fully transparent. The current detail photo is held in a single volatile ref
+     * (not a Set) so the hot View.setAlpha clamp is a lock-free reference compare that
+     * is cheap enough to stay active permanently (ANR lesson #7). Two hooks cooperate:
+     *   - bosePhotoAlphaClamp pins setAlpha to 0f for that view (the host's b() sets
+     *     alpha 1 then cross-fades; we neutralise it), and
+     *   - detailSetVisibility forces it back to VISIBLE if the host tries to GONE it.
      */
-    private static final java.util.Set<View> boseDetailPhotos =
-            java.util.Collections.synchronizedSet(
-                    java.util.Collections.newSetFromMap(new java.util.WeakHashMap<View, Boolean>()));
+    private static volatile View boseTransparentPhoto;
 
-    /**
-     * Hide a registered Bose detail photo WITHOUT collapsing layout. INVISIBLE (not
-     * GONE): GONE removes the ImageView from the layout, and the detail product area
-     * depends on field d for its measured height — so GONE-ing it collapsed the
-     * container and the 3D model (a sibling TextureView) rendered into 0 height and
-     * vanished (the 2.0.3 regression). INVISIBLE keeps the space reserved but draws
-     * nothing.
-     */
-    private static void hideBoseDetailPhoto(View photo) {
+    /** Keep the current Bose detail photo VISIBLE (model render condition) but transparent. */
+    private static void makeBosePhotoTransparent(View photo) {
         if (photo == null) return;
-        detailArbitrating.set(Boolean.TRUE);
+        boseTransparentPhoto = photo;
         try {
-            photo.setVisibility(View.INVISIBLE);
-        } finally {
-            detailArbitrating.set(Boolean.FALSE);
+            photo.setVisibility(View.VISIBLE);
+            photo.setAlpha(0f);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -4228,16 +4228,15 @@ public final class HookModule extends XposedModule {
         if (!com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(address)) {
             return;
         }
-        // 2.0.3: the detail page shows ONLY the 3D model. Instead of installing a 2D
-        // PNG into field d (which then "flashed" before the cross-fade), register the
-        // photo and force it GONE. a()/d() run before b(), so this suppresses the
-        // photo from the very first frame; detailSetVisibility keeps it hidden when the
-        // host re-shows it from d()/e()/f().
+        // 2.0.5: the detail page shows ONLY the 3D model. Instead of installing a 2D
+        // PNG into field d (which then "flashed"), keep d VISIBLE (the model only
+        // renders while d is VISIBLE — proven by the 2.0.3/2.0.4 blank-model
+        // regression) but fully transparent (alpha 0). a()/d() run before b(), so the
+        // photo is transparent from the first frame; the setAlpha clamp +
+        // detailSetVisibility hold it VISIBLE+alpha0 against the host.
         Object field = readField(owner, "d");
         if (field instanceof ImageView) {
-            ImageView photo = (ImageView) field;
-            boseDetailPhotos.add(photo);
-            hideBoseDetailPhoto(photo);
+            makeBosePhotoTransparent((ImageView) field);
             MLog.event("bose.image.skip", "surface", "detail", "reason", "model_only");
         }
     }
