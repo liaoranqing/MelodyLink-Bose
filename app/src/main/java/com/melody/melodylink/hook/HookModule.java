@@ -1526,6 +1526,12 @@ public final class HookModule extends XposedModule {
 
     @SuppressLint("MissingPermission")
     private boolean shouldTrace(String label, XposedInterface.Chain chain, int arity) {
+        if ("bosePhotoAlphaClamp".equals(label)) {
+            // View.setAlpha is called every animation frame app-wide. Trace only while
+            // a Bose detail photo is actually frozen, so the common path skips the
+            // signature()/describeArgs() cost entirely (ANR lesson #7).
+            return photoFreezeActive && bosePhotoFreeze.containsKey(chain.getThisObject());
+        }
         if ("whitelist".equals(label)) {
             return arity > 2 && chain.getArg(2) instanceof String
                     && isRegisteredBoseName((String) chain.getArg(2));
