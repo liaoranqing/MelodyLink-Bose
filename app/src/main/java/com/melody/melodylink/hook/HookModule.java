@@ -168,6 +168,9 @@ public final class HookModule extends XposedModule {
      */
     private volatile Object noiseEffectRow;
     private volatile Object oneSpaceNoiseEffectRow;
+    /** The 通用设置 row repaints only from its LiveData observer; keep it so we can replay it. */
+    private volatile Object oneSpaceNoiseObserver;
+    private volatile Object oneSpaceNoiseVo;
 
     /** Injected "抗风噪" switch, kept for state re-sync. */
 
@@ -552,6 +555,12 @@ public final class HookModule extends XposedModule {
                     "Ba.z#getCurrentNoiseReductionModeIndex#0");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem", "onEarphoneDataChanged", 1, "noiseReductionItemDataChanged");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem$a", "c", 2, "nativeNoiseReductionClick");
+            // 2.0.12 bug1 (通用设置 side): that row writes through a "setgate" Intent, so it
+            // never reaches nativeNoiseReductionClick/noiseModeWrite in this process, and it
+            // paints only inside its LiveData observer (smali: $initObserver$1.invoke assigns
+            // q and reads q.getMCurrentNoiseMode(); onBindViewHolder never touches the widget).
+            // Capture that observer so we can replay it as soon as the mode is mirrored.
+            hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceNoisePreference$b", "onChanged", 1, "oneSpaceNoiseObserver");
             hookAny(loader, "noiseWrite",
                     "com.oplus.melody.model.repository.earphone.U#L0#3",
                     "com.oplus.melody.model.repository.earphone.J#o0#3");
@@ -1351,6 +1360,14 @@ public final class HookModule extends XposedModule {
                         }
                         return chain.proceed();
                     }
+                    if ("oneSpaceNoiseObserver".equals(label)) {
+                        Object result = chain.proceed();
+                        if (chain.getArg(0) != null) {
+                            oneSpaceNoiseObserver = chain.getThisObject();
+                            oneSpaceNoiseVo = chain.getArg(0);
+                        }
+                        return result;
+                    }
                     if ("repositoryDtoBuild".equals(label)) {
                         Object result = chain.proceed();
                         projectBoseBatteryIntoDto(chain.getArg(0), result);
@@ -1609,6 +1626,10 @@ public final class HookModule extends XposedModule {
                     domainMode, new java.util.HashMap<>());
             boseSessionState.acceptAnc(optimistic);
             sonySessionState.acceptAnc(optimistic);
+            // Publish at intercept time, not only after the BMAP confirm: the 通用设置 page
+            // lives in :fg and refreshes from this file, so waiting for the device reply is
+            // what made its highlight lag one full tap behind.
+            writeSharedBoseState();
             BoseControlProviderBridge.refreshTile();
             boseTransport.setAncMode(domainMode);
             Object result = createSetCommandState(0);
@@ -1638,6 +1659,7 @@ public final class HookModule extends XposedModule {
             notifyPreferenceChanged(noiseEffectRow, "detail");
             notifyPreferenceChanged(oneSpaceNoiseEffectRow, "onespace");
             invokeOnEarphoneDataChanged();
+            repaintOneSpaceNoiseRow("anc write intercepted");
         });
     }
 
@@ -1669,6 +1691,72 @@ public final class HookModule extends XposedModule {
             }
             MLog.event("bose.anc.icon_fail", "error", MLog.compactThrowable(t));
         }
+    }
+
+    /**
+     * Mirror the tapped ANC mode into this process' session states right away. The mirrored
+     * value is what every hooked mode getter returns, so a repaint triggered now already
+     * reports the new mode instead of waiting for the BMAP write to land (~1 s later).
+     */
+    private void mirrorAncOptimistically(int modeIndex, String reason) {
+        try {
+            com.melody.melodylink.domain.AncMode tapped = MelodyCommandBridge.INSTANCE.ancMode(modeIndex);
+            if (tapped == null) {
+                MLog.event("bose.anc.mirror_skip", "mode", modeIndex, "reason", reason);
+                return;
+            }
+            EarbudsState optimistic = new EarbudsState(
+                    com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
+                    tapped, new java.util.HashMap<>());
+            boseSessionState.acceptAnc(optimistic);
+            sonySessionState.acceptAnc(optimistic);
+            MLog.event("bose.anc.mirrored", "mode", modeIndex, "reason", reason);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 2.0.12 bug1 (通用设置 side): that row highlights a button only when its observer paints
+     * — smali $initObserver$1.invoke assigns field q, then compares q.getMCurrentNoiseMode()
+     * against each ModeItem's modeType. notifyChanged() and a rebind change nothing (0585 log:
+     * onNoiseInfoChange fired on page open only, never after a write). Map the mirrored
+     * protocol index to a modeType with the host's own helper, store it in the live VO and
+     * replay the captured observer.
+     */
+    private void repaintOneSpaceNoiseRow(String reason) {
+        mainHandler.post(() -> {
+            Object observer = oneSpaceNoiseObserver;
+            Object vo = oneSpaceNoiseVo;
+            if (observer == null || vo == null) {
+                MLog.event("bose.anc.onespace.skip", "reason", "no_observer");
+                return;
+            }
+            EarbudsState anc = sonySessionState.getAnc();
+            int protocolIndex = anc == null ? readSharedSonyModeIndex()
+                    : MelodyStateBridge.INSTANCE.ancModeIndex(anc);
+            if (protocolIndex < 0) {
+                MLog.event("bose.anc.onespace.skip", "reason", "no_mode");
+                return;
+            }
+            try {
+                Object modeList = vo.getClass().getMethod("getMNoiseReductionModeList").invoke(vo);
+                Method map = vo.getClass().getDeclaredMethod("getCurrentNoiseMode",
+                        int.class, java.util.List.class);
+                map.setAccessible(true);
+                Object mapped = map.invoke(vo, protocolIndex, modeList);
+                int modeType = mapped instanceof Integer ? (Integer) mapped : -1;
+                if (modeType < 0) {
+                    MLog.event("bose.anc.onespace.skip", "reason", "map_miss", "mode", protocolIndex);
+                    return;
+                }
+                vo.getClass().getMethod("setMCurrentNoiseMode", int.class).invoke(vo, modeType);
+                observer.getClass().getMethod("onChanged", Object.class).invoke(observer, vo);
+                MLog.event("bose.anc.onespace.replayed", "mode", protocolIndex,
+                        "mode_type", modeType, "reason", reason);
+            } catch (Throwable t) {
+                MLog.event("bose.anc.onespace.replay_fail", "error", MLog.compactThrowable(t));
+            }
+        });
     }
 
     private static void notifyPreferenceChanged(Object preference, String which) {
@@ -1738,24 +1826,10 @@ public final class HookModule extends XposedModule {
     }
 
     private void dispatchCustomAncWrite(int modeIndex, ClassLoader loader) {
-        // 2.0.11 bug1 fix: the user reported the icon lags one tap behind (~1s) — the
-        // replay reads the mirrored state, but sonySessionState / the shared file only
-        // update when the BMAP write lands ~1s later, so the getter returns the PREVIOUS
-        // mode. Optimistically mirror the tapped mode into both session states NOW (in
-        // :fg, the page process) so the getter returns the new mode before we replay
-        // onEarphoneDataChanged. ancModeIndex(ancMode(i)) == i, so this round-trips.
-        try {
-            com.melody.melodylink.domain.AncMode tapped =
-                    MelodyCommandBridge.INSTANCE.ancMode(modeIndex);
-            if (tapped != null) {
-                EarbudsState optimistic = new EarbudsState(
-                        com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
-                        tapped, new java.util.HashMap<>());
-                boseSessionState.acceptAnc(optimistic);
-                sonySessionState.acceptAnc(optimistic);
-            }
-        } catch (Throwable ignored) {
-        }
+        // 2.0.11 bug1 fix: the icon replay reads the mirrored state, but sonySessionState and
+        // the shared file only update once the BMAP write lands ~1 s later, so the hooked
+        // getter still returned the PREVIOUS mode. Mirror the tapped mode first.
+        mirrorAncOptimistically(modeIndex, "detail tap");
         if (isPrimaryProcess()) {
             startSonyNoiseWriteFuture(modeIndex, loader);
         } else {
@@ -6206,11 +6280,36 @@ public final class HookModule extends XposedModule {
             rememberTargetAddress(state.address);
             if (!isPrimaryProcess()) {
                 updateBoseCncSlider();
+                applySharedAncMode(state.modeIndex);
             }
         }
         log(Log.INFO, TAG, event("foreground Sony state changed; requesting native Melody LiveData refresh"
                 + " mode=" + (state == null ? -1 : state.modeIndex)));
         refreshTargetRepository("foreground shared Sony state changed");
+    }
+
+    /**
+     * Adopt the mode the primary process published and repaint the 通用设置 row from it. That
+     * row writes through a "setgate" Intent, so this process never sees the tap; the shared file
+     * is the only channel that carries the new mode here.
+     */
+    private void applySharedAncMode(int modeIndex) {
+        if (modeIndex < 0) return;
+        try {
+            com.melody.melodylink.domain.AncMode mode = MelodyCommandBridge.INSTANCE.ancMode(modeIndex);
+            if (mode == null) return;
+            EarbudsState state = new EarbudsState(
+                    com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
+                    mode, new java.util.HashMap<>());
+            if (modeIndex == MelodyStateBridge.INSTANCE.ancModeIndex(sonySessionState.getAnc())) {
+                repaintOneSpaceNoiseRow("shared mode already applied");
+                return;
+            }
+            boseSessionState.acceptAnc(state);
+            sonySessionState.acceptAnc(state);
+            repaintOneSpaceNoiseRow("shared ANC state changed");
+        } catch (Throwable ignored) {
+        }
     }
 
     private void observeSharedBoseCncCommand() {
