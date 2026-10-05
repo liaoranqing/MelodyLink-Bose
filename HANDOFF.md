@@ -1,7 +1,7 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
 > **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 12:47 · 当前版本 **1.0.1 / versionCode 106** · 1.0.0 已发布 GitHub Release（含 APK），1.0.1 待推送。
+> 生成时间：2026-10-05 12:47 · 当前版本 **2.0.0 / versionCode 200**（Bose 专用精简版）· 1.0.0 已发布 GitHub Release；1.0.1/2.0.0 待推送。  
 > 这份文档是**唯一权威交接入口**，接手后先通读全文，再动手。配套文档在仓库 `docs/` 目录与本地 `.workbuddy/memory/` 日志。
 
 ---
@@ -177,6 +177,9 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 ## 11. 提交时间线（B 版关键节点）
 
 ```
+2.0.0 (versionCode 200)   Bose 专用精简版：删除 Sony/Huawei/Xiaomi/Samsung 全部适配层/assets/Compose UI（-8200 行）；
+                          修 3D 模型（根因=Bose 会话 colorId=-1，hook EarphoneDTO.getColorId()→3 借用 X3 color 3 资源包）；
+                          修通用设置转圈（根因=onShowAnimationEnd 重播 Lottie，透明图暴露；hook 杀掉）
 1.0.1 (versionCode 106)   详情页 3D 模型移植：hook b(String) 换内置 Bose glb（Filament/gltfio）+ 产品图抠透明背景（v3）
 1.0.0 (versionCode 105)   正式版发布：README+docs+tools 文档体系、Release v1.0.0
 0.5.78 (104)              #2 真修复 hideLoadingView 类型判断 + #1 DecorView raw 栈

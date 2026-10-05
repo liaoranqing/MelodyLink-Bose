@@ -4,7 +4,7 @@
 
 Melody 原生只识别 OPPO/一加 系耳机，第三方耳机（Bose、Sony、华为、小米等）连上后只能当普通蓝牙设备，无法看到产品图、降噪开关、电量等。本项目是一个 **LSPosed 模块**，通过运行时 Hook 把第三方耳机"伪装"成 Melody 认识的设备，从而复用 Melody 原生的详情页、降噪控制、电量显示等能力。
 
-> 项目版本：**1.0.0**（versionCode 105）· 目标 Melody：**17.6.3** · 已实机验证机型：OPPO Find X8 Ultra / ColorOS 17
+> 项目版本：**2.0.0**（Bose 专用精简版，versionCode 200）· 目标 Melody：**17.6.3** · 已实机验证机型：OPPO Find X8 Ultra / ColorOS 17
 
 ---
 
@@ -34,7 +34,7 @@ Melody 原生只识别 OPPO/一加 系耳机，第三方耳机（Bose、Sony、�
 - ✅ 左耳、右耳、充电盒电量显示
 - ✅ 针对 Melody 版本差异（R8 混淆类名/方法名）的 Hook 降级
 
-代码还保留了 **Sony / Huawei / Xiaomi / Samsung** 的参考适配层（`vendor/` 与 `assets/*/config/`），可作为移植其他品牌耳机时的模板。
+2.0.0 起本项目为 **Bose 专用精简版**：Sony / Huawei / Xiaomi / Samsung 的适配层、参考资源与 Compose 设置界面已全部移除，APK 体积与维护面大幅缩小。
 
 ---
 

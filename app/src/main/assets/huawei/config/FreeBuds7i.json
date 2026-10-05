@@ -1,1 +1,0 @@
-{"schemaVersion":1,"id":"huawei.freebuds7i","name":"HUAWEI FreeBuds 7i","image":"huawei/images/freebuds3.png","aliases":["HUAWEI FreeBuds 7i","FreeBuds 7i"],"batteryParts":["LEFT","RIGHT","CASE"],"capabilities":{"supportsAnc":true,"supportsTransparency":true,"supportsAncReadback":true,"supportsAncLevels":true,"supportsLowLatency":true}}

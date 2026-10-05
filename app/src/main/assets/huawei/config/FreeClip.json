@@ -1,1 +1,0 @@
-{"schemaVersion":1,"id":"huawei.freeclip","name":"HUAWEI FreeClip","image":"huawei/images/freebuds3.png","aliases":["HUAWEI FreeClip","FreeClip"],"batteryParts":["LEFT","RIGHT","CASE"],"capabilities":{"supportsAnc":false,"supportsTransparency":false,"supportsAncReadback":false,"supportsAncLevels":false,"supportsLowLatency":false}}

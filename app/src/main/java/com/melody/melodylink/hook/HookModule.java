@@ -27,30 +27,8 @@ import com.melody.melodylink.domain.AncMode;
 import com.melody.melodylink.domain.BatteryPart;
 import com.melody.melodylink.domain.BatteryValue;
 import com.melody.melodylink.domain.EarbudsState;
-import com.melody.melodylink.earbuds.EarbudsFacade;
-import com.melody.melodylink.vendor.sony.SonyDeviceCatalogAdapter;
-import com.melody.melodylink.vendor.sony.SonyEarbudsFacade;
-import com.melody.melodylink.vendor.samsung.SamsungEarbudsFacade;
-import com.melody.melodylink.vendor.huawei.HuaweiEarbudsFacade;
-import com.melody.melodylink.vendor.xiaomi.XiaomiEarbudsFacade;
 import com.melody.melodylink.bose.BoseDeviceConfig;
 import com.melody.melodylink.bose.BoseTransport;
-import com.melody.melodylink.huawei.config.HuaweiDeviceCatalog;
-import com.melody.melodylink.huawei.config.HuaweiConfigIssue;
-import com.melody.melodylink.huawei.config.HuaweiConfigLoadResult;
-import com.melody.melodylink.huawei.config.HuaweiConfigLoader;
-import com.melody.melodylink.huawei.config.HuaweiDeviceConfig;
-import com.melody.melodylink.xiaomi.config.XiaomiConfigIssue;
-import com.melody.melodylink.xiaomi.config.XiaomiConfigLoadResult;
-import com.melody.melodylink.xiaomi.config.XiaomiConfigLoader;
-import com.melody.melodylink.xiaomi.config.XiaomiDeviceCatalog;
-import com.melody.melodylink.xiaomi.config.XiaomiDeviceConfig;
-import com.melody.melodylink.samsung.config.SamsungGalaxyBudsCatalog;
-import com.melody.melodylink.sony.config.SonyConfigIssue;
-import com.melody.melodylink.sony.config.SonyConfigLoadResult;
-import com.melody.melodylink.sony.config.SonyConfigLoader;
-import com.melody.melodylink.sony.config.SonyDeviceConfig;
-import com.melody.melodylink.sony.config.SonyAdvancedSettingId;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Field;
@@ -86,11 +64,11 @@ public final class HookModule extends XposedModule {
     private static final String ADVANCED_CATEGORY_KEY = "melodylink.advanced_settings";
     private static final String ADVANCED_SETTING_KEY_PREFIX = "melodylink.setting.";
     private static final String HUAWEI_LOW_LATENCY_SETTING_KEY = "melodylink.huawei.low_latency";
-    private static final String SOUND_QUALITY_TITLE = "音质音效";
+    private static final String SOUND_QUALITY_TITLE = "闊宠川闊虫晥";
     private static final String BOSE_CNC_KEY = "melodylink.bose.cnc";
     /**
-     * Key/tag of the 通用设置 copy of the CNC slider. The detail page uses
-     * {@link #BOSE_CNC_KEY} inside a PreferenceScreen, but the 通用设置 three-state row is a
+     * Key/tag of the 閫氱敤璁剧疆 copy of the CNC slider. The detail page uses
+     * {@link #BOSE_CNC_KEY} inside a PreferenceScreen, but the 閫氱敤璁剧疆 three-state row is a
      * RecyclerView item, so the slider is attached to the view hierarchy and needs its own
      * identity to stay idempotent across RecyclerView rebinds.
      */
@@ -102,7 +80,7 @@ public final class HookModule extends XposedModule {
      */
     /**
      * Text handed to detail rows that have no summary of their own. A single space passes
-     * TextUtils.isEmpty() while adding no visible text — the row carries its own title.
+     * TextUtils.isEmpty() while adding no visible text 鈥?the row carries its own title.
      */
     private static final String PLACEHOLDER_SUMMARY = " ";
     /** The catalog entry with the most controls, used to fill a null children list. */
@@ -111,11 +89,11 @@ public final class HookModule extends XposedModule {
     private static final String BOSE_ENTRY_PREFIX = "Bose QC Ultra";
     private static final String BOSE_CNC_ONESPACE_KEY = "melodylink.bose.cnc.onespace";
     private static final String BOSE_CNC_CARD_KEY = "melodylink.bose.cnc.card";
-    private static final String NOISE_EFFECT_TITLE = "降噪效果";
+    private static final String NOISE_EFFECT_TITLE = "闄嶅櫔鏁堟灉";
     /**
-     * Both the earbud detail page and the "通用设置" page expose a noise row, but
-     * under different classes. 0.4.3 injected into both via the "音质音效" anchor;
-     * 0.4.5 narrowed it to NoiseReductionItem only and silently dropped 通用设置
+     * Both the earbud detail page and the "閫氱敤璁剧疆" page expose a noise row, but
+     * under different classes. 0.4.3 injected into both via the "闊宠川闊虫晥" anchor;
+     * 0.4.5 narrowed it to NoiseReductionItem only and silently dropped 閫氱敤璁剧疆
      * (log evidence: that page adds OneSpaceNoisePreference, never NoiseReductionItem).
      */
     private static final String NOISE_ROW_CLASS_DETAIL =
@@ -128,7 +106,7 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * True for the "降噪效果" row.
+     * True for the "闄嶅櫔鏁堟灉" row.
      *
      * <p>Accepts either the R8 class name or the preference key. The key is the stable
      * identifier: Melody stamps it via {@code PreferenceCategory.setKey(cls.getSimpleName())},
@@ -145,26 +123,16 @@ public final class HookModule extends XposedModule {
     private static final int WF_1000XM3_PRODUCT_ID = 0x067410;
     private volatile int targetAddressHash;
     private volatile String targetAddress;
-    private volatile BluetoothDevice targetSonyDevice;
-    private volatile BluetoothDevice targetSamsungDevice;
-    private volatile BluetoothDevice targetHuaweiDevice;
-    private volatile BluetoothDevice targetXiaomiDevice;
     private volatile BluetoothDevice targetBoseDevice;
-    /** Host A2DP/HFP state remains authoritative for UI connection, even if AF00 control setup fails. */
-    private volatile boolean xiaomiHostConnected;
     private volatile Object earphoneRepository;
     private volatile MelodySharedStateStore sharedStateStore;
     private final MelodySessionState sonySessionState = new MelodySessionState();
-    private final MelodySessionState huaweiSessionState = new MelodySessionState();
-    private final MelodySessionState xiaomiSessionState = new MelodySessionState();
     private final MelodySessionState boseSessionState = new MelodySessionState();
     /** A2DP host link is authoritative for the Bose UI, like Xiaomi; the BMAP channel is transient. */
     private volatile boolean boseHostConnected;
     private volatile ClassLoader melodyClassLoader;
     private volatile CompletableFuture<Object> pendingNoiseWrite;
     private volatile AncMode pendingAncMode;
-    private final Map<SonyAdvancedSettingId, Boolean> pendingSonySettings = new ConcurrentHashMap<>();
-    private final Map<SonyAdvancedSettingId, Boolean> confirmedSonySettings = new ConcurrentHashMap<>();
     private volatile boolean pendingBatteryRefresh;
     private volatile ScheduledExecutorService foregroundStateWatcher;
     private volatile String lastForegroundStateFingerprint;
@@ -173,11 +141,7 @@ public final class HookModule extends XposedModule {
     private volatile String lastSonySettingCommandNonce;
     private volatile String lastBoseCncCommandNonce;
     private volatile boolean sonyConfigInitialized;
-    private final MelodyDeviceBridge deviceBridge = new MelodyDeviceBridge();
     private volatile AssetManager sonyModuleAssets;
-    private volatile SonyDeviceConfig activeSonyImageProfile;
-    private volatile HuaweiDeviceConfig activeHuaweiImageProfile;
-    private volatile XiaomiDeviceConfig activeXiaomiImageProfile;
     private volatile boolean retainSharedSonyStateAfterCommandDisconnect;
     private volatile boolean activityLifecycleRegistered;
     private volatile Activity detailActivity;
@@ -185,18 +149,16 @@ public final class HookModule extends XposedModule {
     private volatile int startedActivityCount;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ThreadLocal<Boolean> detailAncWriteObserved = new ThreadLocal<>();
-    private final Map<SonyAdvancedSettingId, Object> advancedPreferences = new ConcurrentHashMap<>();
-    private volatile Object huaweiLowLatencyPreference;
     private volatile Object boseCncPreference;
-    /** The 通用设置 copy, which lives in the view hierarchy rather than a screen. */
+    /** The 閫氱敤璁剧疆 copy, which lives in the view hierarchy rather than a screen. */
     private volatile Object boseCncOneSpacePreference;
 
     /**
-     * The "降噪效果" row, captured in detailPreferenceAdd; its parent may be null then.
+     * The "闄嶅櫔鏁堟灉" row, captured in detailPreferenceAdd; its parent may be null then.
      *
      * <p>0.5.20 evidence: keeping one shared field for both pages made them corrupt each
-     * other. The 通用设置 page and the detail page each add their own copy, and whichever
-     * ran last overwrote the reference — so a 通用设置 retry tick could fire with the
+     * other. The 閫氱敤璁剧疆 page and the detail page each add their own copy, and whichever
+     * ran last overwrote the reference 鈥?so a 閫氱敤璁剧疆 retry tick could fire with the
      * detail page's anchor in hand and inject into the wrong tree, and vice versa. The
      * symptom was a page that rendered correctly for a second (t+800 had a populated
      * NestedScrollView with the device-info block and the 1356x1356 model view) and then
@@ -205,97 +167,18 @@ public final class HookModule extends XposedModule {
     private volatile Object noiseEffectRow;
     private volatile Object oneSpaceNoiseEffectRow;
 
-    /** Injected "抗风噪" switch, kept for state re-sync. */
+    /** Injected "鎶楅鍣? switch, kept for state re-sync. */
 
-    /** Injected "音效调节" panel: three EQ sliders, button remaps, mode slots. */
+    /** Injected "闊虫晥璋冭妭" panel: three EQ sliders, button remaps, mode slots. */
     private final List<Object> boseEqSliders = new ArrayList<>();
     private final List<Object> boseButtonDropdowns = new ArrayList<>();
     private final List<Object> boseModeSlotSliders = new ArrayList<>();
     private volatile Object boseExtraCategory;
     private volatile Boolean confirmedHuaweiLowLatency;
-    private volatile XiaomiEarbudsFacade xiaomiTransport;
-    private volatile boolean xiaomiBatteryReceiverRegistered;
-    private final BroadcastReceiver xiaomiBatteryReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
-            if (!BluetoothHeadset.ACTION_VENDOR_SPECIFIC_HEADSET_EVENT.equals(intent.getAction()) || targetXiaomiDevice == null) return;
-            BluetoothDevice source = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
-            if (source != null && !source.equals(targetXiaomiDevice)) return;
-            Object value = intent.getSerializableExtra(BluetoothHeadset.EXTRA_VENDOR_SPECIFIC_HEADSET_EVENT_ARGS);
-            XiaomiEarbudsFacade transport = xiaomiTransport;
-            if (transport == null) return;
-            java.util.ArrayList<String> arguments = new java.util.ArrayList<>();
-            if (value instanceof Object[]) {
-                for (Object item : (Object[]) value) if (item instanceof String) arguments.add((String) item);
-            } else if (value instanceof String) {
-                arguments.add((String) value);
-            }
-            if (arguments.isEmpty()) {
-                log(Log.INFO, TAG, event("Xiaomi vendor battery event ignored: no string arguments"));
-                return;
-            }
-            transport.acceptVendorBatteryEvent(arguments);
-        }
-    };
-    private final HuaweiEarbudsFacade huaweiTransport = new HuaweiEarbudsFacade(new HuaweiEarbudsFacade.Listener() {
-        @Override public void onConnecting() { log(Log.INFO, TAG, event("Huawei RFCOMM connecting")); }
-        @Override public void onConnected(EarbudsState state) {
-            huaweiSessionState.acceptAnc(state);
-            huaweiSessionState.acceptBattery(state);
-            updateHuaweiLowLatencyPreference(null, true);
-            writeSharedHuaweiState();
-            publishBatteryState(state, "Huawei connected");
-            refreshTargetRepository("Huawei connected");
-            log(Log.INFO, TAG, event("Huawei RFCOMM connected; ANC state=" + state.getAncMode()));
-        }
-        @Override public void onBatteryState(EarbudsState state) {
-            huaweiSessionState.acceptBattery(state);
-            writeSharedHuaweiState();
-            publishBatteryState(state, "Huawei battery read");
-            refreshTargetRepository("Huawei battery read");
-            log(Log.INFO, TAG, event("Huawei battery state received"));
-        }
-        @Override public void onAncWriteResult(boolean success, EarbudsState state, String reason) {
-            CompletableFuture<Object> future;
-            synchronized (HookModule.this) { future = pendingNoiseWrite; pendingNoiseWrite = null; }
-            log(success ? Log.INFO : Log.WARN, TAG, event("Huawei ANC write " + (success ? "succeeded" : "failed: " + reason)));
-            if (future == null) return;
-            if (success) {
-                if (state != null) {
-                    huaweiSessionState.acceptAnc(state);
-                    writeSharedHuaweiState();
-                    refreshTargetRepository("Huawei ANC write");
-                }
-                Object result = createSetCommandState(0);
-                if (result != null) future.complete(result); else future.completeExceptionally(new IllegalStateException("Huawei ANC result DTO unavailable"));
-            } else future.completeExceptionally(new IllegalStateException(reason));
-        }
-        @Override public void onLowLatencyWriteResult(boolean success, Boolean enabled, String reason) {
-            if (success && enabled != null) {
-                confirmedHuaweiLowLatency = enabled;
-                updateHuaweiLowLatencyPreference(enabled, true);
-            } else {
-                updateHuaweiLowLatencyPreference(null, true);
-                log(Log.WARN, TAG, event("Huawei low-latency write failed: " + reason));
-            }
-        }
-        @Override public void onDisconnected() {
-            failPendingNoiseWrite("Huawei transport disconnected");
-            clearHuaweiSessionState();
-            refreshTargetRepository("Huawei disconnected");
-            log(Log.INFO, TAG, event("Huawei RFCOMM disconnected"));
-        }
-        @Override public void onFailed(String reason) {
-            failPendingNoiseWrite(reason);
-            clearHuaweiSessionState();
-            refreshTargetRepository("Huawei failed");
-            log(Log.WARN, TAG, event("Huawei RFCOMM failed: " + reason));
-        }
-        @Override public void onLog(String message) { log(Log.INFO, TAG, event(message)); }
-    });
 
     /**
      * Bose BMAP runs short-lived RFCOMM sessions (channel 2 is single-client), so the
-     * host A2DP link — not the transport — is the authoritative "connected" marker,
+     * host A2DP link 鈥?not the transport 鈥?is the authoritative "connected" marker,
      * mirroring the Xiaomi pattern.
      */
     private final BoseTransport boseTransport = new BoseTransport(new BoseTransport.Listener() {
@@ -346,216 +229,8 @@ public final class HookModule extends XposedModule {
         @Override public void onLog(String message) { log(Log.INFO, TAG, event(message)); }
     });
 
-    private XiaomiEarbudsFacade ensureXiaomiTransport() {
-        XiaomiEarbudsFacade existing = xiaomiTransport;
-        if (existing != null) return existing;
-        Application application = currentApplication();
-        if (application == null) return null;
-        synchronized (this) {
-            if (xiaomiTransport != null) return xiaomiTransport;
-            xiaomiTransport = new XiaomiEarbudsFacade(application, new XiaomiEarbudsFacade.Listener() {
-                @Override public void onConnecting() { log(Log.INFO, TAG, event("Xiaomi SPP connecting")); }
-                @Override public void onConnected(EarbudsState state) {
-                    xiaomiSessionState.acceptAnc(state);
-                    xiaomiSessionState.acceptBattery(state);
-                    writeSharedXiaomiState();
-                    publishBatteryState(state, "Xiaomi connected");
-                    refreshTargetRepository("Xiaomi connected");
-                    log(Log.INFO, TAG, event("Xiaomi SPP connected; ANC state=" + state.getAncMode()));
-                }
-                @Override public void onStateChanged(EarbudsState state) {
-                    xiaomiSessionState.acceptAnc(state);
-                    xiaomiSessionState.acceptBattery(state);
-                    writeSharedXiaomiState();
-                    refreshTargetRepository("Xiaomi SPP status notification");
-                    log(Log.INFO, TAG, event("Xiaomi SPP state ANC=" + state.getAncMode()));
-                }
-                @Override public void onBatteryState(EarbudsState state) {
-                    xiaomiSessionState.acceptBattery(state);
-                    writeSharedXiaomiState();
-                    publishBatteryState(state, "Xiaomi battery event");
-                    refreshTargetRepository("Xiaomi battery event");
-                }
-                @Override public void onAncWriteResult(boolean success, EarbudsState state, String reason) {
-                    CompletableFuture<Object> future;
-                    synchronized (HookModule.this) { future = pendingNoiseWrite; pendingNoiseWrite = null; }
-                    if (success && state != null) {
-                        xiaomiSessionState.acceptAnc(state);
-                        writeSharedXiaomiState();
-                        refreshTargetRepository("Xiaomi ANC write");
-                    }
-                    if (future == null) return;
-                    if (success) {
-                        Object result = createSetCommandState(0);
-                        if (result != null) future.complete(result);
-                        else future.completeExceptionally(new IllegalStateException("Xiaomi ANC result DTO unavailable"));
-                    } else future.completeExceptionally(new IllegalStateException(reason));
-                }
-                @Override public void onDisconnected() {
-                    failPendingNoiseWrite("Xiaomi transport disconnected");
-                    xiaomiSessionState.clear();
-                    refreshTargetRepository("Xiaomi disconnected");
-                }
-                @Override public void onFailed(String reason) {
-                    failPendingNoiseWrite(reason);
-                    xiaomiSessionState.clear();
-                    refreshTargetRepository("Xiaomi failed");
-                    log(Log.WARN, TAG, event("Xiaomi BLE failed: " + reason));
-                }
-                @Override public void onLog(String message) { log(Log.INFO, TAG, event(message)); }
-            });
-            return xiaomiTransport;
-        }
-    }
 
-    private final SamsungEarbudsFacade samsungTransport = new SamsungEarbudsFacade(new SamsungEarbudsFacade.Listener() {
-        @Override
-        public void onConnecting() {
-            log(Log.INFO, TAG, event("Samsung RFCOMM connecting"));
-        }
 
-        @Override
-        public void onConnected(EarbudsState state) {
-            log(Log.INFO, TAG, event("Samsung RFCOMM connected; ANC state=" + state.getAncMode()));
-        }
-
-        @Override
-        public void onBatteryState(EarbudsState state) {
-            log(Log.INFO, TAG, event("Samsung battery state received"));
-        }
-
-        @Override
-        public void onAncWriteResult(boolean success, EarbudsState state, String reason) {
-            log(success ? Log.INFO : Log.WARN, TAG, event("Samsung ANC write "
-                    + (success ? "succeeded" : "failed: " + reason)));
-        }
-
-        @Override
-        public void onDisconnected() {
-            log(Log.INFO, TAG, event("Samsung RFCOMM disconnected"));
-        }
-
-        @Override
-        public void onFailed(String reason) {
-            log(Log.WARN, TAG, event("Samsung RFCOMM failed: " + reason));
-        }
-
-        @Override
-        public void onLog(String message) {
-            log(Log.INFO, TAG, event(message));
-        }
-    });
-
-    private final EarbudsFacade sonyTransport = new SonyEarbudsFacade(new EarbudsFacade.Listener() {
-        @Override
-        public void onConnecting() {
-            log(Log.INFO, TAG, event("Sony RFCOMM connecting"));
-        }
-
-        @Override
-        public void onConnected(EarbudsState state) {
-            sonySessionState.acceptAnc(state);
-            writeSharedSonyState();
-            log(Log.INFO, TAG, event("Sony RFCOMM connected; ANC state=" + state.getAncMode()));
-            publishSonyBatteryState("Sony connected");
-            refreshTargetRepository("Sony connected");
-            runPendingSonyOperation();
-        }
-
-        @Override
-        public void onBatteryState(EarbudsState state) {
-            sonySessionState.acceptBattery(state);
-            publishSonyBatteryState("Sony battery read");
-        }
-
-        @Override
-        public void onSettingState(SonyAdvancedSettingId id, boolean value) {
-            updateAdvancedSetting(id, value);
-            confirmedSonySettings.put(id, value);
-            writeSharedSonyState();
-        }
-
-        @Override
-        public void onSettingWriteResult(SonyAdvancedSettingId id, boolean success, Boolean value, String reason) {
-            if (success && value != null) {
-                updateAdvancedSetting(id, value);
-                confirmedSonySettings.put(id, value);
-                writeSharedSonyState();
-            }
-            if (!success) {
-                setAdvancedSettingEnabled(id, true);
-                log(Log.WARN, TAG, event("Sony setting " + id + " failed: " + reason));
-            }
-        }
-
-        @Override
-        public void onAncWriteResult(boolean success, EarbudsState state, String reason) {
-            CompletableFuture<Object> future;
-            synchronized (HookModule.this) {
-                future = pendingNoiseWrite;
-                pendingNoiseWrite = null;
-            }
-            if (success && state != null) {
-                sonySessionState.acceptAnc(state);
-                writeSharedSonyState();
-                refreshTargetRepository("Sony ANC write");
-                log(Log.INFO, TAG, event("Sony ANC write result status=0 mode="
-                        + MelodyStateBridge.INSTANCE.ancModeIndex(state)));
-            }
-            if (future == null) return;
-            if (success && state != null) {
-                Object result = createSetCommandState(0);
-                if (result == null) {
-                    future.completeExceptionally(new IllegalStateException("Sony ANC result DTO unavailable"));
-                } else {
-                    future.complete(result);
-                }
-            } else {
-                future.completeExceptionally(new IllegalStateException(reason));
-            }
-        }
-
-        @Override
-        public void onCommandSessionFinished(String reason) {
-            retainSharedSonyStateAfterCommandDisconnect = true;
-            log(Log.INFO, TAG, event("Sony RFCOMM command succeeded; retaining device state while closing session: "
-                    + reason));
-        }
-
-        @Override
-        public void onDisconnected() {
-            failPendingNoiseWrite("Sony transport disconnected");
-            if (retainSharedSonyStateAfterCommandDisconnect) {
-                retainSharedSonyStateAfterCommandDisconnect = false;
-                log(Log.INFO, TAG, event("Sony RFCOMM released after successful command; device state retained"));
-                return;
-            }
-            sonySessionState.clear();
-            clearSharedSonyState();
-            log(Log.INFO, TAG, event("Sony RFCOMM disconnected"));
-            refreshTargetRepository("Sony disconnected");
-        }
-
-        @Override
-        public void onFailed(String reason) {
-            failPendingNoiseWrite(reason);
-            pendingAncMode = null;
-            pendingSonySettings.clear();
-            pendingBatteryRefresh = false;
-            sonySessionState.clear();
-            clearSharedSonyState();
-            log(Log.WARN, TAG, event("Sony RFCOMM failed: " + reason));
-            for (SonyAdvancedSettingId id : advancedPreferences.keySet()) {
-                setAdvancedSettingEnabled(id, true);
-            }
-            refreshTargetRepository("Sony failed");
-        }
-
-        @Override
-        public void onLog(String message) {
-            log(Log.INFO, TAG, event(message));
-        }
-    });
 
     @Override
     public void onPackageReady(PackageReadyParam param) {
@@ -563,15 +238,9 @@ public final class HookModule extends XposedModule {
         try {
             initializeSonyConfig();
             if (isPrimaryProcess()) {
-                clearStaleSharedSonyState();
                 clearSharedSonyCommand();
                 clearSharedSonyBatteryCommand();
-                clearSharedSonySettingCommand();
                 registerAppVisibilityLifecycleCallbacks();
-                if (sonyTransport.isConnected()) {
-                    writeSharedSonyState();
-                    log(Log.INFO, TAG, event("republished live Sony session after package initialization"));
-                }
             }
             ClassLoader loader = param.getClassLoader();
             melodyClassLoader = loader;
@@ -595,7 +264,7 @@ public final class HookModule extends XposedModule {
             // 0.5.52 REGRESSION FIX: g() and i() were BOTH hooked in 0.5.51. g() calls i()
             // internally, and the host hits this path dozens of times per second, so the two
             // probes plus their MLog writes produced 46 events in a single second and stalled
-            // the main thread badly enough that even 通用设置 would not open. Only the
+            // the main thread badly enough that even 閫氱敤璁剧疆 would not open. Only the
             // low-frequency a(String) entry point is hooked now; the catalog size and content
             // readiness are read from inside that one event instead of via extra hooks.
             hookNamed(loader, "com.oplus.melody.model.repository.whitelist.a",
@@ -604,7 +273,7 @@ public final class HookModule extends XposedModule {
             // 16.x looked for "v9.z"; that class does not exist in 17.6.3.
             // 0.5.51 hooked G9/H, but 0.5.53 device logs proved that is the WRONG class:
             //   evt=bose.frag17 class=G9.H arg0=null result=null
-            // fired only for the STATIC u(String)Z probe — no instance method ever ran, and
+            // fired only for the STATIC u(String)Z probe 鈥?no instance method ever ran, and
             // "new-instance LG9/H;" appears nowhere in either dex. G9/H is never instantiated.
             //
             // The real host is G9/Q, proven from A9/f.1 (the "settingListChanged" path):
@@ -627,7 +296,7 @@ public final class HookModule extends XposedModule {
             // real. 0.5.54 evidence: onCreate still reported screen=null, because
             // onCreate only sets a flag (ui/base/b.u = false).
             // 0.5.58: hookAny binds only the FIRST candidate that resolves, so listing four
-            // methods under one label meant only onCreate was ever hooked — t(), the method
+            // methods under one label meant only onCreate was ever hooked 鈥?t(), the method
             // that actually inflates the XML into the tree, was silently skipped. That is why
             // 0.5.54-0.5.57 all reported screen=null: the hook fired before the tree existed.
             // Each method now gets its own label so all four are really hooked.
@@ -636,8 +305,7 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "G9.Q", "onHiddenChanged", 1, "detailFragHidden");
             // t() is the whole page: setPreferencesFromResource(0x7f140012).
             hookNamed(loader, "G9.Q", "t", 0, "detailFragBuild");
-            // 0.5.65: 0.5.64 device logs are decisive —
-            //   evt=bose.anc.tree_row_hidden key=NoiseReductionItem
+            // 0.5.65: 0.5.64 device logs are decisive 鈥?            //   evt=bose.anc.tree_row_hidden key=NoiseReductionItem
             //       visible_after=false view_gone=false
             // setVisible(false) DID work, but getView() returned null, i.e. the row had not
             // been bound yet at sweep time, so there was no view to collapse. The bind happens
@@ -646,7 +314,7 @@ public final class HookModule extends XposedModule {
             // 0.5.66: 0.5.65 hooked NoiseReductionItem.onBindViewHolder and it never fired
             // (no bose.anc.bind_hidden event at all, and no hook.miss either, so the hook was
             // registered). Reason found in smali: nothing in the APK ever *calls*
-            // Preference.onBindViewHolder with a preference receiver — only
+            // Preference.onBindViewHolder with a preference receiver 鈥?only
             // invoke-super chains exist. The real entry point is the RecyclerView adapter:
             //     androidx/preference/h.smali:1704
             //       onBindViewHolder(RecyclerView$E, I)V
@@ -667,16 +335,16 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainViewModel", "f", 1, "detailState");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainViewModel", "g", 1, "detailConnectionState");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainActivity", "onCreate", 1, "detailActivityCreate");
-            // DetailMainActivity.A() is the whole content pipeline — 17.6.3 smali:
+            // DetailMainActivity.A() is the whole content pipeline 鈥?17.6.3 smali:
             //   CompletableFuture.supplyAsync(LA9/r;).whenCompleteAsync(LAa/h;, executor)
             // onCreate itself contains no fragment transaction at all, so this is the only
             // place the detail fragment can be created. 0.5.16 evidence: the page stayed
             // blank (melody_ui_fragment_container with zero children) while every hook we
             // had was firing normally, which means the failure is upstream of any
-            // preference we could touch — inside A()'s future.
+            // preference we could touch 鈥?inside A()'s future.
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainActivity", "A", 0, "detailPipelineStart");
             // 0.5.18 evidence: hooking A9/r.get and Aa/h.accept produced nothing. Both are
-            // R8-merged lambda holders — a single class shared by dozens of call sites,
+            // R8-merged lambda holders 鈥?a single class shared by dozens of call sites,
             // dispatched through a packed-switch on an int field. A() builds A9/r with
             // field a=0x12 and Aa/h with a=0x7, so those two hooks only covered unrelated
             // branches. Hooking the real work instead: the whitelist lookup.
@@ -684,10 +352,10 @@ public final class HookModule extends XposedModule {
             // 17.6.3 DetailMainActivity.A() branch 0x12 resolves the MAC (from the "device"
             // extra, else "device_mac_info", else SharedPreferences launcher_address) and
             // then calls c9/a.a(mac) for a WhitelistConfigDTO. Bose has no catalog entry,
-            // so that returns null and the page builds from a null config — which matches
+            // so that returns null and the page builds from a null config 鈥?which matches
             // the observed symptom exactly: the row attaches (container holds a
             // NestedScrollView) but stays empty.
-            // 0.5.32: the class hooked here in 0.5.19 ("c9/a") was WRONG — R8 short names
+            // 0.5.32: the class hooked here in 0.5.19 ("c9/a") was WRONG 鈥?R8 short names
             // are not unique, and c9/a is a guide fragment. The only method in the whole APK
             // that returns WhitelistConfigDTO is L6/a.a(String), and the list it matches
             // against comes from L6/a.b() -> List<WhitelistConfigDTO> (built from
@@ -705,26 +373,26 @@ public final class HookModule extends XposedModule {
             // touching any final method.
             hookNamed(loader, "L6/a", "b", 0, "whitelistConfigList");
             hookNamed(loader, "L6/a", "a", 1, "detailWhitelistLookup");
-            // 0.5.75 — THE REAL #4 PATH, proven from smali (no more guessing):
+            // 0.5.75 鈥?THE REAL #4 PATH, proven from smali (no more guessing):
             //
             //   NoiseReductionItem.<init>(Context, DetailMainViewModel, LifecycleOwner)
             //     -> new Ba/m(ctx, viewModel)                       [NRI:313-321]
-            //   Ba/m.a(List, int, Ba/z)  builds Ba/x (四级降噪选择器) and
-            //     Ba/A (增强人声) ONLY when a mode's getChildrenMode() is non-empty
+            //   Ba/m.a(List, int, Ba/z)  builds Ba/x (鍥涚骇闄嶅櫔閫夋嫨鍣? and
+            //     Ba/A (澧炲己浜哄０) ONLY when a mode's getChildrenMode() is non-empty
             //     [Ba/m:519-550, 355/511 getChildrenMode, 475 new Ba/x, 646 new Ba/A]
             //   The list comes from Ba/z.getNoiseReductionModeList() [NRI:549, 4052]
             //   Ba/z.<init>(EarphoneDTO) fills it from
             //     c9/a.f().c(productId, name).getFunction().getNoiseReductionMode()
-            //     [Ba/z:207-292] and stores the SAME List reference — no copy.
+            //     [Ba/z:207-292] and stores the SAME List reference 鈥?no copy.
             //
             // Two facts kill every earlier fix:
             //  (1) the lookup that feeds this page is c9/a.c(PRODUCT_ID, NAME), keyed by
-            //      product id + bluetooth name — NOT by MAC. That is why the Bose MAC
+            //      product id + bluetooth name 鈥?NOT by MAC. That is why the Bose MAC
             //      (68:F2:1F:3D:41:D7) never appeared in any L6/a lookup in 455 events:
             //      L6/a (SupportConfigManager) and c9/a (WhitelistRepository) are two
             //      separate catalogs. Our injected clone lives in L6/a's list only.
             //  (2) because Ba/z holds the catalog's own List, stripEncoSubLevels on a
-            //      shallow copy never touches the modes the UI reads — and clearing in
+            //      shallow copy never touches the modes the UI reads 鈥?and clearing in
             //      place would corrupt the user's GENUINE Enco X3 page, since
             //      Ba/z:521 calls setChildrenMode() on those shared mode objects.
             //
@@ -741,26 +409,25 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainFragment",
                     "onCreateView", 3, "detailFragmentCreated");
             // JADX labels this class v9.t; the runtime name in Melody 16.8.3 is v9.C1594t.
-            hookNamed(loader, "v9.C1594t", "onViewCreated", 2, "detailPreferenceHostCreated");
             // MelodyCodecTweaker's stable entry: every DetailMain preference page inherits this.
             hookNamed(loader, "androidx.preference.g", "onViewCreated", 2,
                     "detailPreferenceFragmentViewCreated");
+            hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onShowAnimationEnd", 0, "boseHeaderShowAnimationEnd");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "i", 1, "sonyCardImage");
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onBindViewHolder", 1, "sonyCardBind");
-            hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceHeaderPreference", "onShowAnimationEnd", 0, "sonyCardLoading");
-            // 通用设置 ANC three-state row (降噪/关闭/通透). Its onBindViewHolder is the only
+            // 閫氱敤璁剧疆 ANC three-state row (闄嶅櫔/鍏抽棴/閫氶€?. Its onBindViewHolder is the only
             // place that exposes the DeviceControlWidget in field d, i.e. the row the user
             // sees; the slider has to be attached to that widget's parent. Unlike the detail
             // page this row is a plain RecyclerView item, not a Preference, so it can never
             // be reached through the preference-screen injection path.
             hookNamed(loader, "com.oplus.melody.onespace.items.OneSpaceNoisePreference", "onBindViewHolder", 1, "onespaceNoiseBind");
-            // 0.5.67 — THE ROOT CAUSE OF "降噪效果 STILL THERE", found in smali, not guessed.
+            // 0.5.67 鈥?THE ROOT CAUSE OF "闄嶅櫔鏁堟灉 STILL THERE", found in smali, not guessed.
             //
-            // res/cS.xml (0x7f140003, the 通用设置 screen) declares:
+            // res/cS.xml (0x7f140003, the 閫氱敤璁剧疆 screen) declares:
             //   OneSpaceNoisePreference      key=pref_noise_switch          <- the 3-state widget
             //   COUIPreferenceCategory       key=pref_noise_menu_category   <- field v
             //     COUIMenuPreference         key=pref_noise_menu            <- field w
-            //                              android:title=@7F11038A = "降噪效果"
+            //                              android:title=@7F11038A = "闄嶅櫔鏁堟灉"
             // Both category and row default to isPreferenceVisible="false"; the ONLY things
             // that ever turn them on are two methods of OneSpaceListFragment
             // (smali2/com/oplus/melody/onespace/b.smali):
@@ -773,51 +440,61 @@ public final class HookModule extends XposedModule {
             // That list is non-empty FOR BOSE ONLY BECAUSE OF US: injectBoseCatalogEntry clones
             // the richest Enco entry (which carries a four-level noiseReductionMode) and
             // fillMissingChildren copies donor children into it. So our own injected catalog
-            // row is what convinces the host that Bose supports 深度/均衡/轻度/智能切换.
+            // row is what convinces the host that Bose supports 娣卞害/鍧囪　/杞诲害/鏅鸿兘鍒囨崲.
             //
             // We must NOT clear noiseReductionMode instead: the very same list also drives
             // initObserver$1's "checkShowNoiseCardItem", which is what makes
             // pref_noise_switch (the three-state widget) visible. Clearing it would delete the
-            // widget — exactly the 0.5.65 regression the user reported.
+            // widget 鈥?exactly the 0.5.65 regression the user reported.
             //
             // So the fix is to let the host run and then re-hide only the menu category, on
-            // every emit. Hiding the CATEGORY (not the switch) drops the "降噪效果" row from the
+            // every emit. Hiding the CATEGORY (not the switch) drops the "闄嶅櫔鏁堟灉" row from the
             // adapter's flattened list and leaves the three-state widget untouched.
             // hideAncStrengthPreference() already targets these two keys but only runs from
-            // detailPreferenceAdd, i.e. once at XML inflate time — long before x() re-shows
+            // detailPreferenceAdd, i.e. once at XML inflate time 鈥?long before x() re-shows
             // them, which is why it never had any visible effect.
             hookNamed(loader, "com.oplus.melody.onespace.b", "x", 2, "onespaceNoiseMenuCheck");
             hookNamed(loader, "com.oplus.melody.onespace.b", "w", 2, "onespaceNoiseSwitchShow");
             // Product image. Confirmed against Melody 17.6.3 smali: b(String) is the
-            // 3D-model loader and c()Z is a low-memory check — neither touches the photo,
+            // 3D-model loader and c()Z is a low-memory check 鈥?neither touches the photo,
             // which is why 0.5.x reported a successful replacement that never showed up.
-            // The Glide call lives in a() (void), and e() — the branch taken when the
-            // product has no detail source, i.e. every non-catalog device like Bose —
-            // invokes a(). So a() is the one place that always runs.
+            // The Glide call lives in a() (void), and e() 鈥?the branch taken when the
+            // product has no detail source, i.e. every non-catalog device like Bose 鈥?            // invokes a(). So a() is the one place that always runs.
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "a", 0, "sonyDetailImage");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "d", 1, "sonyDetailPlaceholder");
-            hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "onFinishInflate", 0, "sonyDetailInflated");
-            hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "setViewModel", 1, "sonyDetailViewModel");
             // 1.0.1: b(String) IS the 3D model loader (initModel). 17.6.3 smali: it
             // cross-fades the photo ImageView (field d) out, builds a
             // com.oplusos.vfxmodelviewer.view.ModelViewer (OPPO's Filament/gltfio
             // wrapper) and feeds the file bytes to ModelScene.loadSceneFromBuffer
-            // (ByteBuffer) — so the loaded file is a plain glTF/GLB. d(F8/i) only
+            // (ByteBuffer) 鈥?so the loaded file is a plain glTF/GLB. d(F8/i) only
             // reaches b() when c() (device capability) passes AND the DTO's model
             // file exists (o.h), and for a Bose session the DTO is the stripped Enco
             // X3 one, so the host would play the X3 model. Swap the path to our
             // bundled Bose glb instead; see the boseModelViews gate in
             // replaceBoseDetailImageNow for why the photo must stand down afterwards.
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "b", 1, "boseDetailModel");
+            // 2.0.0 bug fix (3D model not loading): the host logs
+            // "picFilePath not match, productId: 067410, colorId: -1" for a Bose
+            // session — the device DTO carries the default colorId -1 while the
+            // resource packages are keyed by (productId, colorId). The real X3 is
+            // colorId 3 (the fetch*_067410_3 dirs prove its package exists), so the
+            // Bose page must borrow color 3 to obtain a detail source at all; the
+            // model path boseDetailModel swaps only materialises after that.
+            hookNamed(loader, "com.oplus.melody.model.repository.earphone.EarphoneDTO", "getColorId", 0, "boseColorId");
+            // 2.0.0 bug fix (通用设置 spinner behind the photo): the header widget
+            // replays its loading Lottie when the page entrance animation ends —
+            // OneSpaceHeaderPreference.onShowAnimationEnd sets field d VISIBLE and
+            // playAnimation() AFTER our photo sweeps ran. The old opaque photo hid
+            // it by luck; the transparent v3 cutout exposed it. Kill it here.
             hookNamed(loader, "androidx.preference.PreferenceGroup", "f", 1, "detailPreferenceAdd");
             // 0.5.48: stop guessing who hides the detail content. setVisibility is the only
             // way a view goes from laid-out to invisible, so intercepting it and reporting the
             // caller for targets inside the detail container names the culprit directly.
             hookNamed(loader, "android.view.View", "setVisibility", 1, "detailSetVisibility");
-            // 0.5.73 — the detail page vanishes seconds after rendering. The t+5000
+            // 0.5.73 鈥?the detail page vanishes seconds after rendering. The t+5000
             // container dump still shows a complete, fully VISIBLE content tree, and the
             // only hidden_by entries are DecorView INVISIBLE size 0x0 caller=no_app_frame:
-            // the WINDOW is being torn down, i.e. the Activity is finishing — not a view
+            // the WINDOW is being torn down, i.e. the Activity is finishing 鈥?not a view
             // being hidden. Every hook that was supposed to intercept the host's state
             // checks (v9.a.getConnectionState, DetailMainViewModel.f) misses in 17.6.3,
             // so instead of guessing again: hook Activity.finish, log the host caller
@@ -858,20 +535,6 @@ public final class HookModule extends XposedModule {
                     "Ba.z#getCurrentNoiseReductionModeIndex#0");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem", "onEarphoneDataChanged", 1, "noiseReductionItemDataChanged");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem$a", "c", 2, "nativeNoiseReductionClick");
-            hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "u", 2, "connectToDevice");
-            hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "v", 1, "connectImmediate");
-            hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "u0", 2, "sendPacket");
-            hookAny(loader, "nativeConnectDevice",
-                    "E7.c#b#1", "e7.c#c#1");
-            hookAny(loader, "directConnectSpp",
-                    "E7.c#a#2", "e7.c#a#2");
-            hookAny(loader, "nativeConnectionState",
-                    "E7.c#e#1", "e7.c#f#1");
-            hookNamed(loader, "A7.h", "h", 2, "nativeConnectSuccess");
-            hookNamed(loader, "A7.h", "e", 2, "nativeConnectFailure");
-            hookNamed(loader, "C7.b", "k", 1, "socketFailureBranch");
-            hookNamed(loader, "D7.a", "f", 2, "connectionFailureReport");
-            hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService", "m0", 1, "receiveEvent");
             hookAny(loader, "noiseWrite",
                     "com.oplus.melody.model.repository.earphone.U#L0#3",
                     "com.oplus.melody.model.repository.earphone.J#o0#3");
@@ -967,7 +630,7 @@ public final class HookModule extends XposedModule {
      * <p>0.5.35. R8 short names come out of smali as {@code L6/a}, but
      * {@code Class.forName} on Android rejects a name with no dot: it throws
      * {@code ClassNotFoundException: Invalid name: L6/a}. Every hook at an obfuscated class
-     * therefore failed silently for the whole project — the WARN was easy to miss among the
+     * therefore failed silently for the whole project 鈥?the WARN was easy to miss among the
      * working hooks, and the failure looks identical to "method not found".
      *
      * <p>So: try the name as given, then with {@code /} turned into {@code .}, then with the
@@ -1050,17 +713,12 @@ public final class HookModule extends XposedModule {
                 try {
                     captureRepository(label, chain);
                     if ("sonyCardImage".equals(label)) {
-                        // Bose: OneSpaceHeaderPreference.i(Lf9/b;) is the 通用设置 product
-                        // photo loader. 17.6.3 smali shows it reads getDetailImageRes(),
-                        // which is empty for a device with no catalog entry, so the host
-                        // never sets a drawable and the card stays blank. The Sony path
-                        // below only fires when a SonyDeviceConfig exists, so it never
-                        // covers Bose — this branch is what puts our photo there.
+                        // Bose-only build: OneSpaceHeaderPreference.i(Lf9/b;) is the
+                        // 通用设置 product photo loader. 17.6.3 smali shows it reads
+                        // getDetailImageRes(), which is empty for a device with no
+                        // catalog entry, so the host never sets a drawable and the card
+                        // stays blank. This branch puts our photo there.
                         if (replaceBoseOneSpaceHeaderImage(chain.getThisObject())) {
-                            return null;
-                        }
-                        if (replaceConfiguredProductImage(
-                                chain.getThisObject(), "b", "c", "d", "e", "d", "card")) {
                             return null;
                         }
                     }
@@ -1098,38 +756,72 @@ public final class HookModule extends XposedModule {
                         }
                         // non-Bose session (the real Enco X3): host behavior unchanged.
                     }
-                    if ("sonyDetailInflated".equals(label) || "sonyDetailViewModel".equals(label)) {
+                    if ("boseColorId".equals(label)) {
                         Object result = chain.proceed();
-                        replaceSonyDetailImageLater(chain.getThisObject());
+                        try {
+                            Object self = chain.getThisObject();
+                            Object mac = self == null ? null : readField(self, "macAddress");
+                            if (result instanceof Integer
+                                    && mac instanceof String
+                                    && com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE
+                                            .matchesAddress((String) mac)) {
+                                // 2.0.0: borrow the real Enco X3 color slot (3) so the
+                                // (productId, colorId) resource lookup resolves — the host
+                                // previously logged "picFilePath not match ... colorId: -1"
+                                // and never built a detail source, which is why the 3D
+                                // model path was never reached.
+                                if (colorIdOverrideLogged.compareAndSet(false, true)) {
+                                    MLog.event("bose.colorid.override",
+                                            "was", result,
+                                            "now", 3);
+                                }
+                                return 3;
+                            }
+                        } catch (Throwable t) {
+                            MLog.event("bose.colorid.error", "error", MLog.compactThrowable(t));
+                        }
+                        return result;
+                    }
+                    if ("boseHeaderShowAnimationEnd".equals(label)) {
+                        Object result = chain.proceed();
+                        try {
+                            if (boseBonded()) {
+                                Object spinner = readField(chain.getThisObject(), "d");
+                                if (spinner instanceof View) {
+                                    ((View) spinner).setVisibility(View.GONE);
+                                }
+                                if (spinner != null) {
+                                    invokeNoArg(spinner, "cancelAnimation");
+                                }
+                                MLog.event("bose.header.spinner_killed");
+                            }
+                        } catch (Throwable t) {
+                            MLog.event("bose.header.spinner_error",
+                                    "error", MLog.compactThrowable(t));
+                        }
                         return result;
                     }
                     if ("sonyCardBind".equals(label)) {
                         Object result = chain.proceed();
                         // 0.5.73: thisObject IS the OneSpaceHeaderPreference whose bind is
-                        // PROVEN to fire on the 通用设置 page (the row exists — the user sees
+                        // PROVEN to fire on the 閫氱敤璁剧疆 page (the row exists 鈥?the user sees
                         // the blank circle). i() ("sonyCardImage") is LiveData-observer
                         // driven and may never run for a device with no catalog entry, so
                         // this bind is the reliable moment to install the photo.
                         if (replaceBoseOneSpaceHeaderImage(chain.getThisObject())) {
                             return result;
                         }
-                        replaceConfiguredProductImage(chain.getThisObject(), "b", "c", "d", "e", "d",
-                                "card", findCardImageView(chain.getArg(0)));
                         return result;
-                    }
-                    if ("sonyCardLoading".equals(label) && activeSonyImageProfile != null) {
-                        hideLoadingView(readField(chain.getThisObject(), "d"));
-                        return null;
                     }
                     if ("onespaceNoiseBind".equals(label)) {
                         // Runs on every RecyclerView rebind, so the attach is idempotent
                         // (guarded by a marker tag) and the slider is never duplicated.
                         Object result = chain.proceed();
                         attachCncSliderUnderOneSpaceNoise(chain.getThisObject(), chain.getArg(0));
-                        // 0.5.67 third belt for the 降噪效果 suppression. This hook is the one
-                        // path PROVEN to fire on the 通用设置 page in every recent version
+                        // 0.5.67 third belt for the 闄嶅櫔鏁堟灉 suppression. This hook is the one
+                        // path PROVEN to fire on the 閫氱敤璁剧疆 page in every recent version
                         // (the CNC slider has always attached through it), while the
-                        // b.x/b.w hooks sit on final methods of a final class — 0.5.33 logged
+                        // b.x/b.w hooks sit on final methods of a final class 鈥?0.5.33 logged
                         // exactly that combination failing to hook once. Re-hiding the menu
                         // category from here survives both failure modes, and it re-runs on
                         // every rebind, i.e. after every LiveData-driven setVisible(true).
@@ -1138,7 +830,7 @@ public final class HookModule extends XposedModule {
                         // dead: OneSpaceHeaderPreference is a Preference (extends
                         // COUIPreference), never a View, so the View-tree DFS for a class
                         // named *OneSpaceHeaderPreference could not find anything and the
-                        // whole body was swallowed by catch(Throwable ignored) — zero log
+                        // whole body was swallowed by catch(Throwable ignored) 鈥?zero log
                         // events, exactly what the 20:16 capture shows. The real entry is
                         // sonyCardBind (OneSpaceHeaderPreference.onBindViewHolder, thisObject
                         // = the header itself), which now calls
@@ -1151,7 +843,7 @@ public final class HookModule extends XposedModule {
                         // w(ZZ) = checkShowNoiseCardItem, both driven by the
                         // WhitelistConfigDTO LiveData. x() sets field v
                         // (pref_noise_menu_category) visible whenever the DTO carries a
-                        // non-empty noiseReductionMode list — which our own injected catalog
+                        // non-empty noiseReductionMode list 鈥?which our own injected catalog
                         // clone does. Let the host finish, then hide the category again by
                         // KEY so this survives every re-emit and every COUI notifyChanged.
                         // The three-state widget (pref_noise_switch, field u) is deliberately
@@ -1212,7 +904,7 @@ public final class HookModule extends XposedModule {
                         }
                     }
                     if ("whitelistConfigList".equals(label)) {
-                        // 0.5.37: the constructor path had to be abandoned — libxposed
+                        // 0.5.37: the constructor path had to be abandoned 鈥?libxposed
                         // wants a Method, and Constructor.toMethod() does not exist on the
                         // JDK this compiles against. b() is the catalog accessor and it does
                         // hook (0.5.35 proved it: 41 lookup events, each returning our DTO),
@@ -1244,7 +936,7 @@ public final class HookModule extends XposedModule {
                         if (isBoseTarget) pendingDetailMac = (String) mac;
                         if (result == null && isBoseTarget) {
                             // The catalog entry is added in whitelistConfigList. If the match
-                            // still fails, the entry did not satisfy the matcher — report it
+                            // still fails, the entry did not satisfy the matcher 鈥?report it
                             // rather than fabricating a DTO here, so the next round tells us
                             // what the matcher actually compared.
                             MLog.event("bose.detail.whitelist.still_null",
@@ -1262,7 +954,7 @@ public final class HookModule extends XposedModule {
                                         "into", String.valueOf(readField(result, "name")));
                             }
                         }
-                        // 0.5.74 — THE ACTUAL ROOT CAUSE OF #4 (Enco 交互残留), and a
+                        // 0.5.74 鈥?THE ACTUAL ROOT CAUSE OF #4 (Enco 浜や簰娈嬬暀), and a
                         // trap I had to correct before shipping:
                         //
                         //   evt=bose.detail.whitelist mac=40:72:18:C7:75:70
@@ -1277,7 +969,7 @@ public final class HookModule extends XposedModule {
                         // looked-up address is the Bose unit itself.
                         //
                         // Ba/m.smali:519-550 proves the mechanism: an empty childrenMode skips
-                        // the Ba/x (four-level picker) and Ba/A (增强人声) construction entirely.
+                        // the Ba/x (four-level picker) and Ba/A (澧炲己浜哄０) construction entirely.
                         if (result != null && isBoseAddressArg(mac)) {
                             stripEncoSubLevels(result);
                             MLog.event("bose.detail.lookup_stripped",
@@ -1330,8 +1022,7 @@ public final class HookModule extends XposedModule {
                             // 0.5.72 ROLLBACK of the 0.5.69 page-level arbitration.
                             // Evidence trail: 0.5.71 stopped the ANR (dropbox shows no new
                             // melody crash after 18:55), but the user now reports a NEW
-                            // regression #6 — a grey mask over 通用设置 that crashes on tap —
-                            // plus the detail page still vanishing. The isFullSizeView /
+                            // regression #6 鈥?a grey mask over 閫氱敤璁剧疆 that crashes on tap 鈥?                            // plus the detail page still vanishing. The isFullSizeView /
                             // contentPathNow heuristic forcibly flipped ANY near-full-screen
                             // view to VISIBLE/GONE based on a guessed content test. Forcing an
                             // unknown full-size host view (mask / empty-state / scrim) VISIBLE
@@ -1340,7 +1031,7 @@ public final class HookModule extends XposedModule {
                             // click crashes. There was never device proof of what the host
                             // hides a few seconds in. So: keep ONLY the single proven
                             // protection (the detail scroll container, whose GONE blanks the
-                            // page — established since 0.5.25), keep the re-entry guard, and
+                            // page 鈥?established since 0.5.25), keep the re-entry guard, and
                             // rely on bose.detail.hidden_by to finally name the real caller
                             // before any further change.
                             if ("melody_ui_detail_scrollview".equals(idName(target))
@@ -1384,7 +1075,7 @@ public final class HookModule extends XposedModule {
                         return chain.proceed();
                     }
                     if ("detailActivityFinish".equals(label)) {
-                        // 0.5.74 ROLLBACK of the 0.5.73 interception — FORENSIC ONLY.
+                        // 0.5.74 ROLLBACK of the 0.5.73 interception 鈥?FORENSIC ONLY.
                         // The 0.5.73 log named the caller: DetailMainActivity.onCreate:60,
                         // which is the host's "finish previous instance" singleton guard
                         // (smali: WeakReference to the previous DetailMainActivity, finish()
@@ -1397,15 +1088,10 @@ public final class HookModule extends XposedModule {
                         // real teardown trigger stays observable.
                         Object self = chain.getThisObject();
                         if (self instanceof Activity && self == detailActivity) {
-                            // 0.5.76. 0.5.75 装机日志 detail.finish 只有两条 caller=no_app_frame，
-                            // 但 finishCallSites 的去重把"几秒后消失"的频率信息吞掉了——如果宿主每秒
-                            // finish 一次，去重后也只剩一行。no_app_frame 还说明 finish 的栈里没有
-                            // 宿主帧：要么是框架/系统层直接 finish，要么宿主通过 R8 短名 lambda
-                            // （isHostFrame 会漏掉）异步调用。这里记三样东西：单调递增的 finish 序号
-                            // （看频率）、过滤后的宿主链、以及未过滤的完整原始栈（前 10 帧，定位
-                            // no_app_frame 到底是谁）。序号每进程每页都会单调增长，去重只作用于
-                            // 完全相同的原始栈。
-                            int seq = ++finishSeq;
+                            // 0.5.76. 0.5.75 瑁呮満鏃ュ織 detail.finish 鍙湁涓ゆ潯 caller=no_app_frame锛?                            // 浣?finishCallSites 鐨勫幓閲嶆妸"鍑犵鍚庢秷澶?鐨勯鐜囦俊鎭悶鎺変簡鈥斺€斿鏋滃涓绘瘡绉?                            // finish 涓€娆★紝鍘婚噸鍚庝篃鍙墿涓€琛屻€俷o_app_frame 杩樿鏄?finish 鐨勬爤閲屾病鏈?                            // 瀹夸富甯э細瑕佷箞鏄鏋?绯荤粺灞傜洿鎺?finish锛岃涔堝涓婚€氳繃 R8 鐭悕 lambda
+                            // 锛坕sHostFrame 浼氭紡鎺夛級寮傛璋冪敤銆傝繖閲岃涓夋牱涓滆タ锛氬崟璋冮€掑鐨?finish 搴忓彿
+                            // 锛堢湅棰戠巼锛夈€佽繃婊ゅ悗鐨勫涓婚摼銆佷互鍙婃湭杩囨护鐨勫畬鏁村師濮嬫爤锛堝墠 10 甯э紝瀹氫綅
+                            // no_app_frame 鍒板簳鏄皝锛夈€傚簭鍙锋瘡杩涚▼姣忛〉閮戒細鍗曡皟澧為暱锛屽幓閲嶅彧浣滅敤浜?                            // 瀹屽叏鐩稿悓鐨勫師濮嬫爤銆?                            int seq = ++finishSeq;
                             String raw = rawCallerChain(10);
                             if (finishCallSites.add(raw)) {
                                 MLog.event("bose.detail.finish",
@@ -1452,17 +1138,16 @@ public final class HookModule extends XposedModule {
                         // 0.5.66: the RecyclerView adapter callback, i.e. the only place a
                         // bound row view actually exists. arity 2 = (ViewHolder, position).
                         //
-                        // 0.5.67 CRITICAL FIX — 0.5.66's body could NEVER work, proven from
+                        // 0.5.67 CRITICAL FIX 鈥?0.5.66's body could NEVER work, proven from
                         // smali (androidx/preference/m.smali + h.smali:1704-1809):
-                        //   * the ViewHolder m has fields a/b/c/d/e ONLY — there is no field
-                        //     "f", so readField(holder,"f") was always null → title="" →
-                        //     isEncoAncTitle never matched a single row;
+                        //   * the ViewHolder m has fields a/b/c/d/e ONLY 鈥?there is no field
+                        //     "f", so readField(holder,"f") was always null 鈫?title="" 鈫?                        //     isEncoAncTitle never matched a single row;
                         //   * itemView is an inherited FIELD (RecyclerView$E.itemView), not a
-                        //     method, so invokeNoArg(holder,"itemView") always threw → every
+                        //     method, so invokeNoArg(holder,"itemView") always threw 鈫?every
                         //     call exited through bind_noview.
                         // Correct reads, straight from h.onBindViewHolder itself:
-                        //   :1712  invoke-virtual {p0, p2}, h->e(I)Preference  ← the row's pref
-                        //   :1720  iget-object RecyclerView$E->itemView        ← the row's view
+                        //   :1712  invoke-virtual {p0, p2}, h->e(I)Preference  鈫?the row's pref
+                        //   :1720  iget-object RecyclerView$E->itemView        鈫?the row's view
                         Object result = chain.proceed();
                         try {
                             Object holder = arity > 0 ? chain.getArg(0) : null;
@@ -1490,8 +1175,8 @@ public final class HookModule extends XposedModule {
                                 title = String.valueOf(PrefRef.getTitle(pref));
                                 key = String.valueOf(PrefRef.getKey(pref));
                             }
-                            // 0.5.67: match on KEY first — smali (OneSpaceListFragment /
-                            // res/cS.xml) proves the 通用设置 "降噪效果" row is
+                            // 0.5.67: match on KEY first 鈥?smali (OneSpaceListFragment /
+                            // res/cS.xml) proves the 閫氱敤璁剧疆 "闄嶅櫔鏁堟灉" row is
                             // pref_noise_menu inside pref_noise_menu_category, and its title
                             // resource is 0x7f11038a. The detail page's copy carries the same
                             // title, so the title check stays as the second matcher. The
@@ -1577,9 +1262,9 @@ public final class HookModule extends XposedModule {
                             // Snapshot the container right after onCreate. If A() never
                             // runs at all, this is the only evidence we get.
                             reportDetailContainer("after_onCreate");
-                            // 0.5.25 found the actual cause. The content IS built — the decor
+                            // 0.5.25 found the actual cause. The content IS built 鈥?the decor
                             // tree shows NestedScrollView > LinearLayout > two full-screen
-                            // children — but BOTH of those children are View.GONE (vis=8),
+                            // children 鈥?but BOTH of those children are View.GONE (vis=8),
                             // so nothing is drawn. Every other signal looked healthy: token
                             // valid, shown=true, not finishing, attached to the window.
                             //
@@ -1594,16 +1279,6 @@ public final class HookModule extends XposedModule {
                                 }, delay);
                             }
                         }
-                        return result;
-                    }
-                    if ("detailPreferenceHostCreated".equals(label)) {
-                        Object result = chain.proceed();
-                        schedulePreferenceFragmentBinding(chain.getThisObject());
-                        return result;
-                    }
-                    if ("detailPreferenceFragmentViewCreated".equals(label)) {
-                        Object result = chain.proceed();
-                        scheduleDirectPreferenceFragmentBinding(chain.getThisObject());
                         return result;
                     }
                     if ("noiseReductionItemDataChanged".equals(label)) {
@@ -1624,7 +1299,6 @@ public final class HookModule extends XposedModule {
                     }
                     if ("repositoryDtoBuild".equals(label)) {
                         Object result = chain.proceed();
-                        projectSonyAncModeIntoDto(chain.getArg(0), result);
                         projectBoseBatteryIntoDto(chain.getArg(0), result);
                         projectBoseSpatialIntoDto(chain.getArg(0), result);
                         projectBoseMasterTuningIntoDto(chain.getArg(0), result);
@@ -1672,25 +1346,6 @@ public final class HookModule extends XposedModule {
                         }
                         return result;
                     }
-                    if ("nativeConnectDevice".equals(label) && isTargetDeviceInfo(chain.getArg(0))) {
-                        if (!startSonyConnection(chain.getArg(0))) {
-                            return chain.proceed();
-                        }
-                        log(Log.WARN, TAG, event("bypassed OPPO E7.c.b/C7.b for registered Sony device"));
-                        return null;
-                    }
-                    if ("directConnectSpp".equals(label) && isTargetDeviceInfo(chain.getArg(0))) {
-                        boolean connect = chain.getArg(1) instanceof Boolean && (Boolean) chain.getArg(1);
-                        if (connect) {
-                            if (!startSonyConnection(chain.getArg(0))) {
-                                return chain.proceed();
-                            }
-                        } else {
-                            releaseSonySession("Melody requested Sony disconnect");
-                        }
-                        log(Log.WARN, TAG, event("bypassed OPPO m_spp_le for registered Sony device"));
-                        return null;
-                    }
                     if ("noiseModeWrite".equals(label) && isTargetAddress(chain.getArg(1))) {
                         detailAncWriteObserved.set(true);
                         if (isPrimaryProcess()) {
@@ -1704,26 +1359,19 @@ public final class HookModule extends XposedModule {
                     if ("noiseWrite".equals(label) && isTargetAddress(chain.getArg(1))) {
                         if (hasPendingNoiseWrite()) {
                             log(Log.INFO, TAG, event("ignored duplicate Sony noise update while ANC write is pending"));
-                        } else if ((sonyTransport.isConnected() || samsungTransport.isConnected() || huaweiTransport.isConnected()
-                                || (xiaomiTransport != null && xiaomiTransport.isConnected()) || boseHostConnected)
+                        } else if (boseHostConnected
                                 && startSonyNoiseWrite(chain.getArg(2))) {
-                            log(Log.INFO, TAG, event("routed target noise reduction write to vendor RFCOMM"));
+                            log(Log.INFO, TAG, event("routed target noise reduction write to Bose RFCOMM"));
                         } else {
-                            log(Log.WARN, TAG, event("blocked target noise reduction write until Sony transport is ready"));
+                            log(Log.WARN, TAG, event("blocked target noise reduction write until Bose transport is ready"));
                         }
                         return null;
                     }
                     Object deviceName = arity > 2 ? chain.getArg(2) : null;
                     if ("whitelist".equals(label) && deviceName instanceof String
-                            && (isRegisteredSonyName((String) deviceName)
-                            || isRegisteredHuaweiName((String) deviceName)
-                            || isRegisteredXiaomiName((String) deviceName)
-                            || isRegisteredBoseName((String) deviceName)
+                            && (isRegisteredBoseName((String) deviceName)
                             || isBoseAddressArg(chain.getArg(0))
                             || isBoseAddressArg(chain.getArg(1)))) {
-                        activeSonyImageProfile = findSonyProfileByName((String) deviceName);
-                        activeHuaweiImageProfile = findHuaweiProfileByName((String) deviceName);
-                        activeXiaomiImageProfile = findXiaomiProfileByName((String) deviceName);
                         Object profile = findProfile(chain.getArg(0), DeviceProfileMapper.SONY_TEST_PROFILE_ID, DeviceProfileMapper.SONY_TEST_PROFILE_NAME);
                         if (profile != null) {
                             Object mappedProfile = copyWithoutAncStrengthModes(profile);
@@ -1817,7 +1465,7 @@ public final class HookModule extends XposedModule {
     private boolean shouldTrace(String label, XposedInterface.Chain chain, int arity) {
         if ("whitelist".equals(label)) {
             return arity > 2 && chain.getArg(2) instanceof String
-                    && isRegisteredSonyName((String) chain.getArg(2));
+                    && isRegisteredBoseName((String) chain.getArg(2));
         }
         if ("deviceRegistryLookup".equals(label)) {
             Object address = chain.getArg(0);
@@ -1832,103 +1480,8 @@ public final class HookModule extends XposedModule {
         return true;
     }
 
-    @SuppressLint("MissingPermission")
-    private boolean startSonyConnection(Object deviceInfo) {
-        if (!initializeSonyConfig()) {
-            log(Log.WARN, TAG, event("Sony connection skipped: configuration is not ready"));
-            return false;
-        }
-        try {
-            Method addressGetter = deviceInfo.getClass().getMethod("getDeviceAddress");
-            Object address = addressGetter.invoke(deviceInfo);
-            Method deviceGetter = deviceInfo.getClass().getMethod("getDevice");
-            Object device = deviceGetter.invoke(deviceInfo);
-            if (!(address instanceof String) || !(device instanceof BluetoothDevice)
-                    || !isTargetDevice((BluetoothDevice) device)) {
-                log(Log.WARN, TAG, event("Sony connection skipped: DeviceInfo has no registered BluetoothDevice"));
-                return false;
-            }
-            if (isRegisteredXiaomiDevice((BluetoothDevice) device)) {
-                targetXiaomiDevice = (BluetoothDevice) device;
-                xiaomiHostConnected = true;
-                rememberTargetAddress((String) address);
-                // The foreground process cannot see this process's in-memory host marker.
-                // Publish it before AF00 setup, since A2DP/HFP is already connected here.
-                writeSharedXiaomiState();
-                XiaomiEarbudsFacade transport = ensureXiaomiTransport();
-                if (transport == null) return false;
-                log(Log.INFO, TAG, event("starting Xiaomi SPP session name=" + ((BluetoothDevice) device).getName()
-                        + " addressHash=" + Integer.toHexString(((String) address).hashCode())));
-                transport.connect((BluetoothDevice) device);
-                return true;
-            }
-            if (isBoseDevice((BluetoothDevice) device)) {
-                targetBoseDevice = (BluetoothDevice) device;
-                boseHostConnected = true;
-                rememberTargetAddress((String) address);
-                writeSharedBoseState();
-                log(Log.INFO, TAG, event("starting Bose BMAP session name=" + ((BluetoothDevice) device).getName()
-                        + " addressHash=" + Integer.toHexString(((String) address).hashCode())));
-                boseTransport.connect((BluetoothDevice) device);
-                return true;
-            }
-            if (isRegisteredHuaweiDevice((BluetoothDevice) device)) {
-                targetHuaweiDevice = (BluetoothDevice) device;
-                rememberTargetAddress((String) address);
-                log(Log.INFO, TAG, event("starting Huawei session name=" + ((BluetoothDevice) device).getName()
-                        + " addressHash=" + Integer.toHexString(((String) address).hashCode())));
-                huaweiTransport.connect((BluetoothDevice) device);
-                return true;
-            }
-            if (isRegisteredSamsungDevice((BluetoothDevice) device)) {
-                targetSamsungDevice = (BluetoothDevice) device;
-                rememberTargetAddress((String) address);
-                log(Log.INFO, TAG, event("starting Samsung session name=" + ((BluetoothDevice) device).getName()
-                        + " addressHash=" + Integer.toHexString(((String) address).hashCode())));
-                samsungTransport.connect((BluetoothDevice) device);
-                return true;
-            }
-            String bluetoothAddress = ((BluetoothDevice) device).getAddress();
-            if (!((String) address).equalsIgnoreCase(bluetoothAddress)) {
-                log(Log.WARN, TAG, event("Sony connection skipped: DeviceInfo address does not match BluetoothDevice"));
-                return false;
-            }
-            rememberTargetAddress(bluetoothAddress);
-            targetSonyDevice = (BluetoothDevice) device;
-            // The adapter suppresses duplicate connects. Re-publish here so :fg can recover
-            // a live session whose marker was lost before this repeated native connection call.
-            if (sonyTransport.isConnected()) {
-                writeSharedSonyState();
-                log(Log.INFO, TAG, event("republished existing Sony RFCOMM session addressHash="
-                        + Integer.toHexString(bluetoothAddress.hashCode())));
-            }
-            log(Log.INFO, TAG, event("starting Sony session name=" + ((BluetoothDevice) device).getName()
-                    + " addressHash=" + Integer.toHexString(bluetoothAddress.hashCode())));
-            sonyTransport.connect((BluetoothDevice) device);
-            return true;
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Sony connection setup failed", t);
-            return false;
-        }
-    }
 
-    private boolean isTargetDeviceInfo(Object value) {
-        if (value == null) return false;
-        try {
-            Method getter = value.getClass().getMethod("getDevice");
-            Object device = getter.invoke(value);
-            return device instanceof BluetoothDevice
-                    && isTargetDevice((BluetoothDevice) device)
-                    && isA2dpConnected(value);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
 
-    private static boolean isA2dpConnected(Object deviceInfo) {
-        Object state = readField(deviceInfo, "mDeviceA2dpConnectState");
-        return state instanceof Number && ((Number) state).intValue() == 2;
-    }
 
     private boolean isTargetAddress(Object value) {
         if (!(value instanceof String)) return false;
@@ -1956,21 +1509,15 @@ public final class HookModule extends XposedModule {
             int modeIndex = (Integer) value;
             com.melody.melodylink.domain.AncMode domainMode = MelodyCommandBridge.INSTANCE.ancMode(modeIndex);
             if (domainMode == null) return false;
-            if (targetXiaomiDevice != null && isRegisteredXiaomiDevice(targetXiaomiDevice)) {
-                XiaomiEarbudsFacade transport = ensureXiaomiTransport();
-                if (transport != null) transport.setAncMode(domainMode);
-            } else if (targetBoseDevice != null && boseHostConnected) {
+            if (targetBoseDevice != null && boseHostConnected) {
                 boseTransport.setAncMode(domainMode);
-            } else if (targetHuaweiDevice != null && isRegisteredHuaweiDevice(targetHuaweiDevice)) {
-                huaweiTransport.setAncMode(domainMode);
-            } else if (targetSamsungDevice != null && isRegisteredSamsungDevice(targetSamsungDevice)) {
-                samsungTransport.setAncMode(domainMode);
             } else {
-                sonyTransport.setAncMode(domainMode);
+                log(Log.WARN, TAG, event("noise reduction write skipped: Bose transport not connected"));
+                return false;
             }
             return true;
         } catch (Throwable t) {
-            log(Log.WARN, TAG, "Sony noise reduction mapping failed", t);
+            log(Log.WARN, TAG, "Bose noise reduction mapping failed", t);
             return false;
         }
     }
@@ -1996,15 +1543,11 @@ public final class HookModule extends XposedModule {
             pendingAncMode = domainMode;
             pendingBatteryRefresh = false;
         }
-        if (targetXiaomiDevice != null && isRegisteredXiaomiDevice(targetXiaomiDevice)
-                && ensureXiaomiTransport() != null && ensureXiaomiTransport().isConnected()) {
-            pendingAncMode = null;
-            ensureXiaomiTransport().setAncMode(domainMode);
-        } else if (targetBoseDevice != null && boseHostConnected) {
+        if (targetBoseDevice != null && boseHostConnected) {
             pendingAncMode = null;
             // Bose BMAP runs a serial short-session queue (battery refresh may be ahead
             // of this write); waiting for the device reply makes the UI time out and
-            // toast a false "switch failed". Complete optimistically now — the icon
+            // toast a false "switch failed". Complete optimistically now 鈥?the icon
             // projection reads our mirrored state, and onAncWriteResult still syncs
             // the confirmed value (or logs a real failure) when the session lands.
             EarbudsState optimistic = new EarbudsState(
@@ -2017,15 +1560,9 @@ public final class HookModule extends XposedModule {
             Object result = createSetCommandState(0);
             if (result != null) future.complete(result);
             else future.completeExceptionally(new IllegalStateException("Bose ANC result DTO unavailable"));
-        } else if (targetHuaweiDevice != null && isRegisteredHuaweiDevice(targetHuaweiDevice)
-                && huaweiTransport.isConnected()) {
+        } else {
             pendingAncMode = null;
-            huaweiTransport.setAncMode(domainMode);
-        } else if (sonyTransport.isConnected()) {
-            runPendingSonyOperation();
-        } else if (!connectTargetSonyTransport("ANC command")) {
-            pendingAncMode = null;
-            failPendingNoiseWrite("ANC command cannot start: target Bluetooth device is unavailable");
+            failPendingNoiseWrite("ANC command cannot start: Bose transport is not connected");
         }
         return future;
     }
@@ -2087,19 +1624,25 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    /**
+     * Bose-only build: opens the module APK as an asset path (the host process
+     * reads bose/images + bose/model from it) and creates the cross-process
+     * shared-state store. The historical name is kept because several call
+     * sites predate the vendor strip.
+     */
     private synchronized boolean initializeSonyConfig() {
         if (sonyConfigInitialized) return true;
         try {
             Application application = currentApplication();
             if (application == null) {
-                log(Log.WARN, TAG, event("Sony configuration unavailable: target application not ready"));
+                log(Log.WARN, TAG, event("module configuration unavailable: target application not ready"));
                 return false;
             }
             sharedStateStore = MelodySharedStateStore.from(application);
             ApplicationInfo moduleInfo = getModuleApplicationInfo();
             String moduleApkPath = moduleInfo.sourceDir;
             if (moduleApkPath == null || moduleApkPath.isEmpty()) {
-                log(Log.ERROR, TAG, event("Sony configuration unavailable: module APK path is empty"));
+                log(Log.ERROR, TAG, event("module configuration unavailable: module APK path is empty"));
                 return false;
             }
             AssetManager moduleAssets = application.getAssets();
@@ -2107,38 +1650,15 @@ public final class HookModule extends XposedModule {
             addAssetPath.setAccessible(true);
             Object cookie = addAssetPath.invoke(moduleAssets, moduleApkPath);
             if (!(cookie instanceof Integer) || ((Integer) cookie) == 0) {
-                log(Log.ERROR, TAG, event("Sony configuration unavailable: cannot open module APK assets"));
+                log(Log.ERROR, TAG, event("module configuration unavailable: cannot open module APK assets"));
                 return false;
             }
-            SonyConfigLoadResult result = SonyConfigLoader.INSTANCE.fromAssets(moduleAssets);
-            HuaweiConfigLoadResult huaweiResult = HuaweiConfigLoader.INSTANCE.fromAssets(moduleAssets);
-            XiaomiConfigLoadResult xiaomiResult = XiaomiConfigLoader.INSTANCE.fromAssets(moduleAssets);
-            sonyTransport.setCatalog(new SonyDeviceCatalogAdapter(result.getRegistry()));
-            deviceBridge.setRegistry(result.getRegistry());
-            HuaweiDeviceCatalog.INSTANCE.setRegistry(huaweiResult.getRegistry());
-            XiaomiDeviceCatalog.INSTANCE.setRegistry(xiaomiResult.getRegistry());
-            registerXiaomiBatteryReceiver(application);
             sonyModuleAssets = moduleAssets;
-            for (SonyConfigIssue issue : result.getIssues()) {
-                log(Log.WARN, TAG, event("Sony configuration skipped " + issue.getPath()
-                        + ": " + issue.getMessage()));
-            }
-            for (HuaweiConfigIssue issue : huaweiResult.getIssues()) {
-                log(Log.WARN, TAG, event("Huawei configuration skipped " + issue.getPath()
-                        + ": " + issue.getMessage()));
-            }
-            for (XiaomiConfigIssue issue : xiaomiResult.getIssues()) {
-                log(Log.WARN, TAG, event("Xiaomi configuration skipped " + issue.getPath()
-                        + ": " + issue.getMessage()));
-            }
             sonyConfigInitialized = true;
-            log(Log.INFO, TAG, event("loaded " + result.getRegistry().getProfiles().size()
-                    + " Sony, " + huaweiResult.getRegistry().getProfiles().size()
-                    + " Huawei and " + xiaomiResult.getRegistry().getProfiles().size()
-                    + " Xiaomi device profiles from " + moduleApkPath));
+            log(Log.INFO, TAG, event("module asset path ready: " + moduleApkPath));
             return true;
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Sony configuration initialization failed", t);
+            log(Log.ERROR, TAG, "module configuration initialization failed", t);
             return false;
         }
     }
@@ -2146,9 +1666,9 @@ public final class HookModule extends XposedModule {
     /**
      * Injection entry point for the earbud detail page.
      *
-     * <p>Melody's "降噪效果" row is the anchor. It is identified structurally (by its
+     * <p>Melody's "闄嶅櫔鏁堟灉" row is the anchor. It is identified structurally (by its
      * Preference key) rather than by its R8-hashed class name, because the host renames those
-     * between releases while the key survives — the same approach
+     * between releases while the key survives 鈥?the same approach
      * Andrea-lyz/MelodyCodecTweaker uses for its {@code HiQualityAudioItem} / {@code
      * EqualizerItem} anchors.
      *
@@ -2164,12 +1684,12 @@ public final class HookModule extends XposedModule {
         // COUIJumpPreference, OneSpaceDisconnectPreference and finally
         // footer_preference, and the last one won. detailPreferenceAdd runs for EVERY
         // preference the host adds, so without this guard the anchor ends up being
-        // whichever preference was added last — the page footer, which has no children
+        // whichever preference was added last 鈥?the page footer, which has no children
         // (evt=bose.detail.state total=0). The filter was lost in the 0.5.7 rewrite.
         if (!isBoseNoiseRow(preference)) return;
         // Do NOT skip when the instance is unchanged: 0.5.12 showed the retry loop
         // stopping after the very first tick, so a page whose row was captured before
-        // the loop was armed never got another chance. Re-arming is cheap — every
+        // the loop was armed never got another chance. Re-arming is cheap 鈥?every
         // install path is guarded by findPreferenceByKeyRecursive.
         if (NOISE_ROW_CLASS_ONESPACE.equals(preference.getClass().getName())) {
             oneSpaceNoiseEffectRow = preference;
@@ -2246,7 +1766,7 @@ public final class HookModule extends XposedModule {
         }
         // 0.5.49: the screen set is weak and mixes both pages, so after the user leaves and
         // re-enters a page the screen could be gone while the page's actual group is alive
-        // — the slider then vanished on re-entry. Ask the same parent the installer writes
+        // 鈥?the slider then vanished on re-entry. Ask the same parent the installer writes
         // into, which is the only tree that matters.
         Object row = pickLiveAnchor();
         if (row == null) return false;
@@ -2261,7 +1781,7 @@ public final class HookModule extends XposedModule {
         try {
             // Scan the whole set: it holds screens from both pages, and picking
             // iterator().next() would report "already injected" for the detail page just
-            // because 通用设置 was injected first.
+            // because 閫氱敤璁剧疆 was injected first.
             for (Object screen : boseInjectedScreens) {
                 if (screen == null) continue;
                 if (PrefRef.getPreferenceCount(screen) <= 0) continue;
@@ -2281,7 +1801,7 @@ public final class HookModule extends XposedModule {
      * Chooses the anchor to inject against: the first one still attached to a window.
      *
      * <p>0.5.20 traced the blank page to this. A single shared anchor field let the two
-     * pages overwrite each other's reference, so a retry tick armed by 通用设置 could fire
+     * pages overwrite each other's reference, so a retry tick armed by 閫氱敤璁剧疆 could fire
      * while holding the detail page's row and write into the wrong tree. The observed
      * signature was a page that rendered for about a second (populated NestedScrollView
      * with the device-info block and the 1356x1356 model view) and then went back to an
@@ -2297,7 +1817,7 @@ public final class HookModule extends XposedModule {
      * could never succeed and the generic-settings anchor always won. Worse, that anchor's
      * tree had already been torn down by {@code G9/Q.onDestroy} (which walks
      * {@code PreferenceGroup.c} calling {@code h(int)} on every child), so the row was
-     * written into a dead tree and vanished on the next visit — exactly the reported symptom.
+     * written into a dead tree and vanished on the next visit 鈥?exactly the reported symptom.
      *
      * <p>Selection is therefore by which page is in front, using the activity that is
      * actually resumed, with attach as a tie-breaker only. Both candidates are still
@@ -2325,12 +1845,12 @@ public final class HookModule extends XposedModule {
 
         ClassLoader loader = noiseRow.getClass().getClassLoader();
         // 0.5.11: this used to bail out when no PreferenceScreen had been located yet,
-        // but the screen set was only populated on a successful install — so every
+        // but the screen set was only populated on a successful install 鈥?so every
         // attempt failed at this line and evt=bose.injected never fired. The anchor's
         // own parent group is all we actually need; the screen is only bookkeeping.
         // Resolve the screen from THIS anchor rather than from the shared set, which
         // holds entries from both pages and whose iterator().next() could hand back the
-        // other page's screen. The screen is bookkeeping only — the anchor's own parent
+        // other page's screen. The screen is bookkeeping only 鈥?the anchor's own parent
         // group is what we insert into.
         Object screen = screenForAnchor(noiseRow);
 
@@ -2369,8 +1889,8 @@ public final class HookModule extends XposedModule {
         if (activity == null) return false;
 
         boolean detailPage = NOISE_ROW_CLASS_DETAIL.equals(noiseRow.getClass().getName());
-        // Hide the Enco-only "降噪效果" row where it is safe to do so. The method itself
-        // filters by class: it hides only the 通用设置 copy and leaves the detail page's
+        // Hide the Enco-only "闄嶅櫔鏁堟灉" row where it is safe to do so. The method itself
+        // filters by class: it hides only the 閫氱敤璁剧疆 copy and leaves the detail page's
         // copy visible, because that one anchors the section it lives in.
         hideNoiseEffectRow(noiseRow);
 
@@ -2441,7 +1961,7 @@ public final class HookModule extends XposedModule {
                 "target_order", target,
                 "orders", describeChildOrders(parent),
                 // 0.5.49: the detail page reported landed=true / page=detail every run and
-                // was still blank, while 通用设置 worked. The difference is that the detail
+                // was still blank, while 閫氱敤璁剧疆 worked. The difference is that the detail
                 // page's parent is a bare COUIPreferenceCategory card: the insert succeeded
                 // into a group that is not on screen. Anchor attachment separates "written
                 // but off-screen" from "not written" in a single field.
@@ -2454,7 +1974,7 @@ public final class HookModule extends XposedModule {
                 "anchor", PrefRef.getKey(noiseRow),
                 "order", target,
                 // 0.5.16: screen is legitimately null whenever the anchor's parent chain
-                // is the only thing that resolved — which is the normal case since 0.5.11
+                // is the only thing that resolved 鈥?which is the normal case since 0.5.11
                 // stopped requiring a PreferenceScreen. Dereferencing it here threw an NPE
                 // that aborted installBoseIntoLiveScreen *after* the rows were already added,
                 // so every run logged nothing past this point even though the insert had
@@ -2517,10 +2037,9 @@ public final class HookModule extends XposedModule {
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<Object, Boolean>());
 
     /**
-     * Hides the "降噪效果" row on the earbud detail page.
+     * Hides the "闄嶅櫔鏁堟灉" row on the earbud detail page.
      *
-     * <p>This row is the OPPO/Enco ANC intensity picker — 深度 / 中度 / 轻度 / 智能降噪 —
-     * which drives an Enco-only protocol. Bose QC Ultra 2 has no four-level ANC path, so the
+     * <p>This row is the OPPO/Enco ANC intensity picker 鈥?娣卞害 / 涓害 / 杞诲害 / 鏅鸿兘闄嶅櫔 鈥?     * which drives an Enco-only protocol. Bose QC Ultra 2 has no four-level ANC path, so the
      * control cannot do anything for this device. {@code setVisible(false)} is used rather than
      * removing the preference: the row's own LiveData observer still calls
      * {@code onBindViewHolder}, and a removed-but-observed preference crashes the page.
@@ -2546,14 +2065,14 @@ public final class HookModule extends XposedModule {
             // Belt and braces: never hide anything we injected ourselves.
             if (rowKey != null && rowKey.startsWith("melodylink.")) return;
             // 0.5.66 REGRESSION FIX: 0.5.65 hid the whole preference, and because the Enco
-            // picker and the three-state widget (降噪 /关闭 / 通透) live in the SAME
+            // picker and the three-state widget (闄嶅櫔 /鍏抽棴 / 閫氶€? live in the SAME
             // preference, the user lost the widget. The preference must stay visible; only the
-            // "降噪效果" label row is collapsed, and that happens in ancRowBind by title.
+            // "闄嶅櫔鏁堟灉" label row is collapsed, and that happens in ancRowBind by title.
             if (NOISE_EFFECT_TITLE.equals(String.valueOf(PrefRef.getTitle(noiseRow)))) {
                 return;
             }
-            // 0.5.59: setVisible returning without error is not proof — 0.5.58 device logs show
-            // bose.anco.row.hidden fired for pref_noise_switch yet the "降噪效果" title was
+            // 0.5.59: setVisible returning without error is not proof 鈥?0.5.58 device logs show
+            // bose.anco.row.hidden fired for pref_noise_switch yet the "闄嶅櫔鏁堟灉" title was
             // still drawn. Reading the flag back separates "the setter did nothing" from
             // "the setter worked but the row was re-shown later".
             MLog.event("bose.anco.row.hidden",
@@ -2570,9 +2089,9 @@ public final class HookModule extends XposedModule {
      * Dumps what the earbud detail page actually ended up rendering.
      *
      * <p>Added because 0.5.9 was still reported as a fully blank page while the log showed
-     * the host adding ~50 native preferences (firmware update, find-device, privacy, …).
+     * the host adding ~50 native preferences (firmware update, find-device, privacy, 鈥?.
      * A tree that is populated but invisible means a rendering / layout-visibility problem,
-     * not an injection problem — the two need completely different fixes, so we log the
+     * not an injection problem 鈥?the two need completely different fixes, so we log the
      * actual state instead of assuming.
      */
     /** Compact, log-safe rendering of an arbitrary pipeline value. */
@@ -2592,7 +2111,7 @@ public final class HookModule extends XposedModule {
      * <p>17.6.3 {@code DetailMainActivity.A()} is the entire content path:
      * {@code CompletableFuture.supplyAsync(LA9/r;).whenCompleteAsync(LAa/h;, executor)}.
      * {@code onCreate} contains no fragment transaction whatsoever, so if this future fails
-     * the {@code melody_ui_fragment_container} is guaranteed to stay empty — which is
+     * the {@code melody_ui_fragment_container} is guaranteed to stay empty 鈥?which is
      * exactly the 0.5.16 symptom, with every other hook firing normally.
      */
     private void logDetailPipeline(String stage, String... extra) {
@@ -2606,14 +2125,14 @@ public final class HookModule extends XposedModule {
     /**
      * Reports whether the detail content container actually has children, plus the fragment
      * manager's view of the activity. This separates "fragment never attached" from
-     * "fragment attached but empty" — the two look identical in a uiautomator dump but need
+     * "fragment attached but empty" 鈥?the two look identical in a uiautomator dump but need
      * completely different fixes.
      */
     /**
      * Renders a view subtree as {@code ClassName#resourceName[children,size,vis]}.
      *
      * <p>IDs are the only stable way to tell one row from another, and the child count is
-     * what separates "the row exists" from "the row has content" — a preference row with
+     * what separates "the row exists" from "the row has content" 鈥?a preference row with
      * zero children is a real symptom, not an empty container. Depth is capped so a
      * pathological tree cannot spin.
      */
@@ -2679,21 +2198,20 @@ public final class HookModule extends XposedModule {
      * fields the page actually reads ({@code id}, {@code name}, {@code brand}, {@code uuid},
      * {@code type}) and leave the tunables at sane defaults.
      *
-     * <p>If construction fails we return null and the page stays exactly as it is now —
-     * this is a best-effort fallback, never a new failure mode.
+     * <p>If construction fails we return null and the page stays exactly as it is now 鈥?     * this is a best-effort fallback, never a new failure mode.
      */
     /**
      * Appends a Bose entry to Melody's product catalog.
      *
      * <p>0.5.32. The detail page builds its sections by matching the connected device against
-     * the catalog: {@code L6/a.a(mac)} reads {@code L6/a.b()} — a
-     * {@code List<WhitelistConfigDTO>} built from {@code WhitelistContentDO} — and returns the
+     * the catalog: {@code L6/a.a(mac)} reads {@code L6/a.b()} 鈥?a
+     * {@code List<WhitelistConfigDTO>} built from {@code WhitelistContentDO} 鈥?and returns the
      * matching entry. Bose has no entry, so nothing matches and no section is ever created.
      * 0.5.31's runtime dump confirmed it: the container held only seven classes, all of them
      * part of the device-info header, and not a single preference row.
      *
      * <p>Rather than fabricate a DTO from its 16-argument constructor (0.5.29, which produced
-     * something the host could not use), this clones a real entry from the list — so all the
+     * something the host could not use), this clones a real entry from the list 鈥?so all the
      * fields the host actually reads (function flags, protocol type, Rssi thresholds, brand
      * colour, version gates) carry the values of a device Melody genuinely supports. Only the
      * identifying fields are rewritten to Bose. That is what makes the host build its own
@@ -2708,7 +2226,7 @@ public final class HookModule extends XposedModule {
      *
      * <p>0.5.33. {@code L6/a} is {@code SupportConfigManager}: a final class whose
      * {@code b()} and {@code a(String)} are both public final, and libxposed refuses to hook
-     * final methods — 0.5.32 reported "cannot hook" for both even though smali lists them
+     * final methods 鈥?0.5.32 reported "cannot hook" for both even though smali lists them
      * plainly. The constructor is not final, so hooking it works, and field {@code a} is the
      * {@code com.oplus.melody.common.util.E} provider that {@code b()} reads the catalog
      * from. Interposing there sidesteps the final methods entirely.
@@ -2810,7 +2328,7 @@ public final class HookModule extends XposedModule {
      *
      * <p>0.5.44. The lookup returns the host's own OPPO Enco X3 entry with
      * {@code children=null}. If the detail page derives its sections from that field, null
-     * means no sections — which matches the symptom exactly: a fully configured device and an
+     * means no sections 鈥?which matches the symptom exactly: a fully configured device and an
      * empty page.
      *
      * <p>The source is the richest entry we have seen in the catalog, remembered when
@@ -2885,7 +2403,7 @@ public final class HookModule extends XposedModule {
             // 0.5.42: the boolean guard that used to sit here was the reason the entry never
             // reached the page. L6/a.b() builds and returns a FRESH list on every call, so a
             // one-shot flag true after the first call made every later call return a list that
-            // had no Bose entry in it at all — which is why the lookup reported
+            // had no Bose entry in it at all 鈥?which is why the lookup reported
             // config=NULL for our MAC even though injection had "succeeded" once.
             //
             // Correctness now rests entirely on containsBoseEntry(): this exact list either
@@ -2998,7 +2516,7 @@ public final class HookModule extends XposedModule {
                     // function config from the clone. That is exactly why
                     // stripEncoSubLevels always saw function==null (the log printed
                     // bose.catalog.strip_skip why=no_function x12) and the Enco
-                    // sub-levels (降噪强度 3档+智能 / 增强人声) survived into the Bose
+                    // sub-levels (闄嶅櫔寮哄害 3妗?鏅鸿兘 / 澧炲己浜哄０) survived into the Bose
                     // entry. Copy by reference instead; stripEncoSubLevels then
                     // shallow-copies the function->modes->children chain and clears it
                     // on the copies only, so the host's real Enco entries are never
@@ -3024,7 +2542,7 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * 0.5.75 — the actual fix for #4 (Enco 四级降噪选择器 + 增强人声 leaking into the Bose
+     * 0.5.75 鈥?the actual fix for #4 (Enco 鍥涚骇闄嶅櫔閫夋嫨鍣?+ 澧炲己浜哄０ leaking into the Bose
      * detail page).
      *
      * <p>Intercepts {@code Ba/z.getNoiseReductionModeList()} (NoiseReductionVO). The smali
@@ -3036,26 +2554,26 @@ public final class HookModule extends XposedModule {
      *                                  .getNoiseReductionMode()      [Ba/z:284-292]  (NO COPY)
      *   NoiseReductionItem: v2 = baZ.getNoiseReductionModeList()     [NRI:549, 4052]
      *   Ba/m.a(list, idx, baZ)                                       [Ba/m:218]
-     *     if (mode.getChildrenMode() non-empty) -> new Ba/x (四级)    [Ba/m:475, 519-550]
-     *                                           -> new Ba/A (增强人声) [Ba/m:646]
+     *     if (mode.getChildrenMode() non-empty) -> new Ba/x (鍥涚骇)    [Ba/m:475, 519-550]
+     *                                           -> new Ba/A (澧炲己浜哄０) [Ba/m:646]
      * </pre>
      *
      * <p>Every earlier attempt failed for a concrete, now-proven reason:
      * <ul>
      *   <li>The lookup feeding this page is keyed by <b>productId + name</b>, not by MAC,
-     *       and it lives in {@code c9/a} (WhitelistRepository) — a different catalog from
+     *       and it lives in {@code c9/a} (WhitelistRepository) 鈥?a different catalog from
      *       {@code L6/a} (SupportConfigManager) where our clone is injected. That is why
      *       the Bose MAC never appeared in any of the 455 captured lookup events.</li>
      *   <li>{@code Ba/z} stores the catalog's own List, and {@code Ba/z:521} even calls
      *       {@code setChildrenMode()} back onto those shared mode objects. Clearing in
-     *       place would therefore corrupt the user's GENUINE Enco X3 page — he owns both
+     *       place would therefore corrupt the user's GENUINE Enco X3 page 鈥?he owns both
      *       (40:72:18:C7:75:70 is a real OPPO Enco X3).</li>
      *   <li>{@code stripEncoSubLevels} on a shallow-copied catalog entry never reached the
      *       instances the UI reads.</li>
      * </ul>
      *
      * <p>This returns a list of per-mode shallow copies whose {@code childrenMode} is
-     * cleared through the KEEP-NAMED public setter, so the catalog is never mutated — only
+     * cleared through the KEEP-NAMED public setter, so the catalog is never mutated 鈥?only
      * this VO's view of it. {@code Ba/m} then sees empty children and skips both extra
      * widgets entirely. Cached by list identity because the VO getter is polled during
      * layout, and allocation there is exactly the kind of hot-path cost that caused the
@@ -3085,7 +2603,7 @@ public final class HookModule extends XposedModule {
             }
             if (!detailPageIsBose()) {
                 // 0.5.75 SAFETY. The user owns a GENUINE OPPO Enco X3 (40:72:18:C7:75:70)
-                // whose four-level picker must survive. This getter is shared by the 通用设置
+                // whose four-level picker must survive. This getter is shared by the 閫氱敤璁剧疆
                 // page too, and detailActivity can outlive the page it belonged to, so the
                 // guard is the FOCUSED Bose detail page only. Logging the skip names which
                 // page still shows children, instead of guessing and mutating a real Enco.
@@ -3172,7 +2690,7 @@ public final class HookModule extends XposedModule {
     /**
      * True only when the live {@code DetailMainActivity} was opened FOR the Bose unit.
      *
-     * <p>The page's MAC comes from its launch intent — {@code A9/r.smali:524} reads the
+     * <p>The page's MAC comes from its launch intent 鈥?{@code A9/r.smali:524} reads the
      * {@code "device"} extra (falling back to {@code "device_mac_info"}). A positive
      * predicate is mandatory here: {@code boseBonded()} alone is not enough, because the
      * user also owns a real OPPO Enco X3 whose page must keep its four-level picker.
@@ -3182,7 +2700,7 @@ public final class HookModule extends XposedModule {
             Activity activity = detailActivity;
             if (activity == null || activity.isFinishing()) return false;
             // 0.5.75: focus is cheap and changes over time, so it is tested OUTSIDE the
-            // cache — caching a "not focused" verdict would pin it forever and the page
+            // cache 鈥?caching a "not focused" verdict would pin it forever and the page
             // would never be stripped once it did come to the foreground.
             if (!activity.hasWindowFocus()) return false;
             // 0.5.75 PERFORMANCE GUARD. getNoiseReductionModeList() is polled during the
@@ -3270,15 +2788,15 @@ public final class HookModule extends XposedModule {
             java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     /**
-     * 0.5.69 — removes the Enco sub-level lists our clone inherited.
+     * 0.5.69 鈥?removes the Enco sub-level lists our clone inherited.
      *
      * <p>0.5.72 REWRITE: the field-name version never fired. #4 persisted on device because
      * R8 renamed the inner fields of NoiseReductionMode (a/b/c...), so the "name contains
-     * child" match found nothing — and no diagnostic ever printed, proving it. The smali
+     * child" match found nothing 鈥?and no diagnostic ever printed, proving it. The smali
      * call sites (Ba/m:355, Ba/A:475, onespace/b:3285) prove {@code getChildrenMode()} is a
      * KEEP-NAMED public getter; invoke it reflectively and clear the list IN PLACE (the
-     * getter returns the live backing list). getModeType()==6 marks the 通透 mode whose
-     * children drive 增强人声 (Ba/A) — clearing covers both extras uniformly.
+     * getter returns the live backing list). getModeType()==6 marks the 閫氶€?mode whose
+     * children drive 澧炲己浜哄０ (Ba/A) 鈥?clearing covers both extras uniformly.
      */
     private static void stripEncoSubLevels(Object dto) {
         try {
@@ -3321,7 +2839,7 @@ public final class HookModule extends XposedModule {
                     Object children = getter.invoke(mode);
                     if (children instanceof java.util.List) {
                         // Locate the backing field by identity (R8 renames fields, so the
-                        // name is unusable — that is exactly why 0.5.69 never fired).
+                        // name is unusable 鈥?that is exactly why 0.5.69 never fired).
                         for (java.lang.reflect.Field field
                                 : allFieldsOf(modeCopy.getClass())) {
                             if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
@@ -3444,7 +2962,7 @@ public final class HookModule extends XposedModule {
                     // container we are measuring is not the one the user is looking at. The
                     // activity class and window token settle that immediately.
                     "activity", activity.getClass().getSimpleName(),
-                    // getWindowToken() lives on View, not on Activity — the token has to be
+                    // getWindowToken() lives on View, not on Activity 鈥?the token has to be
                     // read off the decor view. A null token means this activity is no longer
                     // attached to a window, which is exactly the case we are hunting for.
                     "token", String.valueOf(
@@ -3458,7 +2976,7 @@ public final class HookModule extends XposedModule {
                     // (NestedScrollView / melody_ui_detail_scrollview) yet the final
                     // uiautomator dump showed zero children. The row is therefore
                     // attached and then emptied again, so a single snapshot is not
-                    // enough — the whole subtree has to be printed to see what is
+                    // enough 鈥?the whole subtree has to be printed to see what is
                     // inside it at each sample.
                     "tree", describeViewTree(container, 0));
         } catch (Throwable t) {
@@ -3471,7 +2989,7 @@ public final class HookModule extends XposedModule {
      * Gives the detail rows the summary text the host demands before it shows them.
      *
      * <p>Correction to the earlier note: the class first blamed here,
-     * {@code MelodyJumpPreference}, is NOT the detail page's row base class — 0.5.29 matched
+     * {@code MelodyJumpPreference}, is NOT the detail page's row base class 鈥?0.5.29 matched
      * zero rows because of it. The real chain, from 17.6.3 smali, is
      * <pre>
      *   DeviceInfoItem / AccountInfoItem / ... (all the detail sections)
@@ -3487,7 +3005,7 @@ public final class HookModule extends XposedModule {
      *   jumpView.setVisibility(v);
      * </pre>
      * so it hides the jump arrow, not the row. Whether an empty summary also collapses the
-     * row is NOT yet established — hence the row-class diagnostic emitted alongside this
+     * row is NOT yet established 鈥?hence the row-class diagnostic emitted alongside this
      * call, so the next run reports what is actually in the container instead of what we
      * expect it to be.
      */
@@ -3522,8 +3040,7 @@ public final class HookModule extends XposedModule {
 
             // 0.5.47: the container holds a NestedScrollView, not a RecyclerView, so the
             // detail page is a custom layout rather than a PreferenceFragment. Its
-            // LinearLayout has two children and the second one is where sections would go —
-            // dump that one deep, because "empty" and "full but hidden" look identical from
+            // LinearLayout has two children and the second one is where sections would go 鈥?            // dump that one deep, because "empty" and "full but hidden" look identical from
             // the outside and imply completely different fixes.
             MLog.event("bose.detail.sections",
                     "dump", String.valueOf(dumpSectionHost(container)));
@@ -3538,21 +3055,20 @@ public final class HookModule extends XposedModule {
     /**
      * Switches GONE views back to VISIBLE inside the detail subtree.
      *
-     * <p>0.5.67. Bounded walk (depth 10 / 600 nodes). Skips views with no measured size —
-     * those were never laid out (off-screen templates) and flipping them would be noise.
+     * <p>0.5.67. Bounded walk (depth 10 / 600 nodes). Skips views with no measured size 鈥?     * those were never laid out (off-screen templates) and flipping them would be noise.
      * Reports a one-line sample of what it revived so the next log shows whether the culprit
      * was the scroll view itself, the device-info header, or the section host.
      */
     private static int revivedReported = 0;
 
     /**
-     * 0.5.68 — ids/classes that unambiguously identify detail-page CONTENT.
+     * 0.5.68 鈥?ids/classes that unambiguously identify detail-page CONTENT.
      *
      * <p>0.5.67 revived every GONE view with a measured size. That is indiscriminate: the
      * host's loading mask / click-intercept layer / empty-state panel are exactly such views,
-     * and flipping them to VISIBLE put an invisible-to-us layer on top of the content — which
-     * matches user reports #1 (page appears, then vanishes after a few seconds) and #5 ("bose按键"
-     * / "bose电源" do not respond to taps). Only views on the path to real content are revived
+     * and flipping them to VISIBLE put an invisible-to-us layer on top of the content 鈥?which
+     * matches user reports #1 (page appears, then vanishes after a few seconds) and #5 ("bose鎸夐敭"
+     * / "bose鐢垫簮" do not respond to taps). Only views on the path to real content are revived
      * now, and an overlay never is, because an overlay contains no content node.
      */
     private static final java.util.Set<String> DETAIL_CONTENT_IDS =
@@ -3568,7 +3084,7 @@ public final class HookModule extends XposedModule {
 
     /**
      * 0.5.74: dedup set for the Activity.finish forensic log (replaces the 0.5.73
-     * block counter — interception was rolled back after it was proven to break the
+     * block counter 鈥?interception was rolled back after it was proven to break the
      * host's finish-previous-instance singleton guard).
      */
     private static final java.util.Set<String> finishCallSites =
@@ -3586,7 +3102,7 @@ public final class HookModule extends XposedModule {
 
     /**
      * True when the view spans (nearly) the whole window, i.e. it is a page-level container
-     * or a page-level mask — never a row. Row-sized views stay under the host's own control.
+     * or a page-level mask 鈥?never a row. Row-sized views stay under the host's own control.
      */
     private static boolean isFullSizeView(View v) {
         try {
@@ -3802,7 +3318,7 @@ public final class HookModule extends XposedModule {
                 return;
             }
             // The anchor is a single Preference, so its own child count is always 0.
-            // Walk up to the enclosing group — that is the list the user actually sees.
+            // Walk up to the enclosing group 鈥?that is the list the user actually sees.
             Object parent = PrefRef.getParent(row);
             if (parent == null) {
                 MLog.event("bose.detail.anchor_detached", "attempt", attempt);
@@ -3862,7 +3378,7 @@ public final class HookModule extends XposedModule {
      *
      * <p>A preference only becomes a view once its group is bound, so a successful insert
      * into a group that is not on screen leaves {@code isAttachedToWindow()} false. This is
-     * the discriminator between "written but invisible" and "never written" — the two
+     * the discriminator between "written but invisible" and "never written" 鈥?the two
      * failure modes that 0.5.49 could not tell apart, which is why the detail page reported
      * {@code landed=true} on every run and stayed blank.
      */
@@ -3881,7 +3397,7 @@ public final class HookModule extends XposedModule {
      * Walks up the preference tree and returns the first ancestor whose view is attached to a
      * window, or {@code null} when the whole chain is off-screen.
      *
-     * <p>0.5.49: this is what separates the two pages. 通用设置 injected into
+     * <p>0.5.49: this is what separates the two pages. 閫氱敤璁剧疆 injected into
      * {@code PreferenceScreen} and the slider appeared; the detail page injected into a
      * {@code COUIPreferenceCategory} card that was never laid out, so the write went into a
      * detached subtree. Injecting one level up puts the row in the container the panel
@@ -3894,7 +3410,7 @@ public final class HookModule extends XposedModule {
      * <p>17.6.3 splits rendering in two: {@code a(mac)} picks the entry by productId or MAC,
      * then {@code G9/H.u(String)} consults {@code getFunction()} before any section is built.
      * A DTO with {@code function == null} or an empty {@code children} list therefore renders
-     * nothing — which is exactly the blank-page symptom, and it is visible here.
+     * nothing 鈥?which is exactly the blank-page symptom, and it is visible here.
      */
     /**
      * Lists the keys of a group's direct children, depth-limited.
@@ -3921,8 +3437,7 @@ public final class HookModule extends XposedModule {
      *
      * <p>0.5.62. At {@code detailFragBuild} the screen reports {@code children=1} (just the
      * root), because the sections are appended afterwards by {@code settingListChanged}.
-     * A single walk at that point therefore had nothing to hide and was never repeated —
-     * hence the four-level Enco ANC picker stayed on screen. A short bounded retry covers the
+     * A single walk at that point therefore had nothing to hide and was never repeated 鈥?     * hence the four-level Enco ANC picker stayed on screen. A short bounded retry covers the
      * window in which the host finishes building the page.
      */
     private void scheduleAncTreeSweep(final Object screen) {
@@ -3998,15 +3513,15 @@ public final class HookModule extends XposedModule {
                 continue;
             }
             if (child == null) continue;
-            // 0.5.68 REGRESSION FIX — the detail page lost its three-state widget
-            // (user report #4: "3个耳机状态没了"). NoiseReductionItem.smali proves this
+            // 0.5.68 REGRESSION FIX 鈥?the detail page lost its three-state widget
+            // (user report #4: "3涓€虫満鐘舵€佹病浜?). NoiseReductionItem.smali proves this
             // class IS the three-state control itself: it holds
             // mActionView:DeviceControlWidget plus mOnModeActionClickListener and calls
-            // getModeList()/setEnable(). OneSpaceNoisePreference is the 通用设置
+            // getModeList()/setEnable(). OneSpaceNoisePreference is the 閫氱敤璁剧疆
             // three-state. The old class-based setVisible(false) here therefore hid
             // exactly the widgets that must stay. It only surfaced now because 0.5.67
             // made the detail page visible for the first time.
-            // The Enco "降噪效果" menu is suppressed by KEY (pref_noise_menu /
+            // The Enco "闄嶅櫔鏁堟灉" menu is suppressed by KEY (pref_noise_menu /
             // pref_noise_menu_category) in ancRowBind + suppressNoiseMenuCategory +
             // the b.x/b.w hooks, so this sweep no longer hides anything; the walk is
             // kept (recursion below) for future targeted fixes.
@@ -4024,8 +3539,7 @@ public final class HookModule extends XposedModule {
     /**
      * Appends our section keys to the host's static ordering table {@code G9/Q.y}.
      *
-     * <p>0.5.61. The detail page sorts sections with {@code y.indexOf(key)} →
-     * {@code setOrder}. Keys missing from the table receive {@code -1} and COUI drops or
+     * <p>0.5.61. The detail page sorts sections with {@code y.indexOf(key)} 鈫?     * {@code setOrder}. Keys missing from the table receive {@code -1} and COUI drops or
      * misplaces them, which is why every injected row reported {@code landed=true} yet the
      * page stayed blank. The table is a {@code List<String>} static field, so the values are
      * added reflectively and are shared with the host for the rest of the process.
@@ -4040,7 +3554,7 @@ public final class HookModule extends XposedModule {
             // class names ("NoiseReductionItem", "pref_device_info") with order 0, while
             // G9/Q.y holds short names ("noise", "product", ...). If the two key spaces are
             // genuinely different, indexOf() can never match a real section and the host
-            // orders every row to 0 — which is a different root cause from "our keys are
+            // orders every row to 0 鈥?which is a different root cause from "our keys are
             // missing" and needs a different fix. This line decides between the two.
             logSectionTable("before", keys);
             // melodyClassLoader is an instance field; a static method cannot touch it.
@@ -4118,11 +3632,11 @@ public final class HookModule extends XposedModule {
     private static volatile ClassLoader hostLoaderRef;
 
     /**
-     * True for the "降噪效果" label row, matched by its visible title.
+     * True for the "闄嶅櫔鏁堟灉" label row, matched by its visible title.
      *
      * <p>0.5.66. The Enco four-level ANC picker and the three-state widget
-     * (降噪 / 关闭 / 通透) live in the SAME preference, so hiding the preference
-     * removed both — the user reported the widget disappearing. Only the label row
+     * (闄嶅櫔 / 鍏抽棴 / 閫氶€? live in the SAME preference, so hiding the preference
+     * removed both 鈥?the user reported the widget disappearing. Only the label row
      * should go, so the match is on the title text and the view collapse happens
      * after the adapter has finished binding, never on the preference itself.
      */
@@ -4193,8 +3707,8 @@ public final class HookModule extends XposedModule {
 
     private static Object attachedAncestor(Object start) {
         // 0.5.56 REGRESSION FIX. 0.5.55 made this walk unconditionally to the topmost group
-        // and it broke the panel: Melody froze when leaving the detail page and 通用设置 would
-        // not reopen. The rewrite also contradicted its own evidence — 0.5.54 already showed
+        // and it broke the panel: Melody froze when leaving the detail page and 閫氱敤璁剧疆 would
+        // not reopen. The rewrite also contradicted its own evidence 鈥?0.5.54 already showed
         // parent=COUIPreferenceCategory with children=6, i.e. the immediate parent is a real,
         // fully populated group that the host itself created. Promoting from there to
         // PreferenceScreen rewrote the root's order values and broke COUI's card grouping.
@@ -4226,66 +3740,11 @@ public final class HookModule extends XposedModule {
     }
 
     private boolean hasMappedDeviceActive() {
-        return (targetSonyDevice != null && isRegisteredSonyName(targetSonyDevice.getName()))
-                || (targetSamsungDevice != null && isRegisteredSamsungDevice(targetSamsungDevice))
-                || (targetHuaweiDevice != null && isRegisteredHuaweiDevice(targetHuaweiDevice))
-                || (targetXiaomiDevice != null && isRegisteredXiaomiDevice(targetXiaomiDevice))
-                || (targetBoseDevice != null && boseHostConnected);
+        return targetBoseDevice != null && boseHostConnected;
     }
 
-    private synchronized void registerXiaomiBatteryReceiver(Application application) {
-        if (xiaomiBatteryReceiverRegistered) return;
-        try {
-            application.registerReceiver(xiaomiBatteryReceiver,
-                    new IntentFilter(BluetoothHeadset.ACTION_VENDOR_SPECIFIC_HEADSET_EVENT),
-                    // This broadcast originates in the Bluetooth system process.  Android 13+
-                    // drops it for a NOT_EXPORTED dynamic receiver before onReceive is called.
-                    Context.RECEIVER_EXPORTED);
-            xiaomiBatteryReceiverRegistered = true;
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Xiaomi battery event receiver registration failed", t);
-        }
-    }
 
-    private boolean replaceConfiguredProductImage(
-            Object owner,
-            String viewModelField,
-            String addressField,
-            String nameField,
-            String imageField,
-            String loadingField,
-            String surface
-    ) {
-        return replaceConfiguredProductImage(owner, viewModelField, addressField, nameField,
-                imageField, loadingField, surface, null);
-    }
 
-    private boolean replaceConfiguredProductImage(
-            Object owner,
-            String viewModelField,
-            String addressField,
-            String nameField,
-            String imageField,
-            String loadingField,
-            String surface,
-            ImageView fallbackImageView
-    ) {
-        try {
-            return replaceSonyProductImage(owner, viewModelField, addressField, nameField,
-                    imageField, loadingField, surface, fallbackImageView)
-                    || replaceHuaweiProductImage(owner, viewModelField, addressField, nameField,
-                    imageField, loadingField, surface, fallbackImageView)
-                    || replaceXiaomiProductImage(owner, viewModelField, addressField, nameField,
-                    imageField, loadingField, surface, fallbackImageView)
-                    || replaceBoseProductImage(owner, viewModelField, addressField, nameField,
-                    imageField, loadingField, surface, fallbackImageView);
-        } catch (Throwable t) {
-            // Hooks run inside Melody's own call stack: an exception escaping here
-            // takes the whole page process down. Never let that happen.
-            log(Log.WARN, TAG, "product image replacement aborted on " + surface, t);
-            return false;
-        }
-    }
 
     /** Show the bundled Bose QC Earbuds Ultra 2 photo on the masked detail/card. */
     private boolean replaceBoseProductImage(
@@ -4323,7 +3782,7 @@ public final class HookModule extends XposedModule {
 
     /**
      * Re-asserts our photo on a view Melody keeps recycling. The stock artwork is
-     * fetched asynchronously, so a one-shot setImage loses the race — 0.4.4 saw the
+     * fetched asynchronously, so a one-shot setImage loses the race 鈥?0.4.4 saw the
      * generic earbud photo win seconds later, and the spinner flash before it.
      * Each re-bind gets several passes, and the last one is also posted on the view
      * itself so it lands after any layout-triggered rebind.
@@ -4333,7 +3792,7 @@ public final class HookModule extends XposedModule {
         File file = materializeBoseImage();
         if (file == null) return;
         // Mark the view. getTag() is null on a fresh view, so the constant must be
-        // on the left of the comparison — 0.4.6 crashed the detail page on
+        // on the left of the comparison 鈥?0.4.6 crashed the detail page on
         // "view.getTag().equals(...)" with an NPE. setTag(Object) is deliberate:
         // setTag(int,Object) requires a real resource id and throws otherwise.
         try {
@@ -4357,7 +3816,7 @@ public final class HookModule extends XposedModule {
         }
         // Re-apply once per attach cycle: the stock header rebinds on every scroll
         // settle, which is exactly when the generic photo returns. Tracked in a weak
-        // set so the listener lands at most once per view — adding it on every
+        // set so the listener lands at most once per view 鈥?adding it on every
         // rebind stacked duplicates for the view's whole lifetime.
         if (boseAttachGuards.add(imageView)) {
             try {
@@ -4432,7 +3891,7 @@ public final class HookModule extends XposedModule {
             imageView.setImageURI(Uri.fromFile(imageFile));
             imageView.setVisibility(View.VISIBLE);
             // The stock header starts its own spinner on a post(), so a single sweep
-            // is not enough (0.5.0: "通用设置图片没了" — the spinner covered our art).
+            // is not enough (0.5.0: "閫氱敤璁剧疆鍥剧墖娌′簡" 鈥?the spinner covered our art).
             // Re-sweep a few times after the layout settles.
             final ImageView pinned = imageView;
             for (int i = 0; i < 3; i++) {
@@ -4446,7 +3905,7 @@ public final class HookModule extends XposedModule {
             }
             // The stock header keeps its own spinner running above the artwork; it
             // lives in the same layout, so sweep the neighbourhood for it instead of
-            // relying on the model field alone (it was often null on 通用设置).
+            // relying on the model field alone (it was often null on 閫氱敤璁剧疆).
             stopLoadingSpinners(imageView);
             Object loading = loadingField == null ? null : readField(owner, loadingField);
             hideLoadingView(loading);
@@ -4458,7 +3917,7 @@ public final class HookModule extends XposedModule {
 
     /**
      * Cancels any loading animation found around the product-image view. The
-     * "转圈" the user reported is not the model field: it is a sibling view inside
+     * "杞湀" the user reported is not the model field: it is a sibling view inside
      * the header layout, so we walk the ancestors and cancel anything that looks
      * like a progress spinner.
      */
@@ -4493,7 +3952,7 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * 0.5.75 — read-back verification for #2 (通用设置 still shows no earphone photo even
+     * 0.5.75 鈥?read-back verification for #2 (閫氱敤璁剧疆 still shows no earphone photo even
      * though {@code bose.image.applied surface=onespace} fires repeatedly).
      *
      * <p>"Applied" only proves we called setImageURI on field {@code e}. It does NOT prove
@@ -4566,6 +4025,10 @@ public final class HookModule extends XposedModule {
     private static final java.util.Map<Object, Boolean> boseModelViews =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Boolean>());
 
+    /** Logs the colorId override once per process; getColorId() is a hot path. */
+    private final java.util.concurrent.atomic.AtomicBoolean colorIdOverrideLogged =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     private File materializeBoseImage() {
         Application application = currentApplication();
         AssetManager assets = sonyModuleAssets;
@@ -4627,62 +4090,7 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    /** Replaces only the two product-image views identified from Melody 16.8.3's resource flow. */
-    private boolean replaceSonyProductImage(
-            Object owner,
-            String viewModelField,
-            String addressField,
-            String nameField,
-            String imageField,
-            String loadingField,
-            String surface
-    ) {
-        return replaceSonyProductImage(owner, viewModelField, addressField, nameField,
-                imageField, loadingField, surface, null);
-    }
 
-    private boolean replaceSonyProductImage(
-            Object owner,
-            String viewModelField,
-            String addressField,
-            String nameField,
-            String imageField,
-            String loadingField,
-            String surface,
-            ImageView fallbackImageView
-    ) {
-        Object viewModel = readField(owner, viewModelField);
-        String address = asString(readField(viewModel, addressField));
-        String name = asString(readField(viewModel, nameField));
-        SonyDeviceConfig profile = findSonyImageProfile(address, name);
-        if (profile == null) {
-            log(Log.INFO, TAG, event("Sony " + surface + " image skipped: profile unavailable"
-                    + " viewModel=" + (viewModel != null)));
-            return false;
-        }
-
-        Object imageValue = readField(owner, imageField);
-        ImageView imageView = imageValue instanceof ImageView
-                ? (ImageView) imageValue : fallbackImageView;
-        if (imageView == null) {
-            log(Log.WARN, TAG, event("Sony " + surface + " image target unavailable"));
-            return false;
-        }
-        File imageFile = materializeSonyImage(profile);
-        if (imageFile == null) {
-            log(Log.WARN, TAG, event("Sony " + surface + " image skipped: asset unavailable profile="
-                    + profile.getId()));
-            return false;
-        }
-
-        imageView.setImageURI(Uri.fromFile(imageFile));
-        imageView.setVisibility(View.VISIBLE);
-        Object loadingView = readField(owner, loadingField);
-        hideLoadingView(loadingView);
-        log(Log.INFO, TAG, event("replaced Sony " + surface + " product image profile="
-                + profile.getId()));
-        return true;
-    }
 
     private ImageView findCardImageView(Object holder) {
         Object itemView = readField(holder, "itemView");
@@ -4697,10 +4105,10 @@ public final class HookModule extends XposedModule {
     private static void hideLoadingView(Object loadingView) {
         if (loadingView == null) return;
         if (loadingView instanceof View) {
-            // 0.5.78 — #2 root cause. stopLoadingSpinners() walks the parent chain and
+            // 0.5.78 鈥?#2 root cause. stopLoadingSpinners() walks the parent chain and
             // called hideLoadingView(parent) on EVERY ancestor, which GONE'd the product
             // image's own container (device_image_container / onespace_header_container),
-            // blanking the photo on 通用设置. Only spinner-like views (Lottie / Progress /
+            // blanking the photo on 閫氱敤璁剧疆. Only spinner-like views (Lottie / Progress /
             // Loading / Spin) should be hidden; a plain FrameLayout / RelativeLayout
             // container must be left untouched.
             String name = loadingView.getClass().getName();
@@ -4721,7 +4129,7 @@ public final class HookModule extends XposedModule {
      * Replaces the product photo on the earbud detail header.
      *
      * <p>Field {@code d} on MelodyDetailModelView is the ImageView that actually shows the
-     * product photo — confirmed in the 17.6.3 smali. The earlier implementation resolved the
+     * product photo 鈥?confirmed in the 17.6.3 smali. The earlier implementation resolved the
      * view through resource ids and hooked {@code b}/{@code c}, which turned out to be the 3D
      * model loader and a low-memory check respectively; that is why the log kept reporting a
      * successful replacement while nothing appeared.
@@ -4761,11 +4169,11 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * Puts the Bose product photo into the 通用设置 header card.
+     * Puts the Bose product photo into the 閫氱敤璁剧疆 header card.
      *
      * <p>{@code OneSpaceHeaderPreference} (Melody 17.6.3, classes2.dex) holds the photo in
      * field {@code e} (ImageView) and loads it in {@code i(Lf9/b;)} via
-     * {@code getDetailImageRes()} — a catalog lookup. A device with no catalog entry (which
+     * {@code getDetailImageRes()} 鈥?a catalog lookup. A device with no catalog entry (which
      * is every Bose) gets {@code null}, so the host leaves the ImageView empty and the card
      * renders as a blank circle. This installs our asset instead.
      *
@@ -4774,7 +4182,7 @@ public final class HookModule extends XposedModule {
     private boolean replaceBoseOneSpaceHeaderImage(Object owner) {
         try {
             if (!boseBonded()) return false;
-            // 0.5.73 — TWO bugs fixed here, both proven from OneSpaceHeaderPreference.smali:
+            // 0.5.73 鈥?TWO bugs fixed here, both proven from OneSpaceHeaderPreference.smali:
             // (a) owner is the OneSpaceHeaderPreference INSTANCE (a Preference, NOT a View),
             //     passed via chain.getThisObject() from sonyCardImage(i()) / sonyCardBind
             //     (onBindViewHolder). The old `owner instanceof View` guard therefore always
@@ -4811,30 +4219,30 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * Attaches the Bose CNC (降噪等级) slider directly under the ANC three-state widget in
-     * the 通用设置 page.
+     * Attaches the Bose CNC (闄嶅櫔绛夌骇) slider directly under the ANC three-state widget in
+     * the 閫氱敤璁剧疆 page.
      *
-     * <p>The three-state control (降噪 / 关闭 / 通透) is a {@code DeviceControlWidget} in
+     * <p>The three-state control (闄嶅櫔 / 鍏抽棴 / 閫氶€? is a {@code DeviceControlWidget} in
      * field {@code d} of {@code OneSpaceNoisePreference}; the dump of that page shows it as
      * {@code noise_action_view} sitting above the preference list. It is a plain
      * RecyclerView row, so the preference-screen injection used on the detail page cannot
-     * reach it — the slider has to be added to the view hierarchy instead.
+     * reach it 鈥?the slider has to be added to the view hierarchy instead.
      *
      * <p>Called on every {@code onBindViewHolder}, hence the tag guard: the host re-binds on
      * scroll and on state changes, and a second slider would be a visible duplicate.
      */
     /**
-     * Hides the 通用设置 "降噪效果" category by walking the fragment that owns this row.
+     * Hides the 閫氱敤璁剧疆 "闄嶅櫔鏁堟灉" category by walking the fragment that owns this row.
      *
      * <p>0.5.67. Three independent paths call this:
      * <ol>
-     *   <li>{@code onespaceNoiseMenuCheck} — hooked straight onto
+     *   <li>{@code onespaceNoiseMenuCheck} 鈥?hooked straight onto
      *       OneSpaceListFragment.x(List,Z) ("checkShowNoiseMenuItem"), the method that
      *       turns the category visible on every WhitelistConfigDTO LiveData emit.</li>
-     *   <li>{@code onespaceNoiseBind} — OneSpaceNoisePreference.onBindViewHolder, the one
+     *   <li>{@code onespaceNoiseBind} 鈥?OneSpaceNoisePreference.onBindViewHolder, the one
      *       hook PROVEN to fire on this page in every recent version (the CNC slider has
      *       always attached through it).</li>
-     *   <li>{@code hideAncStrengthPreference} — the old detailPreferenceAdd path, which
+     *   <li>{@code hideAncStrengthPreference} 鈥?the old detailPreferenceAdd path, which
      *       fires only once at XML inflate time and is therefore too early on its own.</li>
      * </ol>
      * All three end here, so the category is re-hidden after every show, no matter which
@@ -4843,7 +4251,7 @@ public final class HookModule extends XposedModule {
      * <p>The walk is by KEY (pref_noise_menu_category / pref_noise_menu) over the screen the
      * row belongs to, never by field name of the fragment: keys survive R8 renames between
      * Melody releases, obfuscated field names do not. The three-state widget
-     * (pref_noise_switch) is deliberately never touched — hiding it was the 0.5.65
+     * (pref_noise_switch) is deliberately never touched 鈥?hiding it was the 0.5.65
      * regression.
      */
     private void suppressNoiseMenuCategory(Object preferenceRow) {
@@ -4905,8 +4313,8 @@ public final class HookModule extends XposedModule {
 
             // 0.5.16 evidence: reason=not_a_view. The first attempt built a
             // MelodyPromptVolumeSeekBarPreference and called addView on the widget's
-            // parent, but that class extends COUIPreference — it is a Preference, never a
-            // View, so it cannot be added to a ViewGroup at all. The 通用设置 list is a
+            // parent, but that class extends COUIPreference 鈥?it is a Preference, never a
+            // View, so it cannot be added to a ViewGroup at all. The 閫氱敤璁剧疆 list is a
             // COUIPanel driven by a real preference tree (OneSpaceListFragment, field r =
             // COUIPreferenceCategory), so the row has to be added there instead. The
             // onBindViewHolder hook is kept only as the trigger point: it is the earliest
@@ -4924,11 +4332,11 @@ public final class HookModule extends XposedModule {
             Object seek = newPreference(loader,
                     "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference", activity);
             if (seek == null) {
-                log(Log.WARN, TAG, event("Bose 通用设置 slider unavailable: COUI seekbar ctor failed"));
+                log(Log.WARN, TAG, event("Bose 閫氱敤璁剧疆 slider unavailable: COUI seekbar ctor failed"));
                 return;
             }
             setPreferenceValue(seek, "setKey", BOSE_CNC_ONESPACE_KEY);
-            setPreferenceValue(seek, "setTitle", "降噪等级");
+            setPreferenceValue(seek, "setTitle", "闄嶅櫔绛夌骇");
             setPreferenceValue(seek, "setPersistent", false);
             setPreferenceValue(seek, "setPromptVolumePercent", Boolean.FALSE);
             invokeInt(seek, "setBarMaxValue", 10);
@@ -4940,7 +4348,7 @@ public final class HookModule extends XposedModule {
             }
             if (level < 0) level = 3;
             invokeInt(seek, "setProgress", level);
-            setPreferenceValue(seek, "setSummary", "效果强度 " + level + "/10");
+            setPreferenceValue(seek, "setSummary", "鏁堟灉寮哄害 " + level + "/10");
             installBoseCncListener(seek, loader);
 
             int anchorOrder = PrefRef.getOrder(preference);
@@ -4955,14 +4363,14 @@ public final class HookModule extends XposedModule {
             MLog.event("bose.cnc.onespace.attached", "level", level, "order", target,
                     "parent", tree.getClass().getSimpleName());
         } catch (Throwable t) {
-            log(Log.WARN, TAG, "Bose 通用设置 slider attach failed", t);
+            log(Log.WARN, TAG, "Bose 閫氱敤璁剧疆 slider attach failed", t);
         }
     }
 
     /**
-     * Walks up from a 通用设置 row to the preference container that drives its RecyclerView.
+     * Walks up from a 閫氱敤璁剧疆 row to the preference container that drives its RecyclerView.
      *
-     * <p>{@code OneSpaceNoisePreference} has no parent link of its own — it is added by
+     * <p>{@code OneSpaceNoisePreference} has no parent link of its own 鈥?it is added by
      * {@code OneSpaceListFragment} (field r, a {@code COUIPreferenceCategory}) to a
      * {@code androidx.preference.g} fragment. So the tree is found by asking the row's own
      * context for the fragment instead, and falling back to the screen the anchor lives on.
@@ -4972,7 +4380,7 @@ public final class HookModule extends XposedModule {
             Object context = PrefRef.invokeNoArg(preference, "getContext");
             if (!(context instanceof Context)) return null;
             // screenForAnchor() bails out unless the preference's context is itself an
-            // Activity. On 通用设置 it is not: the rows live in a COUIPanelFragment hosted
+            // Activity. On 閫氱敤璁剧疆 it is not: the rows live in a COUIPanelFragment hosted
             // by OneSpaceDetailActivity, so getContext() returns a ContextWrapper. Unwrap
             // to the Activity first, then reuse the fragment-manager walk.
             Activity activity = findActivity((Context) context);
@@ -5043,195 +4451,16 @@ public final class HookModule extends XposedModule {
         return bestArea > 0L ? best : null;
     }
 
-    private void replaceSonyDetailImageLater(Object owner) {
-        if (!(owner instanceof View)) return;
-        View view = (View) owner;
-        // The page can be gone by the time this runs (0.4.6 crashed the detail page
-        // from here), so every step is guarded and nothing propagates.
-        view.post(() -> {
-            try {
-                if (!view.isAttachedToWindow()) return;
-                replaceConfiguredProductImage(owner, "g", "b", "c", "d", "e", "detail",
-                        findDetailImageView(owner));
-            } catch (Throwable t) {
-                log(Log.WARN, TAG, "Bose detail image replacement skipped", t);
-            }
-        });
-    }
 
-    private SonyDeviceConfig findSonyImageProfile(String address, String name) {
-        if (!deviceBridge.hasProfiles()) return null;
-        SonyDeviceConfig profile = findSonyProfileByName(name);
-        if (profile == null) profile = activeSonyImageProfile;
-        if (profile == null || profile.getImage() == null || profile.getImage().trim().isEmpty()) return null;
-        // The whitelist hook has already verified this profile. The ViewModel is populated later.
-        if (address != null && isTargetAddress(address)) rememberTargetAddress(address);
-        return profile;
-    }
 
-    private SonyDeviceConfig findSonyProfileByName(String name) {
-        return deviceBridge.profileForName(name);
-    }
 
-    private File materializeSonyImage(SonyDeviceConfig profile) {
-        Application application = currentApplication();
-        AssetManager assets = sonyModuleAssets;
-        String assetPath = profile.getImage();
-        if (application == null || assets == null || assetPath == null || !assetPath.startsWith("sony/images/")) {
-            return null;
-        }
-        String fileName = new File(assetPath).getName();
-        File directory = new File(application.getFilesDir(), "melodylink/sony-images");
-        File output = new File(directory, profile.getId().replace('.', '_') + "-" + fileName);
-        try {
-            if (output.isFile() && output.length() > 0L) return output;
-            if (!directory.isDirectory() && !directory.mkdirs()) {
-                log(Log.WARN, TAG, event("Sony image directory creation failed"));
-                return null;
-            }
-            try (java.io.InputStream input = assets.open(assetPath);
-                 FileOutputStream stream = new FileOutputStream(output, false)) {
-                byte[] buffer = new byte[8192];
-                int count;
-                while ((count = input.read(buffer)) != -1) stream.write(buffer, 0, count);
-            }
-            return output.isFile() && output.length() > 0L ? output : null;
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Sony image materialization failed", t);
-            return null;
-        }
-    }
 
-    private boolean replaceHuaweiProductImage(
-            Object owner,
-            String viewModelField,
-            String addressField,
-            String nameField,
-            String imageField,
-            String loadingField,
-            String surface,
-            ImageView fallbackImageView
-    ) {
-        Object viewModel = readField(owner, viewModelField);
-        String address = asString(readField(viewModel, addressField));
-        String name = asString(readField(viewModel, nameField));
-        HuaweiDeviceConfig profile = findHuaweiImageProfile(address, name);
-        if (profile == null) return false;
 
-        Object imageValue = readField(owner, imageField);
-        ImageView imageView = imageValue instanceof ImageView
-                ? (ImageView) imageValue : fallbackImageView;
-        if (imageView == null) {
-            log(Log.WARN, TAG, event("Huawei " + surface + " image target unavailable"));
-            return false;
-        }
-        File imageFile = materializeHuaweiImage(profile);
-        if (imageFile == null) {
-            log(Log.WARN, TAG, event("Huawei " + surface + " image skipped: asset unavailable profile="
-                    + profile.getId()));
-            return false;
-        }
 
-        imageView.setImageURI(Uri.fromFile(imageFile));
-        imageView.setVisibility(View.VISIBLE);
-        hideLoadingView(readField(owner, loadingField));
-        log(Log.INFO, TAG, event("replaced Huawei " + surface + " product image profile="
-                + profile.getId()));
-        return true;
-    }
 
-    private HuaweiDeviceConfig findHuaweiImageProfile(String address, String name) {
-        HuaweiDeviceConfig profile = findHuaweiProfileByName(name);
-        if (profile == null) profile = activeHuaweiImageProfile;
-        if (profile == null || profile.getImage().trim().isEmpty()) return null;
-        if (address != null && isTargetAddress(address)) rememberTargetAddress(address);
-        return profile;
-    }
 
-    private HuaweiDeviceConfig findHuaweiProfileByName(String name) {
-        com.melody.melodylink.huawei.config.HuaweiDeviceMatch match = HuaweiDeviceCatalog.INSTANCE.find(
-                new com.melody.melodylink.domain.DeviceIdentity(name, null,
-                        java.util.Collections.emptySet(), null)
-        );
-        return match != null ? match.getRoute() : null;
-    }
 
-    private XiaomiDeviceConfig findXiaomiProfileByName(String name) {
-        com.melody.melodylink.xiaomi.config.XiaomiDeviceMatch match = XiaomiDeviceCatalog.INSTANCE.find(
-                new com.melody.melodylink.domain.DeviceIdentity(name, null,
-                        java.util.Collections.emptySet(), null)
-        );
-        return match != null ? match.getRoute() : null;
-    }
 
-    private File materializeHuaweiImage(HuaweiDeviceConfig profile) {
-        Application application = currentApplication();
-        AssetManager assets = sonyModuleAssets;
-        String assetPath = profile.getImage();
-        if (application == null || assets == null || !assetPath.startsWith("huawei/images/")) return null;
-        String fileName = new File(assetPath).getName();
-        File directory = new File(application.getFilesDir(), "melodylink/huawei-images");
-        File output = new File(directory, profile.getId().replace('.', '_') + "-" + fileName);
-        try {
-            if (output.isFile() && output.length() > 0L) return output;
-            if (!directory.isDirectory() && !directory.mkdirs()) return null;
-            try (java.io.InputStream input = assets.open(assetPath);
-                 FileOutputStream stream = new FileOutputStream(output, false)) {
-                byte[] buffer = new byte[8192];
-                int count;
-                while ((count = input.read(buffer)) != -1) stream.write(buffer, 0, count);
-            }
-            return output.isFile() && output.length() > 0L ? output : null;
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Huawei image materialization failed", t);
-            return null;
-        }
-    }
-
-    private boolean replaceXiaomiProductImage(
-            Object owner, String viewModelField, String addressField, String nameField,
-            String imageField, String loadingField, String surface, ImageView fallbackImageView
-    ) {
-        Object viewModel = readField(owner, viewModelField);
-        String address = asString(readField(viewModel, addressField));
-        XiaomiDeviceConfig profile = findXiaomiProfileByName(asString(readField(viewModel, nameField)));
-        if (profile == null) profile = activeXiaomiImageProfile;
-        if (profile == null || profile.getImage().trim().isEmpty()) return false;
-        Object imageValue = readField(owner, imageField);
-        ImageView imageView = imageValue instanceof ImageView ? (ImageView) imageValue : fallbackImageView;
-        if (imageView == null) return false;
-        File imageFile = materializeXiaomiImage(profile);
-        if (imageFile == null) return false;
-        imageView.setImageURI(Uri.fromFile(imageFile));
-        imageView.setVisibility(View.VISIBLE);
-        hideLoadingView(readField(owner, loadingField));
-        if (address != null && isTargetAddress(address)) rememberTargetAddress(address);
-        log(Log.INFO, TAG, event("replaced Xiaomi " + surface + " product image profile=" + profile.getId()));
-        return true;
-    }
-
-    private File materializeXiaomiImage(XiaomiDeviceConfig profile) {
-        Application application = currentApplication();
-        AssetManager assets = sonyModuleAssets;
-        String assetPath = profile.getImage();
-        if (application == null || assets == null || !assetPath.startsWith("xiaomi/images/")) return null;
-        File directory = new File(application.getFilesDir(), "melodylink/xiaomi-images");
-        File output = new File(directory, profile.getId().replace('.', '_') + "-" + new File(assetPath).getName());
-        try {
-            if (output.isFile() && output.length() > 0L) return output;
-            if (!directory.isDirectory() && !directory.mkdirs()) return null;
-            try (java.io.InputStream input = assets.open(assetPath);
-                 FileOutputStream stream = new FileOutputStream(output, false)) {
-                byte[] buffer = new byte[8192];
-                int count;
-                while ((count = input.read(buffer)) != -1) stream.write(buffer, 0, count);
-            }
-            return output.isFile() && output.length() > 0L ? output : null;
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Xiaomi image materialization failed", t);
-            return null;
-        }
-    }
 
     private static String asString(Object value) {
         return value instanceof String ? (String) value : null;
@@ -5347,43 +4576,13 @@ public final class HookModule extends XposedModule {
     @SuppressLint("MissingPermission")
     private boolean isTargetDevice(BluetoothDevice device) {
         try {
-            return isRegisteredSonyName(device.getName()) || isRegisteredSamsungDevice(device)
-                    || isRegisteredHuaweiDevice(device) || isRegisteredXiaomiDevice(device)
-                    || isBoseDevice(device);
+            return isBoseDevice(device);
         } catch (Throwable ignored) {
             return false;
         }
     }
 
-    @SuppressLint("MissingPermission")
-    private boolean isRegisteredHuaweiDevice(BluetoothDevice device) {
-        try {
-            java.util.Set<String> uuids = new java.util.HashSet<>();
-            if (device.getUuids() != null) {
-                for (android.os.ParcelUuid uuid : device.getUuids()) uuids.add(uuid.getUuid().toString());
-            }
-            return HuaweiDeviceCatalog.INSTANCE.find(
-                    new com.melody.melodylink.domain.DeviceIdentity(device.getName(), device.getAddress(), uuids, null)
-            ) != null;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
 
-    @SuppressLint("MissingPermission")
-    private boolean isRegisteredSamsungDevice(BluetoothDevice device) {
-        try {
-            java.util.Set<String> uuids = new java.util.HashSet<>();
-            if (device.getUuids() != null) {
-                for (android.os.ParcelUuid uuid : device.getUuids()) uuids.add(uuid.getUuid().toString());
-            }
-            return SamsungGalaxyBudsCatalog.INSTANCE.find(
-                    new com.melody.melodylink.domain.DeviceIdentity(device.getName(), device.getAddress(), uuids, null)
-            ) != null;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
 
     private boolean isTargetObject(Object value) {
         if (value == null) return false;
@@ -5450,12 +4649,8 @@ public final class HookModule extends XposedModule {
     }
 
     private boolean isSonyConnected() {
-        return targetAddress != null && (sonyTransport.isConnected()
-                || samsungTransport.isConnected()
-                || huaweiTransport.isConnected()
-                || (xiaomiTransport != null && xiaomiTransport.isConnected())
-                || (targetXiaomiDevice != null && xiaomiHostConnected)
-                || (targetBoseDevice != null && boseHostConnected)
+        return targetAddress != null
+                && ((targetBoseDevice != null && boseHostConnected)
                 || targetAddress.equalsIgnoreCase(readSharedSonyAddress()));
     }
 
@@ -5557,7 +4752,7 @@ public final class HookModule extends XposedModule {
                         BluetoothDevice device = resolveBoseForTile();
                         if (device == null) return false;
                         // The 0.4.0 log disproved the "SystemUI sends a stale target"
-                        // theory: it actually sends a correct OFF→ANC→TRANSP cycle. The
+                        // theory: it actually sends a correct OFF鈫扐NC鈫扵RANSP cycle. The
                         // real bug was BoseTransport dropping every queued-but-unsent
                         // ANC session on a rapid tap (per-call generation bump), so only
                         // the last landed. That is now fixed with a coalescing worker, so
@@ -5590,7 +4785,7 @@ public final class HookModule extends XposedModule {
                         boseTransport.writeSetting(BoseDeviceConfig.SETTING_SPATIAL, clamped);
                         // The tile's type column comes from the stock DTO, so the DTO
                         // must be rebuilt with the new spatial value before SystemUI
-                        // re-queries — same chain the ANC click uses.
+                        // re-queries 鈥?same chain the ANC click uses.
                         refreshTargetRepository("Bose tile spatial");
                         BoseControlProviderBridge.refreshSpatialTile();
                         return true;
@@ -5663,7 +4858,7 @@ public final class HookModule extends XposedModule {
      * Layer 1 asks BluetoothAdapter. Layer 2 is the fallback that actually kept
      * the slider alive in 0.4.3-0.4.9: our own state file, which the primary
      * process writes only after a real BMAP session exists. The UI must never
-     * depend on layer 1 alone — that dependency is why the detail page could
+     * depend on layer 1 alone 鈥?that dependency is why the detail page could
      * silently inject nothing.
      */
     @SuppressLint("MissingPermission")
@@ -5683,7 +4878,7 @@ public final class HookModule extends XposedModule {
                 }
                 // 0.5.37: the KNOWN_MACS list is a fixed set, but the unit that actually
                 // reports bose=true in the whitelist lookup is whichever MAC isTargetAddress
-                // accepts — on this device 68:F2:1F:3D:41:D7, which is not in that list.
+                // accepts 鈥?on this device 68:F2:1F:3D:41:D7, which is not in that list.
                 // Gating the catalog injection on boseBonded() therefore suppressed it
                 // entirely. Fall back to asking isTargetAddress about the live bonded set,
                 // so both checks agree on what "our device" means.
@@ -5720,88 +4915,11 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private void writeSharedSonyState() {
-        if (!isPrimaryProcess() || targetAddress == null) return;
-        File file = sharedStateFile();
-        if (file == null) return;
-        EarbudsState state = sonySessionState.getAnc();
-        int mode = MelodyStateBridge.INSTANCE.ancModeIndex(state);
-        if (MelodySharedStateStore.writeState(file, targetAddress, android.os.Process.myPid(), mode,
-                confirmedSonySettings.get(SonyAdvancedSettingId.DSEE),
-                confirmedSonySettings.get(SonyAdvancedSettingId.PAUSE_WHEN_REMOVED))) {
-            log(Log.INFO, TAG, event("shared Sony state published addressHash="
-                    + Integer.toHexString(targetAddress.hashCode()) + " mode=" + mode));
-        } else {
-            log(Log.WARN, TAG, "shared Sony state write failed");
-        }
-    }
 
-    private void writeSharedHuaweiState() {
-        if (!isPrimaryProcess() || targetAddress == null || targetHuaweiDevice == null) return;
-        File file = sharedStateFile();
-        if (file == null) return;
-        int mode = MelodyStateBridge.INSTANCE.ancModeIndex(huaweiSessionState.getAnc());
-        if (MelodySharedStateStore.writeState(file, targetAddress, android.os.Process.myPid(), mode, null, null)) {
-            log(Log.INFO, TAG, event("shared Huawei state published addressHash="
-                    + Integer.toHexString(targetAddress.hashCode()) + " mode=" + mode));
-        } else {
-            log(Log.WARN, TAG, "shared Huawei state write failed");
-        }
-    }
 
-    /**
-     * Mirrors the host Bluetooth connection rather than AF00 readiness.  The target app has
-     * a separate foreground process, so the A2DP/HFP connection marker must cross processes
-     * even when Xiaomi's optional control channel cannot be established.
-     */
-    private void writeSharedXiaomiState() {
-        if (!isPrimaryProcess() || targetAddress == null || targetXiaomiDevice == null || !xiaomiHostConnected) return;
-        File file = sharedStateFile();
-        if (file == null) return;
-        int mode = MelodyStateBridge.INSTANCE.ancModeIndex(xiaomiSessionState.getAnc());
-        if (MelodySharedStateStore.writeState(file, targetAddress, android.os.Process.myPid(), mode, null, null)) {
-            log(Log.INFO, TAG, event("shared Xiaomi host connection published addressHash="
-                    + Integer.toHexString(targetAddress.hashCode()) + " mode=" + mode));
-        } else {
-            log(Log.WARN, TAG, "shared Xiaomi state write failed");
-        }
-    }
 
-    private void clearHuaweiSessionState() {
-        huaweiSessionState.clear();
-        if (!isPrimaryProcess() || targetHuaweiDevice == null) return;
-        File file = sharedStateFile();
-        MelodySharedStateStore.SharedState state = MelodySharedStateStore.readState(file);
-        if (state != null && targetAddress != null && targetAddress.equalsIgnoreCase(state.address)) {
-            clearSharedSonyState();
-        }
-        targetHuaweiDevice = null;
-    }
 
-    /** Removes malformed or previous-process markers while retaining a live hook re-entry marker. */
-    private void clearStaleSharedSonyState() {
-        if (!isPrimaryProcess()) return;
-        File file = sharedStateFile();
-        if (file == null || !file.isFile()) return;
-        MelodySharedStateStore.SharedState state = readSharedSonyState();
-        if (state != null && state.ownerPid == android.os.Process.myPid()) {
-            log(Log.INFO, TAG, event("preserved live shared Sony state during package initialization"));
-            return;
-        }
-        if (!MelodySharedStateStore.delete(file)) {
-            log(Log.WARN, TAG, "stale shared Sony state delete failed");
-        } else {
-            log(Log.INFO, TAG, event("cleared stale shared Sony state during package initialization"));
-        }
-    }
 
-    private void clearSharedSonyState() {
-        if (!isPrimaryProcess()) return;
-        File file = sharedStateFile();
-        if (!MelodySharedStateStore.delete(file)) {
-            log(Log.WARN, TAG, "shared Sony state delete failed");
-        }
-    }
 
     private boolean writeSharedSonyCommand(String address, int modeIndex) {
         File file = sharedCommandFile();
@@ -5812,25 +4930,10 @@ public final class HookModule extends XposedModule {
     }
 
     private void releaseSonySession(String reason) {
-        retainSharedSonyStateAfterCommandDisconnect = false;
-        pendingAncMode = null;
-        pendingBatteryRefresh = false;
-        failPendingNoiseWrite(reason);
-        sonySessionState.clear();
-        clearSharedSonyState();
         clearSharedSonyCommand();
         clearSharedSonyBatteryCommand();
-        clearSharedSonySettingCommand();
-        log(Log.INFO, TAG, event(reason + "; releasing Sony RFCOMM session"));
-        sonyTransport.disconnect();
-        samsungTransport.disconnect();
-        huaweiTransport.disconnect();
-        if (xiaomiTransport != null) xiaomiTransport.disconnect();
+        log(Log.INFO, TAG, event(reason + "; releasing Bose BMAP session"));
         boseTransport.disconnect();
-        targetSamsungDevice = null;
-        targetHuaweiDevice = null;
-        targetXiaomiDevice = null;
-        xiaomiHostConnected = false;
         clearBoseSessionState();
         refreshTargetRepository(reason);
     }
@@ -5885,17 +4988,7 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private boolean isRegisteredSonyName(String bluetoothName) {
-        return initializeSonyConfig() && deviceBridge.isRegisteredDevice(bluetoothName);
-    }
 
-    private boolean isRegisteredHuaweiName(String bluetoothName) {
-        if (!initializeSonyConfig()) return false;
-        return HuaweiDeviceCatalog.INSTANCE.find(
-                new com.melody.melodylink.domain.DeviceIdentity(bluetoothName, null,
-                        java.util.Collections.emptySet(), null)
-        ) != null;
-    }
 
     private void clearSharedSonyCommand() {
         File file = sharedCommandFile();
@@ -5911,72 +5004,14 @@ public final class HookModule extends XposedModule {
         if (isPrimaryProcess()) {
             if (targetBoseDevice != null && boseHostConnected) {
                 boseTransport.refreshBattery();
-                return;
-            }
-            if (sonyTransport.isConnected()) {
-                sonyTransport.refreshBattery();
-            } else {
-                pendingBatteryRefresh = true;
-                if (!connectTargetSonyTransport("battery refresh")) {
-                    pendingBatteryRefresh = false;
-                    log(Log.WARN, TAG, event("Sony battery refresh skipped: target Bluetooth device is unavailable"));
-                }
             }
             return;
         }
         writeSharedSonyBatteryCommand(address);
     }
 
-    @SuppressLint("MissingPermission")
-    private boolean connectTargetSonyTransport(String reason) {
-        BluetoothDevice device = resolveTargetSonyDevice();
-        if (device == null) return false;
-        log(Log.INFO, TAG, event("opening temporary Sony RFCOMM session for " + reason
-                + " addressHash=" + Integer.toHexString(device.getAddress().hashCode())));
-        sonyTransport.connect(device);
-        return true;
-    }
 
-    @SuppressLint("MissingPermission")
-    private BluetoothDevice resolveTargetSonyDevice() {
-        BluetoothDevice remembered = targetSonyDevice;
-        if (remembered != null && isTargetDevice(remembered)) return remembered;
-        String address = targetAddress;
-        if (address == null) return null;
-        try {
-            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter == null) return null;
-            BluetoothDevice device = adapter.getRemoteDevice(address);
-            if (!isTargetDevice(device)) return null;
-            targetSonyDevice = device;
-            return device;
-        } catch (IllegalArgumentException | SecurityException ignored) {
-            return null;
-        }
-    }
 
-    private void runPendingSonyOperation() {
-        AncMode mode = pendingAncMode;
-        if (mode != null) {
-            pendingAncMode = null;
-            log(Log.INFO, TAG, event("sending queued Sony ANC command after temporary connection"));
-            sonyTransport.setAncMode(mode);
-            return;
-        }
-        if (!pendingSonySettings.isEmpty()) {
-            Map<SonyAdvancedSettingId, Boolean> pending = new java.util.HashMap<>(pendingSonySettings);
-            pendingSonySettings.keySet().removeAll(pending.keySet());
-            for (Map.Entry<SonyAdvancedSettingId, Boolean> entry : pending.entrySet()) {
-                log(Log.INFO, TAG, event("sending queued Sony setting " + entry.getKey()));
-                sonyTransport.writeSetting(entry.getKey(), entry.getValue());
-            }
-        }
-        if (pendingBatteryRefresh) {
-            pendingBatteryRefresh = false;
-            log(Log.INFO, TAG, event("sending queued Sony battery refresh after temporary connection"));
-            sonyTransport.refreshBattery();
-        }
-    }
 
     private boolean writeSharedSonyBatteryCommand(String address) {
         File file = sharedBatteryCommandFile();
@@ -5986,14 +5021,6 @@ public final class HookModule extends XposedModule {
         return written;
     }
 
-    private boolean writeSharedSonySettingCommand(String address, SonyAdvancedSettingId id, boolean value) {
-        File file = sharedSettingCommandFile();
-        if (file == null) return false;
-        boolean written = MelodySharedStateStore.writeSettingCommand(
-                file, address, id.name(), value, Long.toString(System.nanoTime()));
-        if (!written) log(Log.WARN, TAG, "shared Sony setting command write failed");
-        return written;
-    }
 
     private void clearSharedSonyBatteryCommand() {
         File file = sharedBatteryCommandFile();
@@ -6002,268 +5029,16 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private void clearSharedSonySettingCommand() {
-        File file = sharedSettingCommandFile();
-        if (!MelodySharedStateStore.delete(file)) {
-            log(Log.WARN, TAG, "shared Sony setting command delete failed");
-        }
-    }
 
     private static MelodySharedStateStore.SharedBatteryCommand readSharedSonyBatteryCommand() {
         return MelodySharedStateStore.readBatteryCommand(sharedBatteryCommandFile());
     }
 
-    private static MelodySharedStateStore.SharedSettingCommand readSharedSonySettingCommand() {
-        return MelodySharedStateStore.readSettingCommand(sharedSettingCommandFile());
-    }
 
-    private void installAdvancedSettings(Object anchor) {
-        boolean hasSonySettings = activeSonyImageProfile != null
-                && !activeSonyImageProfile.getAdvancedSettings().isEmpty();
-        boolean hasHuaweiLowLatency = activeHuaweiImageProfile != null
-                && activeHuaweiImageProfile.getSupportsLowLatency();
-        if (!isAdvancedSettingsAnchor(anchor) || (!hasSonySettings && !hasHuaweiLowLatency)) return;
-        try {
-            Object soundGroup = invokeNoArg(anchor, "getParent");
-            if (soundGroup == null) return;
-            Object parent = invokeNoArg(soundGroup, "getParent");
-            if (parent == null) parent = soundGroup;
-            if (findPreference(parent, ADVANCED_CATEGORY_KEY) != null
-                    || findPreferenceByKeyRecursive(parent, ADVANCED_CATEGORY_KEY)) return;
-            ClassLoader loader = anchor.getClass().getClassLoader();
-            Object context = invokeNoArg(anchor, "getContext");
-            Activity activity = context instanceof Context ? findActivity((Context) context) : null;
-            if (activity == null) activity = detailActivity;
-            if (activity == null) return;
-            Object category = newPreference(loader,
-                    "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
-            if (category == null) category = newPreference(loader,
-                    "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
-            if (category == null) return;
-            setPreferenceValue(category, "setTitle", "高级设置");
-            setPreferenceValue(category, "setKey", ADVANCED_CATEGORY_KEY);
-            Integer order = (Integer) invokeNoArg(soundGroup, "getOrder");
-            if (order != null) setPreferenceValue(category, "setOrder", order + 1);
-            if (!addPreference(parent, category, loader)) {
-                log(Log.WARN, TAG, event("advanced settings category could not be added"));
-                return;
-            }
-            advancedPreferences.clear();
-            huaweiLowLatencyPreference = null;
-            if (hasHuaweiLowLatency) {
-                addHuaweiLowLatencyPreference(category, loader, activity, 10);
-                log(Log.INFO, TAG, event("installed Huawei low-latency setting"));
-                return;
-            }
-            if (isPrimaryProcess() && !sonyTransport.isConnected()) {
-                connectTargetSonyTransport("advanced settings read");
-            }
-            for (com.melody.melodylink.sony.config.SonyAdvancedSettingConfig setting
-                    : activeSonyImageProfile.getAdvancedSettings()) {
-                Object item = newSwitchPreference(loader, activity);
-                if (item == null) {
-                    log(Log.WARN, TAG, event("advanced setting switch constructor unavailable id="
-                            + setting.getId()));
-                    continue;
-                }
-                String key = ADVANCED_SETTING_KEY_PREFIX + setting.getId().name().toLowerCase();
-                setPreferenceValue(item, "setKey", key);
-                setPreferenceValue(item, "setOrder", setting.getOrder());
-                setPreferenceValue(item, "setTitle", setting.getId() == SonyAdvancedSettingId.DSEE
-                        ? "DSEE" : "摘下暂停");
-                setPreferenceValue(item, "setSummary", setting.getId() == SonyAdvancedSettingId.DSEE
-                        ? "提升压缩音源的音质" : "摘下耳机时自动暂停播放");
-                setPreferenceValue(item, "setEnabled", false);
-                installSettingListener(item, setting.getId(), loader);
-                if (addPreference(category, item, loader)) {
-                    advancedPreferences.put(setting.getId(), item);
-                    if (sonyTransport.isConnected()) sonyTransport.readSetting(setting.getId());
-                } else {
-                    log(Log.WARN, TAG, event("advanced setting add rejected id=" + setting.getId()));
-                }
-            }
-            log(Log.INFO, TAG, event("installed Sony advanced settings category"));
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "advanced settings installation failed", t);
-        }
-    }
 
-    private void schedulePreferenceFragmentBinding(Object hostFragment) {
-        if (hostFragment == null) return;
-        Object activityValue = invokeNoArg(hostFragment, "getActivity");
-        if (!(activityValue instanceof Activity)) {
-            log(Log.WARN, TAG, event("advanced settings host activity unavailable"));
-            return;
-        }
-        Activity activity = (Activity) activityValue;
-        Object manager = invokeNoArg(hostFragment, "getChildFragmentManager");
-        if (manager == null) {
-            log(Log.WARN, TAG, event("advanced settings child fragment manager unavailable"));
-            return;
-        }
-        long[] delays = new long[]{0L, 50L, 200L, 500L, 1000L};
-        for (int i = 0; i < delays.length; i++) {
-            final boolean reportFailure = i == delays.length - 1;
-            mainHandler.postDelayed(() -> {
-                try {
-                    Object fragment = findTaggedFragment(manager, "DetailMainPreferenceFragment");
-                    if (fragment == null) {
-                        if (reportFailure) log(Log.WARN, TAG,
-                                event("advanced settings preference fragment not found"));
-                        return;
-                    }
-                    if (!"v9.z".equals(fragment.getClass().getName())) {
-                        if (reportFailure) log(Log.WARN, TAG, event(
-                                "advanced settings unexpected preference fragment="
-                                        + fragment.getClass().getName()));
-                        return;
-                    }
-                    installAdvancedSettingsFromPreferenceFragment(activity, fragment);
-                } catch (Throwable t) {
-                    if (reportFailure) log(Log.WARN, TAG,
-                            "advanced settings fragment binding failed", t);
-                }
-            }, delays[i]);
-        }
-    }
 
-    private void scheduleDirectPreferenceFragmentBinding(Object fragment) {
-        if (fragment == null) return;
-        // Sony-only path. For Bose the tree walk below always bails out at
-        // "if (!hasSonySettings && !hasHuaweiLowLatency) return;", so scheduling
-        // five retries just re-entered it for nothing while the page was laying
-        // out. All Bose injection goes through captureNoiseEffectRow instead.
-        Object activityValue = invokeNoArg(fragment, "getActivity");
-        if (!(activityValue instanceof Activity)) return;
-        if (boseBonded()) return;
-        Activity activity = (Activity) activityValue;
-        long[] delays = new long[]{0L, 50L, 200L, 500L, 1000L};
-        for (int i = 0; i < delays.length; i++) {
-            final boolean reportFailure = i == delays.length - 1;
-            mainHandler.postDelayed(() -> {
-                try {
-                    installAdvancedSettingsFromPreferenceFragment(activity, fragment);
-                } catch (Throwable t) {
-                    if (reportFailure) log(Log.WARN, TAG,
-                            "direct advanced settings preference binding failed", t);
-                }
-            }, delays[i]);
-        }
-    }
 
-    private static Object findTaggedFragment(Object manager, String tag) {
-        for (Method method : allMethods(manager.getClass())) {
-            if (!method.getName().equals("D") || method.getParameterTypes().length != 1
-                    || method.getParameterTypes()[0] != String.class) continue;
-            try {
-                method.setAccessible(true);
-                return method.invoke(manager, tag);
-            } catch (Throwable ignored) {
-            }
-        }
-        return null;
-    }
 
-    private void installAdvancedSettingsFromPreferenceFragment(Activity activity, Object fragment) {
-        boolean hasSonySettings = activeSonyImageProfile != null
-                && !activeSonyImageProfile.getAdvancedSettings().isEmpty();
-        boolean hasHuaweiLowLatency = activeHuaweiImageProfile != null
-                && activeHuaweiImageProfile.getSupportsLowLatency();
-        // Bose: expose the 10-level CNC slider in the detail page. The detail
-        // fragment binds in the :fg process where targetBoseDevice is never set,
-        // so presence must be the cross-process bond probe, not in-memory state.
-        boolean hasBoseCnc = boseBonded();
-        if (!hasSonySettings && !hasHuaweiLowLatency && !hasBoseCnc) return;
-        try {
-            ClassLoader loader = fragment.getClass().getClassLoader();
-            Class<?> managerType = Class.forName("androidx.preference.g", false, loader);
-            Object preferenceManager = null;
-            for (Field field : allFields(managerType)) {
-                if (field.getType().getName().equals("androidx.preference.k")) {
-                    field.setAccessible(true);
-                    preferenceManager = field.get(fragment);
-                    if (preferenceManager != null) break;
-                }
-            }
-            if (preferenceManager == null) throw new IllegalStateException("preference manager unavailable");
-            Object screen = null;
-            for (Field field : allFields(preferenceManager.getClass())) {
-                if (field.getType().getName().equals("androidx.preference.PreferenceScreen")) {
-                    field.setAccessible(true);
-                    screen = field.get(preferenceManager);
-                    if (screen != null) break;
-                }
-            }
-            if (screen == null) throw new IllegalStateException("preference screen unavailable");
-            // Bose CNC slider goes directly under the "降噪效果" row on the detail
-            // page. The privacy page reuses the same fragment class but has no such
-            // row, so this lookup doubles as the page guard (0.4.1 regression: the
-            // root-screen fallback dumped "高级设置" at the bottom of every page).
-            // The Bose CNC slider is injected from the detailPreferenceAdd hook
-            // (captureNoiseEffectRow), which anchors on the real NoiseReductionItem
-            // instance as Melody adds it. 0.4.3 lost the slider whenever this
-            // tree walk ran before the row existed. Here we only make sure the
-            // dead-end "降噪效果" row stays hidden even if the add hook missed it.
-            // The "降噪效果" row is deliberately left visible on both pages: it is
-            // the live three-state ANC switch we hijack. 0.4.5-0.4.9 hid it, which
-            // removed the ANC mode control the user relies on.
-            if (!hasSonySettings && !hasHuaweiLowLatency) return;
-            Object anchor = findPreferenceByTitle(screen, SOUND_QUALITY_TITLE);
-            if (anchor == null) return;
-            Object parent = invokeNoArg(anchor, "getParent");
-            if (parent == null) return;
-            if (findPreference(parent, ADVANCED_CATEGORY_KEY) != null
-                    || findPreferenceByKeyRecursive(parent, ADVANCED_CATEGORY_KEY)) return;
-            Object category = newPreference(loader,
-                    "com.oplus.melody.common.widget.MelodyCOUIPreferenceCategory", activity);
-            if (category == null) category = newPreference(loader,
-                    "com.coui.appcompat.preference.COUIPreferenceCategory", activity);
-            if (category == null) throw new IllegalStateException("category constructor unavailable");
-            setPreferenceValue(category, "setTitle", "\u9ad8\u7ea7\u8bbe\u7f6e");
-            setPreferenceValue(category, "setKey", ADVANCED_CATEGORY_KEY);
-            Integer order = anchor == null ? null : (Integer) invokeNoArg(anchor, "getOrder");
-            if (order != null) setPreferenceValue(category, "setOrder", order + 1);
-            if (!addPreference(parent, category, loader)) throw new IllegalStateException("category add rejected");
-            advancedPreferences.clear();
-            huaweiLowLatencyPreference = null;
-            if (hasHuaweiLowLatency) {
-                addHuaweiLowLatencyPreference(category, loader, activity, 10);
-                log(Log.INFO, TAG, event("installed Huawei low-latency setting via preference fragment"));
-                return;
-            }
-            for (com.melody.melodylink.sony.config.SonyAdvancedSettingConfig setting
-                    : activeSonyImageProfile.getAdvancedSettings()) {
-                Object item = newSwitchPreference(loader, activity);
-                if (item == null) continue;
-                String key = ADVANCED_SETTING_KEY_PREFIX + setting.getId().name().toLowerCase();
-                setPreferenceValue(item, "setKey", key);
-                setPreferenceValue(item, "setOrder", setting.getOrder());
-                setPreferenceValue(item, "setTitle", setting.getId() == SonyAdvancedSettingId.DSEE
-                        ? "DSEE" : "\u6458\u4e0b\u6682\u505c");
-                setPreferenceValue(item, "setSummary", setting.getId() == SonyAdvancedSettingId.DSEE
-                        ? "\u63d0\u5347\u538b\u7f29\u97f3\u6e90\u7684\u97f3\u8d28"
-                        : "\u6458\u4e0b\u8033\u673a\u65f6\u81ea\u52a8\u6682\u505c\u64ad\u653e");
-                setPreferenceValue(item, "setPersistent", false);
-                setPreferenceValue(item, "setVisible", true);
-                setPreferenceValue(item, "setEnabled", false);
-                installSettingListener(item, setting.getId(), loader);
-                if (addPreference(category, item, loader)) {
-                    advancedPreferences.put(setting.getId(), item);
-                    if (isPrimaryProcess()) {
-                        if (!sonyTransport.isConnected()) connectTargetSonyTransport("advanced settings read");
-                        else sonyTransport.readSetting(setting.getId());
-                    } else {
-                        setPreferenceValue(item, "setEnabled", true);
-                        applySharedAdvancedSettings(readSharedSonyState());
-                    }
-                }
-            }
-            log(Log.INFO, TAG, event("advanced settings installed via preference fragment anchor="
-                    + anchor.getClass().getName() + " fragment=" + fragment.getClass().getName()));
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "advanced settings preference fragment installation failed", t);
-        }
-    }
 
     private static Object findPreferenceByClass(Object group, String className) {
         if (group == null) return null;
@@ -6364,115 +5139,13 @@ public final class HookModule extends XposedModule {
         return methods.toArray(new Method[0]);
     }
 
-    private void updateAdvancedSetting(SonyAdvancedSettingId id, Boolean value) {
-        Object preference = advancedPreferences.get(id);
-        if (preference == null || value == null) return;
-        mainHandler.post(() -> {
-            setPreferenceValue(preference, "setChecked", value);
-            setPreferenceValue(preference, "setEnabled", true);
-        });
-    }
 
-    private void applySharedAdvancedSettings(MelodySharedStateStore.SharedState state) {
-        if (state == null) return;
-        if (state.dsee != null) updateAdvancedSetting(SonyAdvancedSettingId.DSEE, state.dsee);
-        if (state.pauseWhenRemoved != null) {
-            updateAdvancedSetting(SonyAdvancedSettingId.PAUSE_WHEN_REMOVED, state.pauseWhenRemoved);
-        }
-    }
 
-    private void setAdvancedSettingEnabled(SonyAdvancedSettingId id, boolean enabled) {
-        Object preference = advancedPreferences.get(id);
-        if (preference == null) return;
-        mainHandler.post(() -> setPreferenceValue(preference, "setEnabled", enabled));
-    }
 
-    private boolean isRegisteredXiaomiName(String bluetoothName) {
-        return initializeSonyConfig() && findXiaomiProfileByName(bluetoothName) != null;
-    }
 
-    @SuppressLint("MissingPermission")
-    private boolean isRegisteredXiaomiDevice(BluetoothDevice device) {
-        try {
-            java.util.Set<String> uuids = new java.util.HashSet<>();
-            if (device.getUuids() != null) {
-                for (android.os.ParcelUuid uuid : device.getUuids()) uuids.add(uuid.getUuid().toString());
-            }
-            return XiaomiDeviceCatalog.INSTANCE.find(
-                    new com.melody.melodylink.domain.DeviceIdentity(device.getName(), device.getAddress(), uuids, null)
-            ) != null;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
 
-    private void addHuaweiLowLatencyPreference(Object category, ClassLoader loader, Activity activity, int order) {
-        Object item = newSwitchPreference(loader, activity);
-        if (item == null) {
-            log(Log.WARN, TAG, event("Huawei low-latency switch constructor unavailable"));
-            return;
-        }
-        setPreferenceValue(item, "setKey", HUAWEI_LOW_LATENCY_SETTING_KEY);
-        setPreferenceValue(item, "setOrder", order);
-        setPreferenceValue(item, "setTitle", "低时延模式");
-        setPreferenceValue(item, "setSummary", "降低游戏和视频的音频延迟");
-        setPreferenceValue(item, "setPersistent", false);
-        setPreferenceValue(item, "setChecked", confirmedHuaweiLowLatency != null && confirmedHuaweiLowLatency);
-        setPreferenceValue(item, "setEnabled", huaweiTransport.isConnected());
-        installHuaweiLowLatencyListener(item, loader);
-        if (addPreference(category, item, loader)) huaweiLowLatencyPreference = item;
-    }
 
-    private void updateHuaweiLowLatencyPreference(Boolean value, boolean enabled) {
-        Object preference = huaweiLowLatencyPreference;
-        if (preference == null) return;
-        mainHandler.post(() -> {
-            if (value != null) setPreferenceValue(preference, "setChecked", value);
-            setPreferenceValue(preference, "setEnabled", enabled);
-        });
-    }
 
-    private void installHuaweiLowLatencyListener(Object preference, ClassLoader loader) {
-        Method listenerSetter = null;
-        for (Method candidate : allMethods(preference.getClass())) {
-            if (candidate.getName().equals("setOnPreferenceChangeListener")
-                    && candidate.getParameterTypes().length == 1) {
-                listenerSetter = candidate;
-                break;
-            }
-        }
-        if (listenerSetter == null || !listenerSetter.getParameterTypes()[0].isInterface()) return;
-        Class<?> listenerType = listenerSetter.getParameterTypes()[0];
-        Method callback = null;
-        for (Method candidate : listenerType.getMethods()) {
-            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
-                callback = candidate;
-                break;
-            }
-        }
-        final Method changeCallback = callback;
-        Object listener = Proxy.newProxyInstance(loader, new Class<?>[]{listenerType}, (proxy, method, args) -> {
-            if ("toString".equals(method.getName())) return "MelodyLinkHuaweiLowLatencyListener";
-            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
-            if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-            if (changeCallback == null || !method.getName().equals(changeCallback.getName())
-                    || args == null || args.length < 2 || !(args[1] instanceof Boolean)) return null;
-            if (!isPrimaryProcess() || !huaweiTransport.isConnected()) {
-                log(Log.WARN, TAG, event("Huawei low-latency write skipped: RFCOMM session unavailable"));
-                updateHuaweiLowLatencyPreference(null, huaweiTransport.isConnected());
-                return false;
-            }
-            setPreferenceValue(preference, "setEnabled", false);
-            huaweiTransport.setLowLatency((Boolean) args[1]);
-            return true;
-        });
-        try {
-            listenerSetter.setAccessible(true);
-            listenerSetter.invoke(preference, listener);
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Huawei low-latency listener attach failed", t);
-        }
-    }
 
     /**
      * Inject a 0..10 SeekBar preference that drives Bose's [31.10] byte 0 (CNC
@@ -6484,7 +5157,7 @@ public final class HookModule extends XposedModule {
      * matches ColorOS 17 styling (the plain androidx SeekBarPreference looked
      * foreign and its max field is R8-renamed, which broke the range). Melody's
      * widget exposes clean public setBarMaxValue/setProgress/setOnTrackChangeListener.
-     * Placed directly under the "降噪效果" row, not in a buried category.
+     * Placed directly under the "闄嶅櫔鏁堟灉" row, not in a buried category.
      */
     private boolean addBoseCncPreference(
             Object parent, ClassLoader loader, Activity activity, int order) {
@@ -6541,7 +5214,7 @@ public final class HookModule extends XposedModule {
     private static final String BOSE_EXTRA_CATEGORY_KEY = "melodylink.bose.extra";
 
     /**
-     * Builds the "Bose 音效" category: 3-band EQ, Action-button remaps, custom
+     * Builds the "Bose 闊虫晥" category: 3-band EQ, Action-button remaps, custom
      * mode slots, auto-off timer and power off. Everything is forwarded to the
      * primary process (which owns the BMAP session) through one command file.
      */
@@ -6779,11 +5452,11 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseButtonListener";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    // 0.5.72 — the click callback is NOT named "onClick". The host's
+                    // 0.5.72 鈥?the click callback is NOT named "onClick". The host's
                     // interface androidx.preference.Preference$d declares exactly one
                     // abstract method j(Preference)Z (verified in smali), so the old
                     // name check never matched and every tap silently fell into the
-                    // default-return branch: bose按键/bose电源 did nothing, in every
+                    // default-return branch: bose鎸夐敭/bose鐢垫簮 did nothing, in every
                     // version since the rows were introduced. Detect the callback by
                     // SIGNATURE instead: the interface's own single-argument,
                     // boolean-returning method. Object methods (equals/hashCode/
@@ -6940,11 +5613,11 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBoseStandby";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    // 0.5.72 — the click callback is NOT named "onClick". The host's
+                    // 0.5.72 鈥?the click callback is NOT named "onClick". The host's
                     // interface androidx.preference.Preference$d declares exactly one
                     // abstract method j(Preference)Z (verified in smali), so the old
                     // name check never matched and every tap silently fell into the
-                    // default-return branch: bose按键/bose电源 did nothing, in every
+                    // default-return branch: bose鎸夐敭/bose鐢垫簮 did nothing, in every
                     // version since the rows were introduced. Detect the callback by
                     // SIGNATURE instead: the interface's own single-argument,
                     // boolean-returning method. Object methods (equals/hashCode/
@@ -7006,11 +5679,11 @@ public final class HookModule extends XposedModule {
                     if ("toString".equals(method.getName())) return "MelodyLinkBosePower";
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-                    // 0.5.72 — the click callback is NOT named "onClick". The host's
+                    // 0.5.72 鈥?the click callback is NOT named "onClick". The host's
                     // interface androidx.preference.Preference$d declares exactly one
                     // abstract method j(Preference)Z (verified in smali), so the old
                     // name check never matched and every tap silently fell into the
-                    // default-return branch: bose按键/bose电源 did nothing, in every
+                    // default-return branch: bose鎸夐敭/bose鐢垫簮 did nothing, in every
                     // version since the rows were introduced. Detect the callback by
                     // SIGNATURE instead: the interface's own single-argument,
                     // boolean-returning method. Object methods (equals/hashCode/
@@ -7087,7 +5760,7 @@ public final class HookModule extends XposedModule {
         final int value = level;
         mainHandler.post(() -> {
             // Both pages can be alive at once (detail is a separate Activity on top of the
-            // 通用设置 bottom sheet), so each copy is updated in its own right.
+            // 閫氱敤璁剧疆 bottom sheet), so each copy is updated in its own right.
             for (Object target : new Object[]{slider, oneSpaceSlider}) {
                 if (target == null) continue;
                 invokeInt(target, "setProgress", value);
@@ -7146,96 +5819,12 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private void installSettingListener(Object preference, SonyAdvancedSettingId id, ClassLoader loader) {        Method listenerSetter = null;
-        for (Method candidate : allMethods(preference.getClass())) {
-            if (candidate.getName().equals("setOnPreferenceChangeListener")
-                    && candidate.getParameterTypes().length == 1) {
-                listenerSetter = candidate;
-                break;
-            }
-        }
-        if (listenerSetter == null || !listenerSetter.getParameterTypes()[0].isInterface()) {
-            log(Log.WARN, TAG, event("advanced setting listener unavailable id=" + id));
-            return;
-        }
-        Class<?> listenerType = listenerSetter.getParameterTypes()[0];
-        Method callback = null;
-        for (Method candidate : listenerType.getMethods()) {
-            if (candidate.getReturnType() == Boolean.TYPE && candidate.getParameterTypes().length == 2) {
-                callback = candidate;
-                break;
-            }
-        }
-        final Method changeCallback = callback;
-        Object listener = Proxy.newProxyInstance(loader, new Class<?>[]{listenerType}, (proxy, method, args) -> {
-            if ("toString".equals(method.getName())) return "MelodyLinkSettingListener";
-            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
-            if ("equals".equals(method.getName())) return proxy == (args == null ? null : args[0]);
-            if (changeCallback == null || !method.getName().equals(changeCallback.getName())
-                    || args == null || args.length < 2 || !(args[1] instanceof Boolean)) return null;
-            Boolean value = (Boolean) args[1];
-            setPreferenceValue(preference, "setEnabled", false);
-            if (isPrimaryProcess() && sonyTransport.isConnected()) {
-                sonyTransport.writeSetting(id, value);
-            } else if (!isPrimaryProcess()) {
-                String address = targetAddress == null ? readSharedSonyAddress() : targetAddress;
-                if (address == null || !isTargetAddress(address)
-                        || !writeSharedSonySettingCommand(address, id, value)) {
-                    setAdvancedSettingEnabled(id, true);
-                    log(Log.WARN, TAG, event("Sony setting " + id
-                            + " skipped: primary process command forwarding unavailable"));
-                } else {
-                    log(Log.INFO, TAG, event("forwarded Sony setting " + id + " to primary process"));
-                    // The command acknowledgement is delivered in the primary process.  Keep
-                    // this foreground preference responsive while that process performs I/O.
-                    updateAdvancedSetting(id, value);
-                }
-            } else {
-                pendingSonySettings.put(id, value);
-                if (!connectTargetSonyTransport("advanced setting write")) {
-                    pendingSonySettings.remove(id);
-                    setAdvancedSettingEnabled(id, true);
-                    log(Log.WARN, TAG, event("Sony setting " + id
-                            + " skipped: target Bluetooth device is unavailable"));
-                }
-            }
-            return true;
-        });
-        try {
-            listenerSetter.setAccessible(true);
-            listenerSetter.invoke(preference, listener);
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "advanced setting listener attach failed id=" + id, t);
-        }
-    }
-
-    private static boolean isAdvancedSettingsAnchor(Object preference) {
-        if (preference == null) return false;
-        String className = preference.getClass().getName();
-        if (className.equals("com.oplus.melody.onespace.items.OneSpaceNoisePreference")
-                || className.equals("com.oplus.melody.ui.component.detail.spatialaudio.SpatialAudioItem")
-                || className.equals("com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem")) {
-            return true;
-        }
-        Object title = invokeNoArg(preference, "getTitle");
-        return title != null && SOUND_QUALITY_TITLE.equals(title.toString().trim());
-    }
 
     /** Builds a host preference with the theming (Context, AttributeSet) constructor. */
     private static Object newPreference(ClassLoader loader, String typeName, Context context) {
         return PrefRef.create(loader, typeName, context);
     }
 
-    private static Object newSwitchPreference(ClassLoader loader, Context context) {
-        for (String typeName : new String[]{
-                "com.oplus.melody.ui.widget.MelodyUiTipsSwitchPreference",
-                "com.coui.appcompat.preference.COUISwitchPreference",
-                "androidx.preference.SwitchPreferenceCompat"}) {
-            Object preference = newPreference(loader, typeName, context);
-            if (preference != null) return preference;
-        }
-        return null;
-    }
 
     private static Activity findActivity(Context context) {
         Context current = context;
@@ -7331,7 +5920,7 @@ public final class HookModule extends XposedModule {
      * <p>The fallback matters because a pure name lookup fails <em>silently</em> once R8 has
      * renamed the member: no exception is thrown, the value simply never lands, and the panel
      * stays blank. We re-discover the setter by parameter type, and only when exactly one
-     * candidate exists — with two or more we deliberately do nothing, because writing into the
+     * candidate exists 鈥?with two or more we deliberately do nothing, because writing into the
      * wrong setter is worse than the no-op. This mirrors PrefRef.invokeSetter.
      */
     private static boolean setPreferenceValue(Object target, String name, Object value) {
@@ -7446,7 +6035,6 @@ public final class HookModule extends XposedModule {
         if (isPrimaryProcess()) {
             observeSharedSonyCommand();
             observeSharedSonyBatteryCommand();
-            observeSharedSonySettingCommand();
             observeSharedBoseCncCommand();
             observeSharedBoseExtraCommand();
         }
@@ -7462,7 +6050,6 @@ public final class HookModule extends XposedModule {
         if (state != null) {
             rememberTargetAddress(state.address);
             if (!isPrimaryProcess()) {
-                applySharedAdvancedSettings(state);
                 updateBoseCncSlider();
             }
         }
@@ -7627,34 +6214,9 @@ public final class HookModule extends XposedModule {
         }
         if (targetBoseDevice != null && boseHostConnected) {
             boseTransport.refreshBattery();
-            return;
         }
-        sonyTransport.refreshBattery();
     }
 
-    private void observeSharedSonySettingCommand() {
-        MelodySharedStateStore.SharedSettingCommand command = readSharedSonySettingCommand();
-        if (command == null || command.nonce.equals(lastSonySettingCommandNonce)) return;
-        lastSonySettingCommandNonce = command.nonce;
-        if (!isTargetAddress(command.address)) {
-            log(Log.WARN, TAG, event("ignored Sony setting command for a different device"));
-            return;
-        }
-        SonyAdvancedSettingId id;
-        try {
-            id = SonyAdvancedSettingId.valueOf(command.settingId);
-        } catch (IllegalArgumentException ignored) {
-            log(Log.WARN, TAG, event("ignored unknown Sony setting command"));
-            return;
-        }
-        pendingSonySettings.put(id, command.value);
-        if (sonyTransport.isConnected()) {
-            runPendingSonyOperation();
-        } else if (!connectTargetSonyTransport("forwarded advanced setting write")) {
-            pendingSonySettings.remove(id);
-            log(Log.WARN, TAG, event("Sony setting " + id + " skipped: target Bluetooth device is unavailable"));
-        }
-    }
 
     private void refreshTargetRepository(String reason) {
         Object repository = earphoneRepository;
@@ -7696,9 +6258,6 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    private void publishSonyBatteryState(String reason) {
-        publishBatteryState(sonySessionState.getBattery(), reason);
-    }
 
     private void publishBatteryState(EarbudsState state, String reason) {
         if (!isPrimaryProcess()) return;
@@ -7733,7 +6292,7 @@ public final class HookModule extends XposedModule {
             // Melody 17.6.3: the per-part battery model is K$a with a single
             // `int battery` field and a `setBattery(I)` setter. The older
             // setLeftBatteryStatus / setRightBatteryStatus / setBoxBatteryStatus trio this
-            // code used no longer exists — every publish threw
+            // code used no longer exists 鈥?every publish threw
             // NoSuchMethodException, and because the throw escaped publishBatteryState the
             // repository was never notified. Verified in the 17.6.3 smali:
             //   .method public constructor <init>(IZ)V
@@ -7974,7 +6533,7 @@ public final class HookModule extends XposedModule {
                 // 0.5.49: requiring the fragment container lost the very events we wanted.
                 // DetailMainActivity hides its NestedScrollView during teardown/rebuild, when
                 // the view is no longer under melody_ui_fragment_container, so the detail
-                // page produced no hidden_by line at all while 通用设置 did. The host's own
+                // page produced no hidden_by line at all while 閫氱敤璁剧疆 did. The host's own
                 // detail ids are matched directly instead.
                 if ("melody_ui_detail_scrollview".equals(id)) return true;
                 if (v.getClass().getSimpleName().contains("MelodyDetailModelView")) return true;
@@ -7995,7 +6554,7 @@ public final class HookModule extends XposedModule {
      *
      * <p>0.5.48. This is the question every previous version was guessing at. The stack is
      * filtered to app frames so the answer names the class and method responsible, and repeats
-     * are collapsed by signature — the host hides rows in loops, and without deduplication one
+     * are collapsed by signature 鈥?the host hides rows in loops, and without deduplication one
      * culprit produces dozens of identical lines.
      */
     /**
@@ -8003,7 +6562,7 @@ public final class HookModule extends XposedModule {
      *
      * <p>0.5.51 regression: {@code whitelist.a.a(String)} is on the host's hot path and was
      * logged on every call (46 events in one second), which stalled the panel badly enough
-     * that 通用设置 stopped opening. The probe now reports each distinct outcome once.
+     * that 閫氱敤璁剧疆 stopped opening. The probe now reports each distinct outcome once.
      */
     private static final java.util.Set<String> wl17Seen =
             java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
@@ -8056,21 +6615,21 @@ public final class HookModule extends XposedModule {
         try {
             // 0.5.48 reported caller=j2.intercept for every single call site. That class is
             // NOT in the Melody APK: a full scan of both decompiled dex trees (tools/smali1,
-            // tools/smali2) finds no j2.smali — only "je". "j2" is libxposed's own hook
+            // tools/smali2) finds no j2.smali 鈥?only "je". "j2" is libxposed's own hook
             // trampoline, so the walk stopped on the framework's bridging frame and never
             // reached the host.
-            // 0.5.67: the same failure repeated with caller=l.proceed:35 — "l" is another
+            // 0.5.67: the same failure repeated with caller=l.proceed:35 鈥?"l" is another
             // trampoline, and the blacklist ("not java./android.") let it through. Verified
             // against the decompiled trees: the host APK has ZERO root-level (no-package)
-            // classes — every host class lives in a package (com.oplus.*, com.coui.*, or an
+            // classes 鈥?every host class lives in a package (com.oplus.*, com.coui.*, or an
             // R8 package like Ba/G9/A9/l9). So the filter is finally a WHITELIST as lesson #9
             // demands: a frame is host code only if its class name contains a package
             // separator and is not a known framework/module prefix. Single-token names
-            // (j2, l, c2 without dot…) can never match a host class.
+            // (j2, l, c2 without dot鈥? can never match a host class.
             String where = hostCallerChain(4);
             String raw = rawCallerChain(12);
             String cls = target.getClass().getSimpleName();
-            // 0.5.78 — DecorView INVISIBLE is the "blank page" trigger. Its caller is always
+            // 0.5.78 鈥?DecorView INVISIBLE is the "blank page" trigger. Its caller is always
             // no_app_frame because the real trigger hides behind an android.*-named synthetic
             // host class (e.g. android.telephony.RensGlaent), which isHostFrame drops. Record a
             // MONOTONIC sequence (not de-duped) so the next log shows the true frequency, and
@@ -8100,7 +6659,7 @@ public final class HookModule extends XposedModule {
      * <p>0.5.67. The host has no root-level classes (verified over tools/smali1+smali2), so
      * a frame is host code only when the class name has a package part and that package is
      * neither framework nor our own module nor the hook runtime. R8 packages are typically
-     * 1-2 lower/upper-case tokens (Ba, G9, A9, l9, d3…), everything else is com.oplus/com.coui.
+     * 1-2 lower/upper-case tokens (Ba, G9, A9, l9, d3鈥?, everything else is com.oplus/com.coui.
      */
     private static boolean isHostFrame(String cls) {
         if (cls == null) return false;
@@ -8124,7 +6683,7 @@ public final class HookModule extends XposedModule {
     private static final java.util.Set<String> hideCallSites =
             java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
 
-    /** 0.5.78 — monotonic sequence for DecorView INVISIBLE events (the blank-page trigger). */
+    /** 0.5.78 鈥?monotonic sequence for DecorView INVISIBLE events (the blank-page trigger). */
     private static final java.util.concurrent.atomic.AtomicInteger hideSeq =
             new java.util.concurrent.atomic.AtomicInteger();
 
@@ -8216,31 +6775,6 @@ public final class HookModule extends XposedModule {
         return null;
     }
 
-    private void projectSonyAncModeIntoDto(Object address, Object dto) {
-        if (!isTargetAddress(address) || dto == null) return;
-
-        EarbudsState state = sonySessionState.getAnc();
-        int mode = state == null
-                ? readSharedSonyModeIndex()
-                : MelodyStateBridge.INSTANCE.ancModeIndex(state);
-        if (mode < 0) {
-            log(Log.WARN, TAG, event("Melody DTO ANC projection skipped: Sony mode unavailable"));
-            return;
-        }
-
-        Object previous = readField(dto, "noiseReductionModeIndex");
-        if (previous instanceof Number && ((Number) previous).intValue() == mode) {
-            log(Log.INFO, TAG, event("Melody DTO ANC projection unchanged mode=" + mode));
-            return;
-        }
-        if (writeIntField(dto, "noiseReductionModeIndex", mode)) {
-            log(Log.INFO, TAG, event("projected Sony ANC mode into Melody EarphoneDTO old="
-                    + compact(previous) + " new=" + mode));
-        } else {
-            log(Log.WARN, TAG, event("Melody DTO ANC projection failed old="
-                    + compact(previous) + " requested=" + mode));
-        }
-    }
 
     /**
      * Melody 17.6.3 keeps battery levels on EarphoneDTO (leftBattery/rightBattery/
@@ -8266,7 +6800,7 @@ public final class HookModule extends XposedModule {
 
     /**
      * The volume-panel spatial tile reads its type from the stock EarphoneDTO
-     * (spatialSoundStatus), not from our synthesized provider row — so mirror the
+     * (spatialSoundStatus), not from our synthesized provider row 鈥?so mirror the
      * live Bose [31.10] byte 2 into the DTO. Values coincide: 0=off,
      * 1=fixed-to-room, 2=fixed-to-head, exactly what the tile cycles through.
      */
@@ -8283,11 +6817,11 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * Melody's "大师调音" (adaptive ear / game equalizer) is driven by three
+     * Melody's "澶у笀璋冮煶" (adaptive ear / game equalizer) is driven by three
      * EarphoneDTO ints. OPPO implements them over its own SPP channel, which does
      * not exist for a Bose device, so the switch stayed dead. Claiming the feature
-     * in the DTO makes the rows live; the actual DSP is ours — the 3-band EQ we
-     * already write to [1.7] — so the toggle is mirrored onto the EQ bands instead
+     * in the DTO makes the rows live; the actual DSP is ours 鈥?the 3-band EQ we
+     * already write to [1.7] 鈥?so the toggle is mirrored onto the EQ bands instead
      * of being left as a no-op.
      */
     private void projectBoseMasterTuningIntoDto(Object address, Object dto) {

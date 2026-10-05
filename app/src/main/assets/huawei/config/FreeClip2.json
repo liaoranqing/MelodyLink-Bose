@@ -1,1 +1,0 @@
-{"schemaVersion":1,"id":"huawei.freeclip2","name":"HUAWEI FreeClip 2","image":"huawei/images/freeclip2.png","aliases":["HUAWEI FreeClip 2","FreeClip 2"],"batteryParts":["LEFT","RIGHT","CASE"],"capabilities":{"supportsAnc":false,"supportsTransparency":false,"supportsAncReadback":false,"supportsAncLevels":false,"supportsLowLatency":true}}
