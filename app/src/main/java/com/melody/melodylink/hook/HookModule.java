@@ -4109,7 +4109,7 @@ public final class HookModule extends XposedModule {
     }
 
     /** Exact byte length of the bundled bose/model/bose_qcue2.vfxms asset. */
-    private static final long BOSE_MODEL_LENGTH = 13239202L;
+    private static final long BOSE_MODEL_LENGTH = 13239210L;
 
     /**
      * 2.0.5: the detail page should show ONLY the 3D model, no 2D photo. Evidence
@@ -4154,9 +4154,11 @@ public final class HookModule extends XposedModule {
         AssetManager assets = sonyModuleAssets;
         if (assets == null) return null;
         File directory = new File(application.getFilesDir(), "melodylink/bose-model");
-        // 2.0.3: v4 = Moonstone materials whitened in the glb (they shipped as
-        // light-blue baseColorFactor [0.434,0.68,1.0], so the case interior + earbud
-        // tips rendered blue instead of white) and modelScale 1.25 -> 1.5 (larger).
+        // 2.0.6: v4 asset REBUILT — the first v4 (2.0.3-2.0.5) had a corrupted glb BIN
+        // chunk (make_vfxms4.py read binlen from inside the bin data and copied the bin
+        // without its 8-byte header), so ModelScene.loadSceneFromBuffer failed and the
+        // detail page rendered a black product area. Fixed offsets; whitened Moonstone
+        // materials + modelScale 1.5 retained. Length change forces on-device refresh.
         File output = new File(directory, "bose_qcue2_v4.vfxms");
         try {
             if (output.isFile() && output.length() == BOSE_MODEL_LENGTH) return output;
