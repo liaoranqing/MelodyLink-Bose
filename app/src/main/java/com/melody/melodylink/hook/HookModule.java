@@ -4077,17 +4077,19 @@ public final class HookModule extends XposedModule {
         }
     }
 
-    /** Exact byte length of the bundled bose/model/bose_qcue2.glb asset. */
-    private static final long BOSE_MODEL_LENGTH = 9569752L;
+    /** Exact byte length of the bundled bose/model/bose_qcue2.vfxms asset. */
+    private static final long BOSE_MODEL_LENGTH = 13239307L;
 
     /**
-     * Copies the bundled Bose QC Ultra Earbuds 2 glb into the host files dir and
-     * returns it. The host's model loader (A8/k supplier case 5) reads the path
-     * with plain {@link java.io.File} I/O, so the module asset must be
-     * materialized to a real file the host process can read. The cached copy is
-     * validated by exact length and the file name is bumped whenever the bundled
-     * asset changes (same convention as the product photo) so stale copies
-     * refresh.
+     * Copies the bundled Bose QC Ultra Earbuds 2 model into the host files dir and
+     * returns it. 2.0.1: the host's ModelScene.loadSceneFromBuffer does NOT parse a
+     * plain glb — it expects OPPO's .vfxms container (Head.read: 10 big-endian u32
+     * offsets/sizes, then a JSON scene config, then glb/IBL/skybox blobs). A raw
+     * glb made Head.read treat the "glTF" magic as configStart, the config read
+     * underflowed and the whole load died inside a try/catch that only prints
+     * through LogUtils — silently. The bundled asset is our glb wrapped in the
+     * vfxms layout (X3's own config JSON + IBL/skybox KTX blobs for identical
+     * lighting), so the file is now materialized and passed through unchanged.
      */
     private File materializeBoseModel() {
         Application application = currentApplication();
@@ -4096,11 +4098,11 @@ public final class HookModule extends XposedModule {
         AssetManager assets = sonyModuleAssets;
         if (assets == null) return null;
         File directory = new File(application.getFilesDir(), "melodylink/bose-model");
-        File output = new File(directory, "bose_qcue2_v1.glb");
+        File output = new File(directory, "bose_qcue2_v2.vfxms");
         try {
             if (output.isFile() && output.length() == BOSE_MODEL_LENGTH) return output;
             if (!directory.isDirectory() && !directory.mkdirs()) return null;
-            try (java.io.InputStream input = assets.open("bose/model/bose_qcue2.glb");
+            try (java.io.InputStream input = assets.open("bose/model/bose_qcue2.vfxms");
                  FileOutputStream stream = new FileOutputStream(output, false)) {
                 byte[] buffer = new byte[65536];
                 int count;
