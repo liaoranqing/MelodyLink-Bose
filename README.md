@@ -147,8 +147,8 @@ MelodyLink-Bose/
 
 | 项目 | 作用 | 来源 |
 |---|---|---|
-| **Melody.Az100_Impl** | 移植起点（Technics EAH-AZ100 音量面板模块） | 本地参考实现 |
-| **melodylink-master** | 原始 MelodyLink 项目（多品牌适配框架） | 本地参考实现 |
+| [**Melody.Az100_Impl**](https://github.com/tosasitill/Melody.Az100_Impl) | 移植起点（Technics EAH-AZ100 音量面板模块） |
+| [**MelodyLink**](https://github.com/jerry-2009/MelodyLink) | 原始 MelodyLink 项目（多品牌适配框架） |
 | **bosectl** | Bose BMAP 协议参考（Python 实现） | https://github.com/simonmicro/bosectl |
 | **libxposed-api** | LSPosed 开发 API | Maven（compileOnly） |
 

@@ -58,8 +58,8 @@ CI 关键点：`compileSdk 37` 需手动 `sdkmanager --install "platforms;androi
 
 | 项目 | 用途 |
 |---|---|
-| Melody.Az100_Impl | 移植起点（AZ100 音量面板） |
-| melodylink-master | 多品牌适配框架 |
+| [Melody.Az100_Impl](https://github.com/tosasitill/Melody.Az100_Impl) | 移植起点（AZ100 音量面板） |
+| [MelodyLink](https://github.com/jerry-2009/MelodyLink) | 多品牌适配框架 |
 | bosectl | Bose BMAP 协议参考（https://github.com/simonmicro/bosectl） |
 
 ---
