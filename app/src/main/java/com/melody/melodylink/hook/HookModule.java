@@ -1607,6 +1607,7 @@ public final class HookModule extends XposedModule {
             boseSessionState.acceptAnc(optimistic);
             sonySessionState.acceptAnc(optimistic);
             BoseControlProviderBridge.refreshTile();
+            refreshAncRowsAfterWrite();
             boseTransport.setAncMode(domainMode);
             Object result = createSetCommandState(0);
             if (result != null) future.complete(result);
@@ -1616,6 +1617,35 @@ public final class HookModule extends XposedModule {
             failPendingNoiseWrite("ANC command cannot start: Bose transport is not connected");
         }
         return future;
+    }
+
+    /**
+     * 2.0.7 bug1 fix: after an optimistic ANC write the mirrored state is correct, but
+     * the host's three mode buttons only re-read it on a rebind (which is why leaving
+     * and re-entering the page showed the right highlight). Force that rebind in place
+     * by calling androidx Preference.notifyChanged() on the captured ANC rows, so the
+     * icons/highlight update immediately without leaving the page.
+     */
+    private void refreshAncRowsAfterWrite() {
+        mainHandler.post(() -> {
+            notifyPreferenceChanged(noiseEffectRow);
+            notifyPreferenceChanged(oneSpaceNoiseEffectRow);
+        });
+    }
+
+    private static void notifyPreferenceChanged(Object preference) {
+        if (preference == null) return;
+        Class<?> c = preference.getClass();
+        while (c != null && c != Object.class) {
+            try {
+                Method m = c.getDeclaredMethod("notifyChanged");
+                m.setAccessible(true);
+                m.invoke(preference);
+                return;
+            } catch (Throwable ignored) {
+                c = c.getSuperclass();
+            }
+        }
     }
 
     private Object forwardSonyNoiseWrite(Object rawIndex, ClassLoader loader) {
@@ -4830,6 +4860,7 @@ public final class HookModule extends XposedModule {
                         boseTransport.setAncMode(mode);
                         refreshTargetRepository("Bose tile ANC");
                         BoseControlProviderBridge.refreshTile();
+                        refreshAncRowsAfterWrite();
                         return true;
                     }
                     @Override public int spatialType() {
