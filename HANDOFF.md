@@ -1,7 +1,7 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
 > **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 由接管模型（Qoder）校正状态** · 当前版本 **2.0.1 / versionCode 201**（Bose 专用精简版）· **已全部 push：本地 main = origin/main = `9cbcb2b`（含 1.0.1→2.0.1）**，但 **CI 构建结果与 2.0.1 装机验证均未确认**。
+> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 20:10 由接管模型（Qoder）更新** · 当前版本 **2.0.2 / versionCode 202**（Bose 专用精简版）· 本地 main=`8db6c45` **领先 origin/main=`929ccad`，2.0.2 未 push**；2.0.1 已装机（模型可出，遗留三瑕疵，2.0.2 修复中）。
 > 这份文档是**技术权威交接入口**，接手后先通读全文，再动手。**接管流程/日志规范先看工作区根目录 `ONCALL-PROTOCOL.md` 与 `opslog/STATUS.md`**（当前状态快照以 STATUS.md 为准）。
 > **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管。2.0.1 已提交已 push、未装机验证，最高优先级事项见 §8。
 
@@ -10,8 +10,8 @@
 ## 0. 一页速览（30 秒上手）
 
 - **项目是什么**：一个 LSPosed 模块，让 Bose QC Ultra Earbuds 2 在 OPPO/一加的耳机管理应用 Melody（`com.oplus.melody` 17.6.3）里原生工作（识别、产品图、降噪三态、CNC、电量）。
-- **当前状态**：2.0.0 起为 Bose 专用精简版（删光 Sony/Huawei/Xiaomi/Samsung 适配层、Compose UI、约 8200 行）。1.0.0 已发布；1.0.1→2.0.1 已全部 push（origin/main=`9cbcb2b`，2026-10-05 核实）。
-- **最优先未完成事项（2.0.1 待验证）**：详情页 3D 模型 —— 2.0.0 发现宿主模型格式是自研 `.vfxms` 容器而非裸 glb，2.0.1 已把 Bose glb 打包成 vfxms（套 X3 的场景 JSON + IBL/skybox KTX），**尚未装机验证**。详见 §8。
+- **当前状态**：2.0.0 起为 Bose 专用精简版（删光 Sony/Huawei/Xiaomi/Samsung 适配层、Compose UI、约 8200 行）。1.0.0 已发布；1.0.1→2.0.1 已 push（origin/main=`929ccad`）；**2.0.2（`8db6c45`）本地领先 1 提交，未 push**。
+- **最优先未完成事项（2.0.2 待复验）**：2.0.1 已装机、3D 模型可出（vfxms 方案有效）。用户实测遗留三瑕疵，2.0.2 已修：详情页照片闪现（提前淡出）、模型偏小、过曝。详见 §8。
 - **最重要的 5 件事**（比旧版多 2 条，都是血的教训）：
   1. 所有 Hook 在 `hook/HookModule.java`（~8000 行），按 `label` 统一分发。
   2. 宿主有**两套设备目录**（`L6/a` 按 MAC、`c9/a` 按 productId+name），查错目录 = 白干。
@@ -133,16 +133,18 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ---
 
-## 8. 当前待办（按优先级，2026-10-05 19:50）
+## 8. 当前待办（按优先级，2026-10-05 20:10）
 
-1. **最高优先级：2.0.1 装机验证（模型 vfxms 打包）**。提交 `45726ef` **已 push**（origin/main=`9cbcb2b`，2026-10-05 核实），但 **CI 构建产物是否生成、APK 是否装机均未确认**——先查 Actions 构建状态（或被墙时让用户在 GitHub Desktop/网页确认），下载 2.0.1 APK 装机。装机后打开详情页确认：
-   - 期望：Bose 3D 模型出现（不再空白、不再变 X3）。日志应有 `bose.colorid.override` → `bose.model.swap`，宿主进程应出现 `Filament: FEngine created` + `loadModelFromBuffer` 后无异常。
-   - 若仍空白：在 `boseDetailModel` 分支加一个 `ModelScene.loadSceneFromBuffer` 的 hook，把传入 ByteBuffer 的前 40 字节 + catch 到的异常打到 MLog（`bose.model.loadbuf`），再抓日志定位 Head.read 具体崩在哪。脚本 `bose3d/make_vfxms2.py` 里 `modelScale`/`light` 字段可调。
-   - 若模型显示但取景不对（过大/过小/角度怪）：调 vfxms JSON 的 `modelScale`，重新打包，bump 缓存名 v3。
-2. **通用设置图片**：2.0.0 已确认修复（`bose.image.applied surface=onespace`），随 2.0.1 一并验证。
-3. **转圈**：2.0.0 已确认修复（`bose.header.spinner_killed`），随 2.0.1 验证。
-4. **CNC 通用设置滑条**（低优先级，历史遗留）：`cnc.onespace.skip reason=no_tree`。详情页降噪控制正常，用户未报。**不主动改**（铁律：一次只引入一个变量）。
-5. 2.0.0 剥离后 `hook/MelodyDeviceBridge.kt`/vendor 等已删；若未来要加回其他品牌，参考 git 历史 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
+> 2.0.1 已装机：3D 模型能出（vfxms 方案有效），但用户实测发现三处小瑕疵，已在 **2.0.2（commit `8db6c45`）** 修复，待 push+CI+复验。实时状态见工作区根 `opslog/STATUS.md`。
+
+1. **最高优先级：2.0.2 复验三修复**。提交 `8db6c45` **未 push**（本地领先 origin/main=`929ccad`）。用户 GitHub Desktop push → CI 构建 → 装机确认：
+   - **照片闪现**（2.0.1：打开详情页照片先淡到空白、模型后冒）：根因＝宿主 `MelodyDetailModelView.b()` 一被调用就对照片 ImageView 起 600ms alpha 淡出，而 13MB 模型要异步读盘+`loadSceneFromBuffer` 才出现。修复＝冻结期把该 view 的 `View.setAlpha` 钳在 1.0（`bosePhotoAlphaClamp`，volatile `photoFreezeActive` 短路护热路径），改由 `ModelScene.loadSceneFromBuffer`（`boseSceneLoaded`）返回后主线程重放淡出；5s 兜底。期望：照片在模型就绪后才平滑淡出，不再先空。
+   - **模型偏小**：`modelScale` 1.0→1.25（updateScale 证得渲染尺寸∝modelScale，线性）。
+   - **过曝**：`iblIntensity` 33000→18000、`enableBloom` true→false。
+   - 三者均在 `bose3d/make_vfxms3.py` 顶部常量可调（MODEL_SCALE/IBL_INTENSITY/BLOOM），重打包后 bump 缓存名 v4 + 同步 `BOSE_MODEL_LENGTH`。**注意：几何体未删**——Plane 节点世界坐标很小（整场景仅 0.18 单位），删它们既不解决尺寸又可能误删金色件，别重蹈覆辙。
+2. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.2 一并回归。
+3. **CNC 通用设置滑条**（低优先级，历史遗留）：`cnc.onespace.skip reason=no_tree`。详情页降噪控制正常，用户未报。**不主动改**（铁律：一次只引入一个变量）。
+4. 2.0.0 剥离后 `hook/MelodyDeviceBridge.kt`/vendor 等已删；若未来要加回其他品牌，参考 git 历史 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
 
 ---
 
