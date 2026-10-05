@@ -1628,12 +1628,19 @@ public final class HookModule extends XposedModule {
      */
     private void refreshAncRowsAfterWrite() {
         mainHandler.post(() -> {
-            notifyPreferenceChanged(noiseEffectRow);
-            notifyPreferenceChanged(oneSpaceNoiseEffectRow);
+            // 2.0.8 diagnostics: prove whether the captured rows exist in THIS process
+            // and whether notifyChanged actually runs / throws, so the next device log
+            // tells us if rebind is even the icon-update path (2.0.7's notifyChanged
+            // produced no getNoiseReductionModeIndex re-read after the tap).
+            MLog.event("bose.anc.refresh",
+                    "detail_row", noiseEffectRow == null ? "null" : noiseEffectRow.getClass().getSimpleName(),
+                    "onespace_row", oneSpaceNoiseEffectRow == null ? "null" : oneSpaceNoiseEffectRow.getClass().getSimpleName());
+            notifyPreferenceChanged(noiseEffectRow, "detail");
+            notifyPreferenceChanged(oneSpaceNoiseEffectRow, "onespace");
         });
     }
 
-    private static void notifyPreferenceChanged(Object preference) {
+    private static void notifyPreferenceChanged(Object preference, String which) {
         if (preference == null) return;
         Class<?> c = preference.getClass();
         while (c != null && c != Object.class) {
@@ -1641,11 +1648,13 @@ public final class HookModule extends XposedModule {
                 Method m = c.getDeclaredMethod("notifyChanged");
                 m.setAccessible(true);
                 m.invoke(preference);
+                MLog.event("bose.anc.refresh_done", "row", which, "via", c.getSimpleName());
                 return;
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
                 c = c.getSuperclass();
             }
         }
+        MLog.event("bose.anc.refresh_fail", "row", which, "reason", "notifyChanged not found");
     }
 
     private Object forwardSonyNoiseWrite(Object rawIndex, ClassLoader loader) {
