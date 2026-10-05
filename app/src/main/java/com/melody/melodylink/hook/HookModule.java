@@ -237,6 +237,14 @@ public final class HookModule extends XposedModule {
         if (!TARGET.equals(param.getPackageName())) return;
         try {
             initializeSonyConfig();
+            // onPackageReady fires before Application.attach, so the first init
+            // attempt usually sees currentApplication()==null. Before the vendor
+            // strip, the whitelist-branch isRegistered*Name() calls kept retrying
+            // the init as a side effect; 2.0.0 removed them, so retry explicitly
+            // until the module asset path resolves.
+            for (long delay : new long[]{300L, 1000L, 3000L, 8000L, 20000L}) {
+                mainHandler.postDelayed(this::initializeSonyConfig, delay);
+            }
             if (isPrimaryProcess()) {
                 clearSharedSonyCommand();
                 clearSharedSonyBatteryCommand();
@@ -4042,8 +4050,10 @@ public final class HookModule extends XposedModule {
 
     private File materializeBoseImage() {
         Application application = currentApplication();
+        if (application == null) return null;
+        if (sonyModuleAssets == null) initializeSonyConfig();
         AssetManager assets = sonyModuleAssets;
-        if (application == null || assets == null) return null;
+        if (assets == null) return null;
         File directory = new File(application.getFilesDir(), "melodylink/bose-images");
         // 0.5.69: v2 = the user-supplied high-res product photo. The name is bumped so
         // devices that cached the old asset file pick the new one up.
@@ -4081,8 +4091,10 @@ public final class HookModule extends XposedModule {
      */
     private File materializeBoseModel() {
         Application application = currentApplication();
+        if (application == null) return null;
+        if (sonyModuleAssets == null) initializeSonyConfig();
         AssetManager assets = sonyModuleAssets;
-        if (application == null || assets == null) return null;
+        if (assets == null) return null;
         File directory = new File(application.getFilesDir(), "melodylink/bose-model");
         File output = new File(directory, "bose_qcue2_v1.glb");
         try {
