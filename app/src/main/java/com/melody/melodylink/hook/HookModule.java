@@ -1738,19 +1738,32 @@ public final class HookModule extends XposedModule {
     }
 
     private void dispatchCustomAncWrite(int modeIndex, ClassLoader loader) {
+        // 2.0.11 bug1 fix: the user reported the icon lags one tap behind (~1s) — the
+        // replay reads the mirrored state, but sonySessionState / the shared file only
+        // update when the BMAP write lands ~1s later, so the getter returns the PREVIOUS
+        // mode. Optimistically mirror the tapped mode into both session states NOW (in
+        // :fg, the page process) so the getter returns the new mode before we replay
+        // onEarphoneDataChanged. ancModeIndex(ancMode(i)) == i, so this round-trips.
+        try {
+            com.melody.melodylink.domain.AncMode tapped =
+                    MelodyCommandBridge.INSTANCE.ancMode(modeIndex);
+            if (tapped != null) {
+                EarbudsState optimistic = new EarbudsState(
+                        com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.getCapabilities(),
+                        tapped, new java.util.HashMap<>());
+                boseSessionState.acceptAnc(optimistic);
+                sonySessionState.acceptAnc(optimistic);
+            }
+        } catch (Throwable ignored) {
+        }
         if (isPrimaryProcess()) {
             startSonyNoiseWriteFuture(modeIndex, loader);
         } else {
             forwardSonyNoiseWrite(modeIndex, loader);
         }
-        // 2.0.9 bug1 fix: refresh the ANC buttons in the process that OWNS the row
-        // anchors. The 2.0.8 diagnostic (bose.anc.refresh detail_row=null
-        // onespace_row=null) proved the write-side refresh ran in the primary process
-        // where the rows are never captured. The native ANC click is handled in the
-        // :fg process (where captureNoiseEffectRow stored the rows), so trigger the
-        // rebind here, right where dispatchCustomAncWrite runs for a page tap.
-        // forwardSonyNoiseWrite already wrote the shared state synchronously, so the
-        // rebind's getter sees the new mode immediately.
+        // 2.0.9: refresh the ANC buttons in the :fg process that owns the row anchors
+        // (2.0.8 proved the primary-process refresh had rows=null). 2.0.10: notifyChanged
+        // isn't the icon path, so refreshAncRowsAfterWrite also replays onEarphoneDataChanged.
         refreshAncRowsAfterWrite();
     }
 
