@@ -146,6 +146,8 @@ public final class HookModule extends XposedModule {
     private volatile boolean activityLifecycleRegistered;
     private volatile Activity detailActivity;
     private volatile Object lastAudioPreferenceAnchor;
+    /** The Ba/z noiseReductionModeVO most recently passed to onEarphoneDataChanged (:fg). */
+    private volatile Object lastNoiseReductionVo;
     private volatile int startedActivityCount;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ThreadLocal<Boolean> detailAncWriteObserved = new ThreadLocal<>();
@@ -1335,6 +1337,7 @@ public final class HookModule extends XposedModule {
                     if ("noiseReductionItemDataChanged".equals(label)) {
                         Object result = chain.proceed();
                         lastAudioPreferenceAnchor = chain.getThisObject();
+                        lastNoiseReductionVo = chain.getArg(0);
                         log(Log.INFO, TAG, event("Melody native ANC LiveData callback completed"));
                         return result;
                     }
@@ -1627,16 +1630,45 @@ public final class HookModule extends XposedModule {
      */
     private void refreshAncRowsAfterWrite() {
         mainHandler.post(() -> {
-            // 2.0.8 diagnostics: prove whether the captured rows exist in THIS process
-            // and whether notifyChanged actually runs / throws, so the next device log
-            // tells us if rebind is even the icon-update path (2.0.7's notifyChanged
-            // produced no getNoiseReductionModeIndex re-read after the tap).
-            MLog.event("bose.anc.refresh",
-                    "detail_row", noiseEffectRow == null ? "null" : noiseEffectRow.getClass().getSimpleName(),
-                    "onespace_row", oneSpaceNoiseEffectRow == null ? "null" : oneSpaceNoiseEffectRow.getClass().getSimpleName());
+            // 2.0.9 proved notifyChanged() runs (rows non-null, refresh_done fired) but
+            // the icons still do not update -> Preference rebind is NOT the icon path.
+            // The icons are set by NoiseReductionItem.onEarphoneDataChanged(Ba/z), which
+            // reads Ba.z.getCurrentNoiseReductionModeIndex (hooked to our mirrored
+            // state). Replay it directly on the live item with the cached VO.
             notifyPreferenceChanged(noiseEffectRow, "detail");
             notifyPreferenceChanged(oneSpaceNoiseEffectRow, "onespace");
+            invokeOnEarphoneDataChanged();
         });
+    }
+
+    /** Replay the host's icon-update callback on the live NoiseReductionItem. */
+    private void invokeOnEarphoneDataChanged() {
+        Object item = lastAudioPreferenceAnchor;
+        Object vo = lastNoiseReductionVo;
+        if (item == null || vo == null) {
+            MLog.event("bose.anc.icon_skip",
+                    "item", item == null ? "null" : "ok",
+                    "vo", vo == null ? "null" : "ok");
+            return;
+        }
+        try {
+            Method m = item.getClass().getMethod("onEarphoneDataChanged", vo.getClass());
+            m.invoke(item, vo);
+            MLog.event("bose.anc.icon_replayed", "via", item.getClass().getSimpleName());
+        } catch (Throwable t) {
+            // Fallback: match by arity (R8 may rename the param type reference).
+            try {
+                for (Method m : item.getClass().getMethods()) {
+                    if (m.getName().equals("onEarphoneDataChanged") && m.getParameterCount() == 1) {
+                        m.invoke(item, vo);
+                        MLog.event("bose.anc.icon_replayed", "via", "arity");
+                        return;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            MLog.event("bose.anc.icon_fail", "error", MLog.compactThrowable(t));
+        }
     }
 
     private static void notifyPreferenceChanged(Object preference, String which) {
