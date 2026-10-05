@@ -1607,7 +1607,6 @@ public final class HookModule extends XposedModule {
             boseSessionState.acceptAnc(optimistic);
             sonySessionState.acceptAnc(optimistic);
             BoseControlProviderBridge.refreshTile();
-            refreshAncRowsAfterWrite();
             boseTransport.setAncMode(domainMode);
             Object result = createSetCommandState(0);
             if (result != null) future.complete(result);
@@ -1712,6 +1711,15 @@ public final class HookModule extends XposedModule {
         } else {
             forwardSonyNoiseWrite(modeIndex, loader);
         }
+        // 2.0.9 bug1 fix: refresh the ANC buttons in the process that OWNS the row
+        // anchors. The 2.0.8 diagnostic (bose.anc.refresh detail_row=null
+        // onespace_row=null) proved the write-side refresh ran in the primary process
+        // where the rows are never captured. The native ANC click is handled in the
+        // :fg process (where captureNoiseEffectRow stored the rows), so trigger the
+        // rebind here, right where dispatchCustomAncWrite runs for a page tap.
+        // forwardSonyNoiseWrite already wrote the shared state synchronously, so the
+        // rebind's getter sees the new mode immediately.
+        refreshAncRowsAfterWrite();
     }
 
     /**
@@ -4869,7 +4877,6 @@ public final class HookModule extends XposedModule {
                         boseTransport.setAncMode(mode);
                         refreshTargetRepository("Bose tile ANC");
                         BoseControlProviderBridge.refreshTile();
-                        refreshAncRowsAfterWrite();
                         return true;
                     }
                     @Override public int spatialType() {
