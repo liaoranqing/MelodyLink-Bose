@@ -161,6 +161,7 @@ MelodyLink-Bose/
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 整体设计思路、技术路径、hook 链路、BMAP 协议附录 |
 | [docs/REVERSING.md](docs/REVERSING.md) | Melody 固件编译/反编译方法（apktool/baksmali/androguard/资源 ID 反查） |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 实施过程中踩过的错误及解决方案 + 排查铁律 |
+| [docs/PORTING.md](docs/PORTING.md) | 移植实操分步教程（声明式 JSON 移植 + 代码式移植） |
 | [docs/TOOLS.md](docs/TOOLS.md) | 全部工具清单与用法 |
 
 ---
