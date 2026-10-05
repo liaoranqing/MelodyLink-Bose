@@ -478,6 +478,16 @@ public final class HookModule extends XposedModule {
             // bundled Bose glb instead; see the boseModelViews gate in
             // replaceBoseDetailImageNow for why the photo must stand down afterwards.
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "b", 1, "boseDetailModel");
+            // 2.0.2 photo-flash fix, two parts:
+            // (a) loadSceneFromBuffer runs on the main thread (Fb/p via thenAcceptAsync
+            //     on a main executor) and returns once the scene is live: that is the
+            //     moment to fade the photo out ourselves.
+            // (b) The host's fade animates the "alpha" property, which calls
+            //     View.setAlpha every frame. While a photo is frozen we pin its
+            //     setAlpha to 1.0 so the fade is a no-op; the photo then only fades
+            //     when WE start the animation after the model is up.
+            hookNamed(loader, "com.oplusos.vfxmodelviewer.view.ModelScene", "loadSceneFromBuffer", 1, "boseSceneLoaded");
+            hookNamed(loader, "android.view.View", "setAlpha", 1, "bosePhotoAlphaClamp");
             // 2.0.0 bug fix (3D model not loading): the host logs
             // "picFilePath not match, productId: 067410, colorId: -1" for a Bose
             // session — the device DTO carries the default colorId -1 while the
@@ -748,11 +758,36 @@ public final class HookModule extends XposedModule {
                         if (com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(modelAddress)) {
                             File modelFile = materializeBoseModel();
                             if (modelFile != null) {
-                                // The host GONEs the photo ImageView right after b()
-                                // returns and fades the 3D TextureView in, so the swap
-                                // owns the product area from here on. Mark the view so
-                                // replaceBoseDetailImageNow stops re-showing the PNG.
+                                // The host immediately begins a 600ms fade-out of the
+                                // photo ImageView and fades the 3D TextureView in, so the
+                                // swap owns the product area from here on. Mark the view
+                                // so replaceBoseDetailImageNow stops re-showing the PNG.
                                 boseModelViews.put(modelOwner, Boolean.TRUE);
+                                // 2.0.2: freeze the host's premature 600ms photo fade-out
+                                // (field d); we replay it ourselves once the scene has
+                                // actually loaded — see boseSceneLoaded.
+                                try {
+                                    Object photo = readField(modelOwner, "d");
+                                    if (photo instanceof ImageView) {
+                                        ImageView photoView = (ImageView) photo;
+                                        bosePhotoFreeze.put(photoView, Boolean.TRUE);
+                                        photoFreezeActive = true;
+                                        // Safety net: if the scene never reports loaded
+                                        // (silent failure inside the host's try/catch),
+                                        // release the fade after 5s so the photo does
+                                        // not stay over the page forever.
+                                        synchronized (bosePhotoFreeze) {
+                                            if (bosePhotoFreezeFallback != null) {
+                                                MODEL_PHOTO_HANDLER.removeCallbacks(
+                                                        bosePhotoFreezeFallback);
+                                            }
+                                            Runnable fallback = () -> fadeOutPhoto(photoView);
+                                            bosePhotoFreezeFallback = fallback;
+                                            MODEL_PHOTO_HANDLER.postDelayed(fallback, 5000L);
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                }
                                 MLog.event("bose.model.swap",
                                         "size", modelFile.length(),
                                         "path", modelFile.getName());
@@ -761,6 +796,21 @@ public final class HookModule extends XposedModule {
                             MLog.event("bose.model.skip", "reason", "asset_unavailable");
                         }
                         // non-Bose session (the real Enco X3): host behavior unchanged.
+                    }
+                    if ("boseSceneLoaded".equals(label)) {
+                        Object result = chain.proceed();
+                        // Scene is live; run our deferred photo fade-out on the main thread.
+                        MODEL_PHOTO_HANDLER.post(HookModule::fadeOutFrozenPhotos);
+                        return result;
+                    }
+                    if ("bosePhotoAlphaClamp".equals(label)) {
+                        if (photoFreezeActive && bosePhotoFreeze.containsKey(chain.getThisObject())) {
+                            // Pin the frozen photo fully opaque; swallow the host's
+                            // per-frame fade value. Re-applied as 1.0 so the direct
+                            // setAlpha(1f) at the top of b() is also satisfied.
+                            return chain.proceed(new Object[]{1.0f});
+                        }
+                        return chain.proceed();
                     }
                     if ("boseColorId".equals(label)) {
                         Object result = chain.proceed();
@@ -4078,7 +4128,32 @@ public final class HookModule extends XposedModule {
     }
 
     /** Exact byte length of the bundled bose/model/bose_qcue2.vfxms asset. */
-    private static final long BOSE_MODEL_LENGTH = 13239307L;
+    private static final long BOSE_MODEL_LENGTH = 13239311L;
+
+    /**
+     * 2.0.2 photo-flash fix. The host's initModel (b()) fades the photo ImageView out
+     * over 600ms the MOMENT it is called, but the model only appears after the async
+     * 13MB read + loadSceneFromBuffer — so the user sees the photo, watches it fade to
+     * nothing, then waits for the model. While a view is registered here, the host's
+     * per-frame View.setAlpha is pinned to 1.0 for that view only (the fade is a
+     * no-op), and the photo is faded out ourselves when ModelScene.loadSceneFromBuffer
+     * returns, i.e. exactly when the model is ready.
+     */
+    private static final java.util.Map<Object, Boolean> bosePhotoFreeze =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Boolean>());
+
+    /**
+     * Cheap volatile gate for the hot View.setAlpha hook: false whenever no detail
+     * photo is frozen (the normal case), so the hook short-circuits without touching
+     * the map's lock. Guarded by the project's ANR history (0.5.71).
+     */
+    private static volatile boolean photoFreezeActive = false;
+
+    /** Pending 5s unfreeze fallback for the currently frozen detail photo. */
+    private static Runnable bosePhotoFreezeFallback;
+
+    private static final Handler MODEL_PHOTO_HANDLER =
+            new Handler(Looper.getMainLooper());
 
     /**
      * Copies the bundled Bose QC Ultra Earbuds 2 model into the host files dir and
@@ -4098,7 +4173,11 @@ public final class HookModule extends XposedModule {
         AssetManager assets = sonyModuleAssets;
         if (assets == null) return null;
         File directory = new File(application.getFilesDir(), "melodylink/bose-model");
-        File output = new File(directory, "bose_qcue2_v2.vfxms");
+        // 2.0.2: v3 = same glb, retuned scene config only — modelScale 1.0 -> 1.25
+        // (product renders larger), iblIntensity 33000 -> 18000 and bloom off
+        // (was over-exposed). Geometry untouched: the plane nodes are tiny in world
+        // space, so they neither affect size nor are safe to delete.
+        File output = new File(directory, "bose_qcue2_v3.vfxms");
         try {
             if (output.isFile() && output.length() == BOSE_MODEL_LENGTH) return output;
             if (!directory.isDirectory() && !directory.mkdirs()) return null;
@@ -4112,6 +4191,37 @@ public final class HookModule extends XposedModule {
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose model materialization failed", t);
             return null;
+        }
+    }
+
+    /** Fade out (then hide) every detail photo whose host fade we froze. Main thread. */
+    private static void fadeOutFrozenPhotos() {
+        synchronized (bosePhotoFreeze) {
+            if (bosePhotoFreezeFallback != null) {
+                MODEL_PHOTO_HANDLER.removeCallbacks(bosePhotoFreezeFallback);
+                bosePhotoFreezeFallback = null;
+            }
+        }
+        for (Object key : bosePhotoFreeze.keySet().toArray()) {
+            if (key instanceof ImageView) fadeOutPhoto((ImageView) key);
+        }
+    }
+
+    /**
+     * Replays the host's 600ms photo fade-out ourselves, now that the 3D model is on
+     * screen. Releases the freeze first so our own per-frame setAlpha is not pinned.
+     */
+    private static void fadeOutPhoto(ImageView photo) {
+        // Release the freeze BEFORE animating, so our own setAlpha is not pinned to 1.0.
+        bosePhotoFreeze.remove(photo);
+        if (bosePhotoFreeze.isEmpty()) photoFreezeActive = false;
+        try {
+            photo.animate().alpha(0f).setDuration(600L).withEndAction(() -> {
+                photo.setVisibility(View.GONE);
+                photo.setAlpha(1f);
+            }).start();
+        } catch (Throwable ignored) {
+            photo.setVisibility(View.GONE);
         }
     }
 
