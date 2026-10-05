@@ -4620,12 +4620,25 @@ public final class HookModule extends XposedModule {
 
     private static void hideLoadingView(Object loadingView) {
         if (loadingView == null) return;
-        try {
-            Method cancelAnimation = loadingView.getClass().getMethod("cancelAnimation");
-            cancelAnimation.invoke(loadingView);
-        } catch (Throwable ignored) {
+        if (loadingView instanceof View) {
+            // 0.5.78 — #2 root cause. stopLoadingSpinners() walks the parent chain and
+            // called hideLoadingView(parent) on EVERY ancestor, which GONE'd the product
+            // image's own container (device_image_container / onespace_header_container),
+            // blanking the photo on 通用设置. Only spinner-like views (Lottie / Progress /
+            // Loading / Spin) should be hidden; a plain FrameLayout / RelativeLayout
+            // container must be left untouched.
+            String name = loadingView.getClass().getName();
+            boolean isSpinner = name.contains("Lottie") || name.contains("Animation")
+                    || name.contains("Loading") || name.contains("Progress")
+                    || name.contains("Spin");
+            if (!isSpinner) return;
+            try {
+                Method cancelAnimation = loadingView.getClass().getMethod("cancelAnimation");
+                cancelAnimation.invoke(loadingView);
+            } catch (Throwable ignored) {
+            }
+            ((View) loadingView).setVisibility(View.GONE);
         }
-        if (loadingView instanceof View) ((View) loadingView).setVisibility(View.GONE);
     }
 
     /**
@@ -7972,15 +7985,28 @@ public final class HookModule extends XposedModule {
             // separator and is not a known framework/module prefix. Single-token names
             // (j2, l, c2 without dot…) can never match a host class.
             String where = hostCallerChain(4);
-            String key = where + "@" + target.getClass().getSimpleName() + "/v" + visibility;
-            if (!hideCallSites.add(key)) return;
-            if (hideCallSites.size() > 24) return; // the useful set is small
+            String raw = rawCallerChain(12);
+            String cls = target.getClass().getSimpleName();
+            // 0.5.78 — DecorView INVISIBLE is the "blank page" trigger. Its caller is always
+            // no_app_frame because the real trigger hides behind an android.*-named synthetic
+            // host class (e.g. android.telephony.RensGlaent), which isHostFrame drops. Record a
+            // MONOTONIC sequence (not de-duped) so the next log shows the true frequency, and
+            // keep the raw (unfiltered) chain so the real trigger is finally named.
+            boolean isDecor = "DecorView".equals(cls);
+            if (isDecor) {
+                if (hideSeq.incrementAndGet() > 20) return;
+            } else {
+                String key = where + "@" + cls + "/v" + visibility;
+                if (!hideCallSites.add(key)) return;
+                if (hideCallSites.size() > 24) return; // the useful set is small
+            }
             MLog.event("bose.detail.hidden_by",
-                    "view", target.getClass().getSimpleName(),
+                    "view", cls,
                     "id", idName(target),
                     "size", target.getWidth() + "x" + target.getHeight(),
                     "visibility", visibility,
-                    "caller", where);
+                    "caller", where,
+                    "raw", raw);
         } catch (Throwable ignored) {
         }
     }
@@ -8014,6 +8040,10 @@ public final class HookModule extends XposedModule {
     /** Collapses repeated hide call sites so one culprit yields one line. */
     private static final java.util.Set<String> hideCallSites =
             java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
+
+    /** 0.5.78 — monotonic sequence for DecorView INVISIBLE events (the blank-page trigger). */
+    private static final java.util.concurrent.atomic.AtomicInteger hideSeq =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     /**
      * Walks to the view that would host the detail sections and describes it in depth.
