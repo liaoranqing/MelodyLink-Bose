@@ -1,9 +1,9 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
 > **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 23:20 由 Qoder 更新（token 将尽，交接下一任）** · 当前版本 **2.0.8 / versionCode 208**（诊断版）· origin/main=`b9d39e1` 已推、**设备仍装 2.0.7**。模型已修好（2.0.6）；bug1(ANC 即时刷新)取证中。实时状态见 `opslog/STATUS.md`（含下一任第一个动作）。
+> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-06 00:10 由 Qoder 更新** · 当前版本 **2.0.12 / versionCode 212** · HEAD=origin/main=`ff50c2f`（CI run 37337125325 success）**设备仍装 2.0.11**。模型已修好（2.0.6）；bug1 耳机设置侧已由 2.0.11 修好并经用户确认，通用设置侧由 2.0.12 修复待装机验证。实时状态与下一步判定见 `opslog/STATUS.md`。
 > 这份文档是**技术权威交接入口**，接手后先通读全文，再动手。**接管流程/日志规范先看工作区根目录 `ONCALL-PROTOCOL.md` 与 `opslog/STATUS.md`**（当前状态快照以 STATUS.md 为准）。
-> **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管。当前 2.0.5 已 push 待验证，遗留 bug1(ANC图标)/bug2(内容偶发消失) 待取证。最高优先级见 §8。
+> **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管。遗留 bug2(内容偶发消失，需现场复现取证)；模型入场动画略卡（后置）。最高优先级见 §8。
 
 ---
 
@@ -138,12 +138,12 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 > 实时状态以 `opslog/STATUS.md` 为准。**2.0.6（`757e793`）修复了 2.0.3~2.0.5 模型黑屏的真凶（v4 资产 BIN chunk 损坏）**，待 push+CI+复验。
 
-1. **最高优先级：2.0.6 装机复验**。`757e793` 待 push。
+1. **✅ 已结案（2.0.6，用户复验通过）：模型黑屏**。以下为当时的取证要点，保留以免走回头路：
    - 真凶（已字节级实锤）：v4 资产 glb 的 BIN chunk 头损坏（make_vfxms4.py 偏移读错），glTF 解析失败 → TextureView 在但黑屏。2.0.6 已修（BIN type=0x4E4942、切片长度匹配、13239210 字节）。
    - 之前"模型依赖照片 d VISIBLE"的判断是**错的**（红鲱鱼），见 §1.10 的纠正。2.0.5 的照片方案（d 保持 VISIBLE + alpha 钳 0）本身没被证明有害，随 2.0.6 一起验证：期望=白色放大模型 + 无照片。
    - 若 2.0.6 模型仍黑：用 `uiautomator dump` 确认 TextureView 尺寸正常后，重点查 loadSceneFromBuffer（可临时加 hook 打 ByteBuffer 头+异常），别再动照片可见性。
    - 若 2.0.6 模型正常但照片仍闪现：照片方案问题，单独处理（回退到 2.0.1 装 PNG+原生 crossfade 兜底）。
-2. **bug1：ANC 三态图标/高亮点击不即时刷新（重进才刷新）**。机制已实锤（logs/0587）：点击只触发 `NoiseReductionItem$a.c`，之后**无 getNoiseReductionModeIndex 重读、无 onEarphoneDataChanged**；重进才重读 getter。状态写入/持久化均正确。2.0.7 的 `Preference.notifyChanged()` 无效（点击后仍无重读）。**2.0.8（`b9d39e1`，已推未装机）= 诊断版**：打 `bose.anc.refresh`(两 row 是否 null)/`refresh_done`(notifyChanged 成功)/`refresh_fail`。下一任：装机 2.0.8→点一次 ANC→读这三条：row=null 则修 `captureNoiseEffectRow` 的进程/页面捕获；refresh_done 但图标不刷新则 rebind 非图标路径，改对活着的 NoiseReductionItem 调 `onEarphoneDataChanged(LBa/z;)`（smali 实证签名；VO 实例可从 hook `noiseReductionModeVO`=Ba.z.getCurrentNoiseReductionModeIndex 的 getThisObject 缓存，注意该 getter 可能 0 触发需另找来源）。详见 `opslog/STATUS.md`「下一任的第一个动作」。
+2. **✅ 已结案（2026-10-06，用户确认）：bug1 ANC 三态图标不即时刷新**。详情页=2.0.11 点击时乐观镜像；通用设置=2.0.12（`ff50c2f`）捕获 `OneSpaceNoisePreference$b.onChanged` 重绘，并在主进程写入拦截时立刻 `writeSharedBoseState()`；日志 14 次 `bose.anc.onespace.replayed`、零 skip/fail。**关键教训：通用设置与耳机设置是两套宿主类、两条绘制路径，且显示用 modeType(1/5/2)、写入/镜像用协议索引(0/1/2)——映射必须交回宿主 `l9/b.getCurrentNoiseMode()`，不能猜。** 以下原始取证保留：机制已实锤（logs/0587）：点击只触发 `NoiseReductionItem$a.c`，之后**无 getNoiseReductionModeIndex 重读、无 onEarphoneDataChanged**；重进才重读 getter。状态写入/持久化均正确。2.0.7 的 `Preference.notifyChanged()` 无效（点击后仍无重读）。**2.0.8（`b9d39e1`，已推未装机）= 诊断版**：打 `bose.anc.refresh`(两 row 是否 null)/`refresh_done`(notifyChanged 成功)/`refresh_fail`。下一任：装机 2.0.8→点一次 ANC→读这三条：row=null 则修 `captureNoiseEffectRow` 的进程/页面捕获；refresh_done 但图标不刷新则 rebind 非图标路径，改对活着的 NoiseReductionItem 调 `onEarphoneDataChanged(LBa/z;)`（smali 实证签名；VO 实例可从 hook `noiseReductionModeVO`=Ba.z.getCurrentNoiseReductionModeIndex 的 getThisObject 缓存，注意该 getter 可能 0 触发需另找来源）。详见 `opslog/STATUS.md`「下一任的第一个动作」。
 3. **bug2：Bose 注入内容偶发消失**：无法稳定复现，挂起，需现场日志。
 4. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.6 回归。
 5. **CNC 通用设置滑条**（低优先级）：`cnc.onespace.skip reason=no_tree`。不主动改。
