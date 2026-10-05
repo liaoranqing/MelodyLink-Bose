@@ -798,6 +798,17 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "d", 1, "sonyDetailPlaceholder");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "onFinishInflate", 0, "sonyDetailInflated");
             hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "setViewModel", 1, "sonyDetailViewModel");
+            // 1.0.1: b(String) IS the 3D model loader (initModel). 17.6.3 smali: it
+            // cross-fades the photo ImageView (field d) out, builds a
+            // com.oplusos.vfxmodelviewer.view.ModelViewer (OPPO's Filament/gltfio
+            // wrapper) and feeds the file bytes to ModelScene.loadSceneFromBuffer
+            // (ByteBuffer) — so the loaded file is a plain glTF/GLB. d(F8/i) only
+            // reaches b() when c() (device capability) passes AND the DTO's model
+            // file exists (o.h), and for a Bose session the DTO is the stripped Enco
+            // X3 one, so the host would play the X3 model. Swap the path to our
+            // bundled Bose glb instead; see the boseModelViews gate in
+            // replaceBoseDetailImageNow for why the photo must stand down afterwards.
+            hookNamed(loader, "com.oplus.melody.ui.widget.MelodyDetailModelView", "b", 1, "boseDetailModel");
             hookNamed(loader, "androidx.preference.PreferenceGroup", "f", 1, "detailPreferenceAdd");
             // 0.5.48: stop guessing who hides the detail content. setVisibility is the only
             // way a view goes from laid-out to invisible, so intercepting it and reporting the
@@ -1065,6 +1076,27 @@ public final class HookModule extends XposedModule {
                         Object result = chain.proceed();
                         replaceBoseDetailImageNow(chain.getThisObject());
                         return result;
+                    }
+                    if ("boseDetailModel".equals(label)) {
+                        Object modelOwner = chain.getThisObject();
+                        Object detailViewModel = readField(modelOwner, "g");
+                        String modelAddress = asString(readField(detailViewModel, "b"));
+                        if (com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(modelAddress)) {
+                            File modelFile = materializeBoseModel();
+                            if (modelFile != null) {
+                                // The host GONEs the photo ImageView right after b()
+                                // returns and fades the 3D TextureView in, so the swap
+                                // owns the product area from here on. Mark the view so
+                                // replaceBoseDetailImageNow stops re-showing the PNG.
+                                boseModelViews.put(modelOwner, Boolean.TRUE);
+                                MLog.event("bose.model.swap",
+                                        "size", modelFile.length(),
+                                        "path", modelFile.getName());
+                                return chain.proceed(new Object[]{modelFile.getAbsolutePath()});
+                            }
+                            MLog.event("bose.model.skip", "reason", "asset_unavailable");
+                        }
+                        // non-Bose session (the real Enco X3): host behavior unchanged.
                     }
                     if ("sonyDetailInflated".equals(label) || "sonyDetailViewModel".equals(label)) {
                         Object result = chain.proceed();
@@ -4527,6 +4559,13 @@ public final class HookModule extends XposedModule {
     private static final java.util.Set<String> boseImageTruthLogged =
             java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
+    /**
+     * Detail views whose initModel path we swapped to the bundled Bose glb. Weak
+     * keys: the entry lives exactly as long as the MelodyDetailModelView instance.
+     */
+    private static final java.util.Map<Object, Boolean> boseModelViews =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Boolean>());
+
     private File materializeBoseImage() {
         Application application = currentApplication();
         AssetManager assets = sonyModuleAssets;
@@ -4534,11 +4573,14 @@ public final class HookModule extends XposedModule {
         File directory = new File(application.getFilesDir(), "melodylink/bose-images");
         // 0.5.69: v2 = the user-supplied high-res product photo. The name is bumped so
         // devices that cached the old asset file pick the new one up.
-        File output = new File(directory, "qc_ultra2_v2.png");
+        // 1.0.1: v3 = the same photo with the black studio background removed
+        // (flood-fill alpha cutout) so it no longer draws a black rectangle on
+        // pages whose own background is light.
+        File output = new File(directory, "qc_ultra2_v3.png");
         try {
             if (output.isFile() && output.length() > 0L) return output;
             if (!directory.isDirectory() && !directory.mkdirs()) return null;
-            try (java.io.InputStream input = assets.open("bose/images/qc_ultra2_v2.png");
+            try (java.io.InputStream input = assets.open("bose/images/qc_ultra2_v3.png");
                  FileOutputStream stream = new FileOutputStream(output, false)) {
                 byte[] buffer = new byte[8192];
                 int count;
@@ -4547,6 +4589,40 @@ public final class HookModule extends XposedModule {
             return output.isFile() && output.length() > 0L ? output : null;
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose image materialization failed", t);
+            return null;
+        }
+    }
+
+    /** Exact byte length of the bundled bose/model/bose_qcue2.glb asset. */
+    private static final long BOSE_MODEL_LENGTH = 9569752L;
+
+    /**
+     * Copies the bundled Bose QC Ultra Earbuds 2 glb into the host files dir and
+     * returns it. The host's model loader (A8/k supplier case 5) reads the path
+     * with plain {@link java.io.File} I/O, so the module asset must be
+     * materialized to a real file the host process can read. The cached copy is
+     * validated by exact length and the file name is bumped whenever the bundled
+     * asset changes (same convention as the product photo) so stale copies
+     * refresh.
+     */
+    private File materializeBoseModel() {
+        Application application = currentApplication();
+        AssetManager assets = sonyModuleAssets;
+        if (application == null || assets == null) return null;
+        File directory = new File(application.getFilesDir(), "melodylink/bose-model");
+        File output = new File(directory, "bose_qcue2_v1.glb");
+        try {
+            if (output.isFile() && output.length() == BOSE_MODEL_LENGTH) return output;
+            if (!directory.isDirectory() && !directory.mkdirs()) return null;
+            try (java.io.InputStream input = assets.open("bose/model/bose_qcue2.glb");
+                 FileOutputStream stream = new FileOutputStream(output, false)) {
+                byte[] buffer = new byte[65536];
+                int count;
+                while ((count = input.read(buffer)) != -1) stream.write(buffer, 0, count);
+            }
+            return output.isFile() && output.length() == BOSE_MODEL_LENGTH ? output : null;
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose model materialization failed", t);
             return null;
         }
     }
@@ -4655,6 +4731,13 @@ public final class HookModule extends XposedModule {
      */
     private void replaceBoseDetailImageNow(Object owner) {
         if (!(owner instanceof View)) return;
+        if (boseModelViews.containsKey(owner)) {
+            // 1.0.1: the Bose glb swap took over this view's product area (the host
+            // GONEs the photo ImageView and shows a Filament TextureView instead).
+            // Forcing the PNG back would draw an opaque photo over the 3D view.
+            MLog.event("bose.image.skip", "surface", "detail", "reason", "model_active");
+            return;
+        }
         Object viewModel = readField(owner, "g");
         String address = asString(readField(viewModel, "b"));
         if (!com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(address)) {
