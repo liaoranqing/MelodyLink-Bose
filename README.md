@@ -2,21 +2,22 @@
 
 ## 版本标识
 
-- 项目版本：`Bose-MelodyLink 0.1.0`
-- 目标设备：Bose QC Earbuds Ultra 2（edith，Product ID 0x4062）
-- 目标 Melody：16.8.3 基线 + 最新版兼容层
-- 当前状态：架构适配准备阶段，尚未宣称可用
+- 项目版本：`MelodyLink-Bose 1.0.0`（versionCode 105）
+- 目标设备：Bose QC Ultra Earbuds 2（镇海司，MAC `68:F2:1F:3D:41:D7`）
+- 目标 Melody：17.6.3（`com.oplus.melody`，已实机验证）
+- 当前状态：正式发布，核心功能已在 OPPO Find X8 Ultra / ColorOS 上实机验证
 
-## 目标
+## 已实现
 
-在 MelodyLink 的原生系统级耳机页面中加入 Bose QC Earbuds Ultra 2 支持：
+在 Melody 原生系统级耳机页面中为 Bose QC Ultra Earbuds 2 提供支持：
 
-- 设备卡片与详情页识别
-- 左耳、右耳、充电盒电量
-- 关闭、降噪、通透
-- CNC 0-10
-- ANC 与空间音频
-- 针对 Melody 版本差异提供 Hook 降级
+- 设备卡片与详情页识别（MAC 正向判据，不误伤真 OPPO Enco X3）
+- 详情页与通用设置页产品图替换
+- 关闭 / 降噪 / 通透三态切换
+- CNC 0–10 降噪等级（详情页）
+- Enco X3 四级降噪选择器与「增强人声」残留剥离
+- 左耳、右耳、充电盒电量显示
+- 针对 Melody 版本差异（混淆类名/方法名）的 Hook 降级
 
 ## 实现原则
 
@@ -36,6 +37,11 @@
 - 本 README 的项目版本
 - 发布包名中的版本标识（如果构建产物采用带版本后缀的命名）
 
-## 当前说明
+## 构建与发布
 
-该目录是独立适配工作线，不替换系统 Melody APK，不使用测试签名覆盖系统应用。正式实现应在完成目标 Melody 版本的实机验证后再发布。
+- CI（GitHub Actions）：`.github/workflows/build.yml`，push 到 `main` 自动构建 release APK，产物见 Actions artifact `melodylink-bose-release`。
+- 版本策略：每次功能改动同步更新 `versionCode`、`versionName`（`app/build.gradle.kts`）与本 README 的项目版本。
+
+## 说明
+
+本模块是独立适配工作线，不替换系统 Melody APK，不使用测试签名覆盖系统应用；以 LSPosed 模块形式加载，仅对 `com.oplus.melody` 进程做运行时 Hook。
