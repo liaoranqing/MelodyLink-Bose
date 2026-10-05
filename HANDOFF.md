@@ -1,16 +1,16 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
 > **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 19:50 · 当前版本 **2.0.1 / versionCode 201**（Bose 专用精简版）· 本地领先远端 4 个提交（1.0.1/2.0.0-fix×2/2.0.1），**用户尚未 push，CI 未验证 2.0.0 之后任何版本**。
-> 这份文档是**唯一权威交接入口**，接手后先通读全文，再动手。配套文档在仓库 `docs/` 目录与本地 `.workbuddy/memory/` 日志。
-> **交接状态**：上一任模型 token 耗尽。2.0.1 已提交但未装机验证，最高优先级事项见 §8。
+> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-05 由接管模型（Qoder）校正状态** · 当前版本 **2.0.1 / versionCode 201**（Bose 专用精简版）· **已全部 push：本地 main = origin/main = `9cbcb2b`（含 1.0.1→2.0.1）**，但 **CI 构建结果与 2.0.1 装机验证均未确认**。
+> 这份文档是**技术权威交接入口**，接手后先通读全文，再动手。**接管流程/日志规范先看工作区根目录 `ONCALL-PROTOCOL.md` 与 `opslog/STATUS.md`**（当前状态快照以 STATUS.md 为准）。
+> **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管。2.0.1 已提交已 push、未装机验证，最高优先级事项见 §8。
 
 ---
 
 ## 0. 一页速览（30 秒上手）
 
 - **项目是什么**：一个 LSPosed 模块，让 Bose QC Ultra Earbuds 2 在 OPPO/一加的耳机管理应用 Melody（`com.oplus.melody` 17.6.3）里原生工作（识别、产品图、降噪三态、CNC、电量）。
-- **当前状态**：2.0.0 起为 Bose 专用精简版（删光 Sony/Huawei/Xiaomi/Samsung 适配层、Compose UI、约 8200 行）。1.0.0 已发布；**1.0.1 之后的提交均在本地未 push**。
+- **当前状态**：2.0.0 起为 Bose 专用精简版（删光 Sony/Huawei/Xiaomi/Samsung 适配层、Compose UI、约 8200 行）。1.0.0 已发布；1.0.1→2.0.1 已全部 push（origin/main=`9cbcb2b`，2026-10-05 核实）。
 - **最优先未完成事项（2.0.1 待验证）**：详情页 3D 模型 —— 2.0.0 发现宿主模型格式是自研 `.vfxms` 容器而非裸 glb，2.0.1 已把 Bose glb 打包成 vfxms（套 X3 的场景 JSON + IBL/skybox KTX），**尚未装机验证**。详见 §8。
 - **最重要的 5 件事**（比旧版多 2 条，都是血的教训）：
   1. 所有 Hook 在 `hook/HookModule.java`（~8000 行），按 `label` 统一分发。
@@ -135,7 +135,7 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ## 8. 当前待办（按优先级，2026-10-05 19:50）
 
-1. **最高优先级：2.0.1 装机验证（模型 vfxms 打包）**。已提交 `45726ef` 但**本地未 push、CI 未构建、未装机**。用户需先 push（GitHub Desktop → Push origin，4 个待推提交：1.0.1 `009def5`、2.0.0 `98a64f2`→被 `401c305` 重建、`9f60d92`、2.0.1 `45726ef`）。装机后打开详情页确认：
+1. **最高优先级：2.0.1 装机验证（模型 vfxms 打包）**。提交 `45726ef` **已 push**（origin/main=`9cbcb2b`，2026-10-05 核实），但 **CI 构建产物是否生成、APK 是否装机均未确认**——先查 Actions 构建状态（或被墙时让用户在 GitHub Desktop/网页确认），下载 2.0.1 APK 装机。装机后打开详情页确认：
    - 期望：Bose 3D 模型出现（不再空白、不再变 X3）。日志应有 `bose.colorid.override` → `bose.model.swap`，宿主进程应出现 `Filament: FEngine created` + `loadModelFromBuffer` 后无异常。
    - 若仍空白：在 `boseDetailModel` 分支加一个 `ModelScene.loadSceneFromBuffer` 的 hook，把传入 ByteBuffer 的前 40 字节 + catch 到的异常打到 MLog（`bose.model.loadbuf`），再抓日志定位 Head.read 具体崩在哪。脚本 `bose3d/make_vfxms2.py` 里 `modelScale`/`light` 字段可调。
    - 若模型显示但取景不对（过大/过小/角度怪）：调 vfxms JSON 的 `modelScale`，重新打包，bump 缓存名 v3。
@@ -238,6 +238,6 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ## 附录：本地工作区状态说明
 
-- 本地 git 仓库（`MelodyLink-Bose/`）当前停在旧 commit `5d033f6`，**落后 remote 3 个提交**（1.0.0 + 文档）。因为 github.com 被墙，本地无法 `git fetch`，同步只能靠用户 GitHub Desktop **Pull origin**。
-- remote main 最新 SHA = `33182eaa`，本地落后，接手后**先让用户 pull 一次**再动代码。
+- 本地 git 仓库（`MelodyLink-Bose/`）**已与 remote 同步**：main = origin/main = `9cbcb2b`（2026-10-05 核实，用户已完成 push）。github.com 直连仍被墙，后续 `git fetch` 同步仍靠用户 GitHub Desktop Pull origin。
+- 工作区根目录 `opslog/`（操作日志+状态快照）与 `ONCALL-PROTOCOL.md`（AI 接管协议）**不在仓库内、不提交**。
 - 反编译产物（smali/dex/dexdump）在仓库外的工作区根目录（`tools/smali*`、`melody1763/`、`dex1763/`、`dexdump*.txt`），**不提交、不上传**（版权）。
