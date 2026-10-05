@@ -752,11 +752,11 @@ public final class HookModule extends XposedModule {
                         if (com.melody.melodylink.bose.BoseDeviceConfig.INSTANCE.matchesAddress(modelAddress)) {
                             File modelFile = materializeBoseModel();
                             if (modelFile != null) {
-                                // 2.0.3: hide the 2D detail photo so only the 3D model
-                                // shows. Register field d (a sibling ImageView of the
-                                // model container) so detailSetVisibility keeps it GONE
-                                // even when the host re-shows it from d()/e()/f(), and
-                                // hide it now.
+                                // 2.0.3: hide the 2D detail photo (INVISIBLE, not GONE) so
+                                // only the 3D model shows. Register field d (a sibling
+                                // ImageView of the model container) so detailSetVisibility
+                                // keeps it invisible even when the host re-shows it from
+                                // d()/e()/f(), and hide it now.
                                 try {
                                     Object photo = readField(modelOwner, "d");
                                     if (photo instanceof ImageView) {
@@ -1038,16 +1038,16 @@ public final class HookModule extends XposedModule {
                             }
                             if (!boseBonded()) return result;
 
-                            // 2.0.3: keep the Bose detail 2D photo hidden — only the 3D
+                            // 2.0.4: keep the Bose detail 2D photo invisible — only the 3D
                             // model should occupy the product area. The host re-shows
                             // field d from d()/e()/f(); every such VISIBLE request on a
-                            // registered photo is overridden to GONE here. Re-entry guard
-                            // (detailArbitrating) prevents the setVisibility(GONE) below
-                            // from recursing into this hook.
+                            // registered photo is overridden to INVISIBLE (NOT GONE, which
+                            // collapses the container and blanks the model). Re-entry
+                            // guard (detailArbitrating) prevents recursion.
                             if (boseDetailPhotos.contains(target) && visibility == View.VISIBLE) {
                                 detailArbitrating.set(Boolean.TRUE);
                                 try {
-                                    target.setVisibility(View.GONE);
+                                    target.setVisibility(View.INVISIBLE);
                                 } finally {
                                     detailArbitrating.set(Boolean.FALSE);
                                 }
@@ -4108,22 +4108,29 @@ public final class HookModule extends XposedModule {
      * of the model container {@code a}) and cross-fades it out when the model is
      * ready. That photo is the wrong-looking "flash" the user reported (and in 2.0.2
      * my setAlpha-clamp left it stuck behind the model). So we register every Bose
-     * detail photo ImageView here and force it GONE from {@code detailSetVisibility},
-     * which is the single choke point for every visibility change. Only ever forced
-     * toward GONE, never VISIBLE, and only for this specific known view — so it can
-     * not recreate the 0.5.69 "forced an unknown full-size view" grey-mask class of
-     * regression.
+     * detail photo ImageView here and force it INVISIBLE from {@code detailSetVisibility}
+     * (never GONE — GONE collapses the container and blanks the model, the 2.0.3
+     * regression). Only ever toward INVISIBLE, only for this specific known view, so
+     * it cannot recreate the 0.5.69 "forced an unknown full-size view" grey-mask class
+     * of regression.
      */
     private static final java.util.Set<View> boseDetailPhotos =
             java.util.Collections.synchronizedSet(
                     java.util.Collections.newSetFromMap(new java.util.WeakHashMap<View, Boolean>()));
 
-    /** Force a registered Bose detail photo GONE, guarded against hook re-entry. */
+    /**
+     * Hide a registered Bose detail photo WITHOUT collapsing layout. INVISIBLE (not
+     * GONE): GONE removes the ImageView from the layout, and the detail product area
+     * depends on field d for its measured height — so GONE-ing it collapsed the
+     * container and the 3D model (a sibling TextureView) rendered into 0 height and
+     * vanished (the 2.0.3 regression). INVISIBLE keeps the space reserved but draws
+     * nothing.
+     */
     private static void hideBoseDetailPhoto(View photo) {
         if (photo == null) return;
         detailArbitrating.set(Boolean.TRUE);
         try {
-            photo.setVisibility(View.GONE);
+            photo.setVisibility(View.INVISIBLE);
         } finally {
             detailArbitrating.set(Boolean.FALSE);
         }
