@@ -12,8 +12,8 @@ android {
         applicationId = "com.melody.melodylink"
         minSdk = 35
         targetSdk = 36
-        versionCode = 234
-        versionName = "2.0.34"
+        versionCode = 235
+        versionName = "2.0.35"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

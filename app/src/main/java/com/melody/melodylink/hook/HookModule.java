@@ -2181,7 +2181,10 @@ public final class HookModule extends XposedModule {
                 if (boseBonded() && connected) installBoseIntoLiveScreen();
                 return;
             }
-            applyBoseSectionsVisible(connected);
+            // 2.0.35: same rule as the link edge - a page is only re-gated on evidence. Rows on
+            // a freshly built tree start out visible, so skipping an untrusted reading is the
+            // fail-open default the rest of the module already uses.
+            if (lastProbeTrusted) applyBoseSectionsVisible(connected);
         } catch (Throwable t) {
             MLog.event("bose.tree.reconcile_error", "error", MLog.compactThrowable(t));
         }
@@ -5723,6 +5726,7 @@ public final class HookModule extends XposedModule {
             boolean up = a2dpUp || headsetUp;
             lastTrustedProbeUp = up;
             lastTrustedProbeAt = now;
+            lastProbeTrusted = true;
             return up;
         }
         // Untrusted window (proxies null or younger than 4s). 2.0.22: the adapter only works
@@ -5735,6 +5739,7 @@ public final class HookModule extends XposedModule {
         // 12:55:25 result=3 -> 12:55:31 result=2, with no latch file ever written).
         if (!adapterOn) {
             lastProbeDetail += " adapter_not_on";
+            lastProbeTrusted = true;
             return false;
         }
         // Keep the last trusted reading instead of inventing a link — the profile services
@@ -5745,9 +5750,11 @@ public final class HookModule extends XposedModule {
         long heldAge = now - lastTrustedProbeAt;
         if (held != null && heldAge < 30000L) {
             lastProbeDetail += " held=" + (held ? "up" : "down") + " age=" + heldAge + "ms";
+            lastProbeTrusted = true;
             return held;
         }
         lastProbeDetail += " fail_open_never_probed";
+        lastProbeTrusted = false;
         return true;
     }
 
@@ -5954,6 +5961,14 @@ public final class HookModule extends XposedModule {
     private Boolean lastMainLinkUp;
     private volatile long uiStateCheckedAt;
     private volatile boolean lastUiConnected = true;
+    /**
+     * Whether the most recent link reading came from an actual source (a profile device list,
+     * an adapter that is provably not ON, or a held trusted value) rather than from the
+     * never-probed fail-open. 2.0.35: only trusted transitions may show or hide our sections.
+     */
+    private volatile boolean lastProbeTrusted;
+    /** The last state our section visibility was actually driven to. */
+    private volatile boolean lastActedUiConnected = true;
 
     /**
      * The combined "show the device as connected" state: live profile link AND not
@@ -5979,6 +5994,20 @@ public final class HookModule extends XposedModule {
                 log(Log.INFO, TAG, event("Bose UI link " + (next ? "up" : "down")
                         + " reason=" + (Boolean.TRUE.equals(latched) ? "user_disconnected_latch"
                                 : (next ? "link_up" : "link_down")) + " probe=" + lastProbeDetail));
+            }
+            // 2.0.35: only a trusted reading may show or hide our injected sections. The 22:25
+            // field log is decisive: a proxy younger than 4s fails open to "connected" and the
+            // sections appear (visible=true source=live rows=35), then four seconds later the
+            // real device list says "not connected" and they are hidden again
+            // (visible=false source=live rows=35) - the content flashes and vanishes, and
+            // whichever of the two arrives last decides what the user keeps, which is the
+            // reported ~70% failure rate. The returned value still fail-opens, because 2.0.14
+            // proved that gating the greyed-out UI on a still-binding proxy shows a connected
+            // headset as offline; only the visible action waits for evidence. A latch is the
+            // user's own intent, so it always counts as evidence.
+            boolean evidence = lastProbeTrusted || Boolean.TRUE.equals(latched);
+            if (evidence && next != lastActedUiConnected) {
+                lastActedUiConnected = next;
                 if (next) {
                     applyBoseSectionsVisible(true);
                     // 2.0.26: a hot reconnect never rebuilds the host's preference tree, so no
