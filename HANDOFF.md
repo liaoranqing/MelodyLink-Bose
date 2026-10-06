@@ -282,3 +282,15 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 - 本地 git 仓库（`MelodyLink-Bose/`）**已与 remote 同步**：main = origin/main = `9cbcb2b`（2026-10-05 核实，用户已完成 push）。github.com 直连仍被墙，后续 `git fetch` 同步仍靠用户 GitHub Desktop Pull origin。
 - 工作区根目录 `opslog/`（操作日志+状态快照）与 `ONCALL-PROTOCOL.md`（AI 接管协议）**不在仓库内、不提交**。
 - 反编译产物（smali/dex/dexdump）在仓库外的工作区根目录（`tools/smali*`、`melody1763/`、`dex1763/`、`dexdump*.txt`），**不提交、不上传**（版权）。
+
+---
+
+## 14. 交接铁律（2026-10-06 用户指令，对所有接棒 AI 永久生效）
+
+1. **每个 bug 修完并经用户复验通过后，立刻完成一次完整交接准备**，不要攒到 token 耗尽那轮再做。内容包括：
+   - 整理并输出项目当前状态：核心功能、代码结构、关键文件、开发进度（重写 `opslog/STATUS.md`）；
+   - 撰写/更新详细交接文档：未完成任务、已知问题、注意事项、禁忌与踩过的弯路（本节 + `docs/HANDOVER-*.md`）；
+   - 按五要素写操作日志：每次操作记录**调用的方法、执行步骤、查询结果、出现的错误与结论/待办**（`opslog/YYYY-MM.md`，规范见 `opslog/README.md`）；
+   - git 操作记 SHA，push/CI/装机状态变化必须实测核实（`api.github.com/.../commits/<sha>`、`dumpsys package`）后再写，不得凭记忆。
+2. **嘱咐并继承待命义务**：每一位继任 AI 都必须保持**响应式待命**——以文档为唯一事实来源，用户任一指令都要能在 5 分钟内恢复上下文继续干，不重新摸索、不问文档里已有答案的问题；并且**同样在每个 bug 结案后重复第 1 条**。
+3. 交接链要写清（谁 → 谁、时间点、当任做的事与遗留），见 `opslog/STATUS.md` 末节与 `ONCALL-PROTOCOL.md`。
