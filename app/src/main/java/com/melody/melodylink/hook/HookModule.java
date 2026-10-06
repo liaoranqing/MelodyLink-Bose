@@ -1777,6 +1777,40 @@ public final class HookModule extends XposedModule {
         });
     }
 
+    /**
+     * Show or hide every Bose section we injected. The cards themselves are not kept as
+     * fields, so walk each captured row, hide the row and its parent card, and dedupe by
+     * identity so a card with ten rows is only touched once.
+     */
+    private void applyBoseSectionsVisible(final boolean visible) {
+        mainHandler.post(() -> {
+            java.util.List<Object> rows = new java.util.ArrayList<>();
+            if (boseCncPreference != null) rows.add(boseCncPreference);
+            if (boseCncOneSpacePreference != null) rows.add(boseCncOneSpacePreference);
+            if (boseExtraCategory != null) rows.add(boseExtraCategory);
+            rows.addAll(boseEqSliders);
+            rows.addAll(boseButtonDropdowns);
+            rows.addAll(boseModeSlotSliders);
+            java.util.Set<Object> seen = java.util.Collections.newSetFromMap(
+                    new java.util.IdentityHashMap<>());
+            int touched = 0;
+            for (Object row : rows) {
+                if (row == null || !seen.add(row)) continue;
+                if (setPreferenceValue(row, "setVisible", visible)) touched++;
+                try {
+                    Object parent = row.getClass().getMethod("getParent").invoke(row);
+                    if (parent != null && seen.add(parent)
+                            && setPreferenceValue(parent, "setVisible", visible)) {
+                        touched++;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            MLog.event("bose.sections.visibility", "visible", visible,
+                    "rows", rows.size(), "touched", touched);
+        });
+    }
+
     private static void notifyPreferenceChanged(Object preference, String which) {
         if (preference == null) return;
         Class<?> c = preference.getClass();
@@ -5496,6 +5530,7 @@ public final class HookModule extends XposedModule {
                         + " reason=" + (Boolean.TRUE.equals(latched) ? "user_disconnected_latch"
                                 : (next ? "link_up" : "link_down")) + " probe=" + lastProbeDetail));
                 if (next) {
+                    applyBoseSectionsVisible(true);
                     // 2.0.26: a hot reconnect never rebuilds the host's preference tree, so no
                     // detailPreferenceAdd / captureNoiseEffectRow fires and our sections stay
                     // absent until the page is re-entered (video 18:52: 未连接全灰 → 开蓝牙连上,
@@ -5508,6 +5543,12 @@ public final class HookModule extends XposedModule {
                         } catch (Throwable ignored) {
                         }
                     });
+                } else {
+                    // 2.0.28: the host hides its own rows when the earbuds drop, but our
+                    // injected sections stayed on screen (user report: 断开时耳机设置里
+                    // Bose 的内容也没有消失). Hide them on the same edge that re-injects
+                    // them, so both directions are symmetric.
+                    applyBoseSectionsVisible(false);
                 }
             }
             lastUiConnected = next;
