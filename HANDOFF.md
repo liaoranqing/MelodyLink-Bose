@@ -139,6 +139,33 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ## 8. 当前待办（按优先级，2026-10-06 12:40 由 ZCode 更新）
 
+### 8.0 🔴 最高优先 · 2.0.29 待做：注入行引用是「旧页面实例的幽灵对象」（已定性，含判据）
+
+- **现象**（用户截图 19:37，装机 2.0.28）：耳机已连接（电量 50/L90/R90、三态=关闭、宿主的 空间音频/大师调音/耳机操控 都在），但**耳机设置里我们注入的 Bose 分组一个都没有**；退出重进就回来。
+- **证据**（同窗口 logcat，逐条在案）：
+  ```
+  evt=bose.sections.visibility visible=true rows=14 touched=27
+  evt=bose.inject.on_link_up ok=true
+  evt=bose.inject.verified landed=true
+  evt=bose.injected page=detail
+  ```
+  矛盾点：`rows=14 → touched=27`（14 行 + 13 张父卡片）**却对屏幕毫无影响**。
+- **根因**：这 14 个引用属于**已销毁的旧页面实例**的 Preference 对象；而 `installBoseIntoLiveScreen()` 在新树里被 `isBoseInjected()` 判定"已注入"而短路 —— 既不重建行，也不把新页的行登记进我们持有的列表。于是隐藏/恢复/enable 门控全部作用在幽灵对象上。
+- **修法（三步，缺一不可）**：
+  1. 可见性与 `setEnabled` 门控**不再使用缓存字段**，改为按 key 从当前 live screen 现场解析（复用 `boseLiveScreen()` 与 `findPreferenceByKeyRecursive`）；
+  2. 每次页面重建时**置换持有的行列表**：凡列表里的行 `getParent() == null` 即视为失效，清空后由 `add*Card` 重新登记；
+  3. `isBoseInjected()` 的"已注入"判定必须绑定**当前树实例**（而不是"曾经注入过"），否则短路逻辑会一直骗过重建。
+- **可判定验收标准**：`evt=bose.sections.visibility` 必须同时满足 `rows>0 && touched>0` **且界面真的变化**；若 `rows=0` ⇒ 重建后没再登记，去查 `add*Card` 的登记时机；若 `touched>0` 但界面不变 ⇒ 解析到的仍不是当前页对象。
+- **临时规避**：退出该页重进，或杀 Melody 重开。
+
+### 8.1 其余排队项
+
+1. 通用设置那条「降噪等级」是宿主的行、不吃我们的门控（`bose.cnc.onespace.skip reason=no_tree`、`onespace_row=null` 恒为 null）——与 8.0 同源（引用/查找失效），可在同一轮解决。
+2. 清理死代码：`latchBoseUserDisconnectOnProbeDown()`（2.0.27 已停止调用，方法体仍在）。
+3. 3D 模型入场动画卡顿（#8）。
+4. bug2：Bose 内容偶发消失（#9，需现场复现取证）。
+
+
 > 实时状态以 `opslog/STATUS.md` 为准。**2.0.20（`14544a8`）已由用户 push、CI success（2026-10-06 13:10 api 核实），当前唯一未结=设备仍装 2.0.19，待装机验证断开意图锁存机制（见 §1.11 与下方第 3 条清单）。**
 
 1. **✅ 已结案（2.0.6，用户复验通过）：模型黑屏**。真凶=v4 资产 glb 的 BIN chunk 头损坏（make_vfxms4.py 偏移读错），不是照片可见性（红鲱鱼，§1.10 已纠正）。模型黑屏先字节级校验 .vfxms（10 个大端 u32、BIN type=0x4E4942），别动视图可见性。
