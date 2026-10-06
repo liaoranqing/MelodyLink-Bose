@@ -1906,22 +1906,7 @@ public final class HookModule extends XposedModule {
                     } else {
                         fragments = found.size();
                         for (Object fragment : found) {
-                            if (fragment == null) continue;
-                            Object screen = PrefRef.getPreferenceScreen(fragment);
-                            if (screen == null) continue;
-                            if (PrefRef.getPreferenceCount(screen) <= 0) continue;
-                            // Prefer a screen we can actually attribute to our pages: one that
-                            // already carries our keys, or one carrying the host noise row we
-                            // anchor on. A random Melody page's screen must never be able to
-                            // say "already injected".
-                            if (PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
-                                    || PrefRef.findPreferenceRecursive(screen, BOSE_EXTRA_CATEGORY_KEY) != null
-                                    || PrefRef.findPreferenceRecursive(screen, "NoiseReductionItem") != null
-                                    || PrefRef.findPreferenceRecursive(screen, "OneSpaceNoisePreference") != null) {
-                                ranked.add(screen);
-                            } else {
-                                others.add(screen);
-                            }
+                            collectScreensOf(fragment, ranked, others, 0);
                         }
                         if (ranked.isEmpty() && others.isEmpty()) {
                             reason = fragments == 0 ? "no_fragments" : "fragments_without_screen";
@@ -1941,6 +1926,40 @@ public final class HookModule extends XposedModule {
                     "built", liveBuiltScreen == null ? "null" : "set");
         }
         return ranked;
+    }
+
+    /**
+     * Gather the preference trees a fragment owns, including nested child fragments. The
+     * 通用设置 page keeps its tree inside a COUIPanelFragment hosted by another fragment, so a
+     * top-level scan alone never sees it (2.0.30).
+     */
+    private void collectScreensOf(Object fragment, java.util.List<Object> ranked,
+            java.util.List<Object> others, int depth) {
+        if (fragment == null || depth > 3) return;
+        Object screen = PrefRef.getPreferenceScreen(fragment);
+        if (screen != null && PrefRef.getPreferenceCount(screen) > 0) {
+            // Prefer a screen we can actually attribute to our pages: one that already carries
+            // our keys, or one carrying the host noise row we anchor on. A random Melody page's
+            // screen must never be able to say "already injected".
+            if (PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
+                    || PrefRef.findPreferenceRecursive(screen, BOSE_EXTRA_CATEGORY_KEY) != null
+                    || PrefRef.findPreferenceRecursive(screen, "NoiseReductionItem") != null
+                    || PrefRef.findPreferenceRecursive(screen, "OneSpaceNoisePreference") != null) {
+                ranked.add(screen);
+            } else {
+                others.add(screen);
+            }
+        }
+        collectScreensOfAll(readFragmentList(
+                PrefRef.invokeNoArg(fragment, "getChildFragmentManager")), ranked, others, depth + 1);
+    }
+
+    private void collectScreensOfAll(java.util.List<?> fragments, java.util.List<Object> ranked,
+            java.util.List<Object> others, int depth) {
+        if (fragments == null) return;
+        for (Object fragment : fragments) {
+            collectScreensOf(fragment, ranked, others, depth);
+        }
     }
 
     /** The fragment that reported the build must still belong to the Activity in front. */
@@ -2618,19 +2637,53 @@ public final class HookModule extends XposedModule {
         return null;
     }
 
-    /** Pulls the fragment list out of a FragmentManager without compile-time androidx. */
+    /**
+     * Pulls the fragment collection out of a FragmentManager without compile-time androidx.
+     *
+     * <p>2.0.30. This used to require a field whose declared type is exactly
+     * {@code java.util.List}, and the 17.6.3 artifact proves that can never match:
+     * {@code smali1/androidx/fragment/app/FragmentManager.smali} declares its collections as
+     * {@code Ljava/util/ArrayList;} under obfuscated names (M, N, O, a, d, e, o). So the walk
+     * returned null and every caller silently lost the FragmentManager route — which is what
+     * {@code evt=bose.injected ... fragment=none} had been reporting all along.
+     */
     private static java.util.List<?> readFragmentList(Object manager) {
         if (manager == null) return null;
         for (java.lang.reflect.Field f : allFieldsOf(manager.getClass())) {
-            if (!java.util.List.class.equals(f.getType())) continue;
+            if (!java.util.Collection.class.isAssignableFrom(f.getType())) continue;
+            Object value;
             try {
                 f.setAccessible(true);
-                Object v = f.get(manager);
-                if (v instanceof java.util.List) return (java.util.List<?>) v;
+                value = f.get(manager);
             } catch (Throwable ignored) {
+                continue;
             }
+            if (!(value instanceof java.util.Collection)) continue;
+            java.util.Collection<?> collection = (java.util.Collection<?>) value;
+            if (collection.isEmpty()) continue;
+            java.util.List<Object> fragments = new java.util.ArrayList<>();
+            for (Object item : collection) {
+                if (isFragmentObject(item)) fragments.add(item);
+            }
+            if (!fragments.isEmpty()) return fragments;
         }
         return null;
+    }
+
+    /**
+     * True for anything that is really a Fragment. The element classes themselves are obfuscated
+     * ({@code G9.Q}), so the test walks the superclass names, which androidx keeps intact.
+     */
+    private static boolean isFragmentObject(Object value) {
+        if (value == null) return false;
+        for (Class<?> c = value.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            String name = c.getName();
+            if ("androidx.fragment.app.Fragment".equals(name)
+                    || "android.app.Fragment".equals(name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static java.lang.reflect.Field[] allFieldsOf(Class<?> type) {
