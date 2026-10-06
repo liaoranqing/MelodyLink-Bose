@@ -4619,8 +4619,10 @@ public final class HookModule extends XposedModule {
                 return;
             }
             boseCncOneSpacePreference = seek;
-            // 2.0.13: same link gate as the detail-page slider.
-            setPreferenceValue(seek, "setEnabled", isBoseLinkConnected());
+            // 2.0.13: same link gate as the detail-page slider. 2.0.22: use the UI semantics
+            // (probe AND not latched), not the raw probe — otherwise a freshly attached row
+            // ignores the user's 断开连接 intent that every other row already honours.
+            setPreferenceValue(seek, "setEnabled", isBoseUiConnectedCached());
             MLog.event("bose.cnc.onespace.attached", "level", level, "order", target,
                     "parent", tree.getClass().getSimpleName());
         } catch (Throwable t) {
@@ -5194,13 +5196,8 @@ public final class HookModule extends XposedModule {
             // Bluetooth just came back on: the held reading belongs to the previous session,
             // and keeping it would hide earbuds the user has just reconnected for 30s.
             lastTrustedProbeUp = null;
-            lastProbeDetail = "adapter_just_enabled";
         }
         lastAdapterOnState = adapterOn;
-        if (!adapterOn) {
-            lastProbeDetail = "adapter_off";
-            return false;
-        }
         boolean probed = false;
         boolean a2dpUp = false;
         boolean headsetUp = false;
@@ -5239,10 +5236,22 @@ public final class HookModule extends XposedModule {
             lastTrustedProbeAt = now;
             return up;
         }
-        // Untrusted window (proxies null or younger than 4s). 2.0.21: keep the last trusted
-        // reading instead of inventing a link — the profile services can vanish right after a
-        // real disconnect. Only a process that has never probed fails open, which is the 2.0.14
-        // lesson (an already-linked device must not be gated off while the proxies bind).
+        // Untrusted window (proxies null or younger than 4s). 2.0.22: the adapter only works
+        // as a NEGATIVE corroborator — a trusted "device is in the profile list" always wins,
+        // because some ColorOS builds report the adapter as BLE_ON while A2DP is live, and
+        // 2.0.21's absolute STATE_ON check then showed 未连接 on a connected headset. With no
+        // trusted reading at all, an adapter that is not ON means there is no classic link:
+        // 控制中心 关蓝牙 leaves the stack in BLE_ON and unbinds both profile services, which
+        // is how the old fail-open resurrected the connected UI on re-entry (logs/0595
+        // 12:55:25 result=3 -> 12:55:31 result=2, with no latch file ever written).
+        if (!adapterOn) {
+            lastProbeDetail += " adapter_not_on";
+            return false;
+        }
+        // Keep the last trusted reading instead of inventing a link — the profile services
+        // can vanish right after a real disconnect. Only a process that has never probed
+        // fails open, which is the 2.0.14 lesson (an already-linked device must not be
+        // gated off while the proxies bind).
         Boolean held = lastTrustedProbeUp;
         long heldAge = now - lastTrustedProbeAt;
         if (held != null && heldAge < 30000L) {
@@ -5254,10 +5263,10 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * Adapter-level link truth: only STATE_ON can host a live profile link. Used by
-     * {@link #isBoseLinkConnected()} so switching Bluetooth off is a real disconnect.
-     * Returns true when the state cannot be read at all — never fabricate a disconnect
-     * from a missing API.
+     * Adapter-level truth: STATE_ON means the classic stack is up. Used by
+     * {@link #isBoseLinkConnected()} only when no profile proxy gave a trusted reading —
+     * BLE_ON (what 控制中心 leaves behind, logs/0596) cannot host A2DP/HFP. Returns true
+     * when the state cannot be read at all: never fabricate a disconnect from a missing API.
      */
     @SuppressLint("MissingPermission")
     private boolean isBoseAdapterOn() {
@@ -5409,7 +5418,16 @@ public final class HookModule extends XposedModule {
                 latched = value == null ? null : (Boolean) value[0];
             } catch (Throwable ignored) {
             }
-            lastUiConnected = isBoseLinkConnectedCached() && !Boolean.TRUE.equals(latched);
+            boolean next = isBoseLinkConnectedCached() && !Boolean.TRUE.equals(latched);
+            if (next != lastUiConnected) {
+                // 2.0.22: every visible "已连接/未连接" flip gets one line with the reason, so
+                // a field report of "connected but shown offline" is decidable from the log
+                // instead of from guesswork (2.0.21 gave no reason at all).
+                log(Log.INFO, TAG, event("Bose UI link " + (next ? "up" : "down")
+                        + " reason=" + (Boolean.TRUE.equals(latched) ? "user_disconnected_latch"
+                                : (next ? "link_up" : "link_down")) + " probe=" + lastProbeDetail));
+            }
+            lastUiConnected = next;
             uiStateCheckedAt = now;
         }
         return lastUiConnected;
@@ -5497,6 +5515,13 @@ public final class HookModule extends XposedModule {
         final boolean enabled = connected;
         final String detail = lastProbeDetail;
         mainHandler.post(() -> {
+            // 2.0.22: say WHICH rows we actually hold. 通用设置 kept its 降噪等级 slider live
+            // while 耳机设置 greyed out on the same disconnect, and without this it is
+            // impossible to tell a stale reference from a missing attach.
+            MLog.event("bose.cnc.apply", "enabled", enabled,
+                    "detail_row", boseCncPreference != null ? "held" : "null",
+                    "onespace_row", boseCncOneSpacePreference != null ? "held" : "null",
+                    "probe", detail);
             for (Object target : new Object[]{boseCncPreference, boseCncOneSpacePreference}) {
                 if (target == null) continue;
                 setPreferenceValue(target, "setEnabled", enabled);
