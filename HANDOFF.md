@@ -155,6 +155,22 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
   1. 可见性与 `setEnabled` 门控**不再使用缓存字段**，改为按 key 从当前 live screen 现场解析（复用 `boseLiveScreen()` 与 `findPreferenceByKeyRecursive`）；
   2. 每次页面重建时**置换持有的行列表**：凡列表里的行 `getParent() == null` 即视为失效，清空后由 `add*Card` 重新登记；
   3. `isBoseInjected()` 的"已注入"判定必须绑定**当前树实例**（而不是"曾经注入过"），否则短路逻辑会一直骗过重建。
+
+> **🔧 校正与根因下钻（2026-10-06 20:05，继任 Qoder 逐行实测 `HookModule.java` 7894 行；上面三步的方向不变，但两处细节不可用）**
+>
+> **幽灵树为什么清不掉（自我强化闭环，逐行实证）**：
+> (a) `boseInjectedScreens`(2310) 虽是基于 WeakHashMap 的集合，但我们**强**引用着 `boseCncPreference`/`boseExtraCategory`/`boseEqSliders`/`boseButtonDropdowns`/`boseModeSlotSliders`，行 →`getParent()`→ 祖先链把已销毁页面的 screen 一直吊活，弱引用永不失效；
+> (b) `boseLiveScreen()`(2054) 的存活判据只有 `getPreferenceCount>0`，**不看它属于哪个 resumed Activity**，于是把死 screen 当活的交出去；
+> (c) `isBoseInjected()`(2030) 在这棵死树上查到 `BOSE_CNC_KEY` 即返回 true ⇒ `scheduleBoseInjection` 在 2000 行 `return`，**重建根本不跑**；
+> (d) 2.0.26 的 down→up 边直调 `installBoseIntoLiveScreen()`（绕过该 guard，所以仍打回 `ok=true`），但 `pickLiveAnchor()`(2096) 只是在两个**旧** anchor 字段间二选一、无任何存活判据 ⇒ 2152 行在幽灵 parent 里 `findPreferenceRecursive(BOSE_CNC_KEY)!=null` 直接 `return true`。
+> ⇒ 这就是 `on_link_up ok=true` + `inject.verified landed=true` + `sections.visibility rows=14 touched=27` 三者齐飞而界面毫无变化的完整解释。行的 `clear()` 只发生在各自动态建好处（6127/6143/6161），而这条路径在短路下永不执行 ⇒ **`rows=14` 恒定不变正是"列表从未换代"的指纹**。
+>
+> **对三步的更正**：
+> ①第 1 步点名的 `findPreferenceByKeyRecursive` 返回 **boolean**（5954；4626 行注释自己写明"answers with a boolean, not a node"），取不到行对象。按 key 现场解析请改用 **`PrefRef.findPreferenceRecursive(screen, key)`**（返回 Object）或本地 **`findPreference(group, key)`**(6722)。
+> ②第 2 步的 `getParent()==null` **对本例不成立**：脱离窗口但仍存活的 Preference 其 parent 指针依然在；且 §0.5.55 已证 `isAttachedToWindow()` 对 preference view 不可靠（详情页建行时恒为 false）。可用的存活判据是「anchor 所属 screen 是否等于**当前 resumed Activity** 的 screen」——现成范式在 `screenForAnchor()`(2262)：`anchor.getContext()`→Activity→fragment manager→`readFragmentList`(2287)→`PrefRef.getPreferenceScreen(fragment)`；注意它当前**只返回已含我们 key 的 screen**，需要一个「返回当前 live screen（没有我们的行也返回）」的变体，否则第 3 步的重建判定仍会落空。
+> ③第 3 步落点具体化为：`isBoseInjected()` 与 `installBoseIntoLiveScreen()` 的幂等检查(2152)都必须以 **(b) 修正后的 live screen** 为查询根，二者共用同一个解析函数，避免又一处「两套树」。
+>
+> **补充时间戳警告**：本文档与 `opslog/` 里 2026-10-06 晚些 Entry 的小时标签比本机/设备真实时钟**快约 19 分钟**（自称"20:10"的文件实测 mtime 19:51；本机 `date` 与 `adb shell date` 一致）。日志排序以追加位置为准，引用旧 Entry 时间时须换算，**不要据此对齐 logcat 时间轴**。
 - **可判定验收标准**：`evt=bose.sections.visibility` 必须同时满足 `rows>0 && touched>0` **且界面真的变化**；若 `rows=0` ⇒ 重建后没再登记，去查 `add*Card` 的登记时机；若 `touched>0` 但界面不变 ⇒ 解析到的仍不是当前页对象。
 - **临时规避**：退出该页重进，或杀 Melody 重开。
 
@@ -167,10 +183,12 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 
 > 实时状态以 `opslog/STATUS.md` 为准。**2.0.20（`14544a8`）已由用户 push、CI success（2026-10-06 13:10 api 核实），当前唯一未结=设备仍装 2.0.19，待装机验证断开意图锁存机制（见 §1.11 与下方第 3 条清单）。**
+>
+> ⚠️ **上面这句已过期**（2026-10-06 20:05 继任 Qoder 实测校正）：设备实装 **2.0.28/228**（`su 0 dumpsys package com.melody.melodylink` → `versionCode=228 versionName=2.0.28`，与 HEAD `5f479bc` 一致）；断开意图锁存链已由用户复验结案——**假离线在 2.0.27 结案**（用户原话「这条修好了」），其根因正是 2.0.20 加的第二条锁存路径「探测瞬时 down 即用户断开」，2.0.27（`e763a42`）已删除该调用。当前唯一开口缺陷见本节开头 §8.0（任务 #12 → 2.0.29）。
 
 1. **✅ 已结案（2.0.6，用户复验通过）：模型黑屏**。真凶=v4 资产 glb 的 BIN chunk 头损坏（make_vfxms4.py 偏移读错），不是照片可见性（红鲱鱼，§1.10 已纠正）。模型黑屏先字节级校验 .vfxms（10 个大端 u32、BIN type=0x4E4942），别动视图可见性。
 2. **✅ 已结案（2026-10-06，用户确认）：bug1 ANC 三态图标不即时刷新**。详情页=2.0.11 点击时乐观镜像；通用设置=2.0.12 捕获 `OneSpaceNoisePreference$b.onChanged` 重绘。**关键教训：两页是两套宿主类、两条绘制路径，显示用 modeType(1/5/2)、写入用协议索引(0/1/2)，映射交回宿主 `l9/b.getCurrentNoiseMode()`，不能猜。**
-3. **🔴 最高优先（2.0.20 待验证）：断开状态显示链（2.0.13~2.0.20 系列）**。用户需求：点"断开连接"后内容消失+显示未连接，且重启 Melody 保持。已实锤的事实链（细节 opslog/2026-10.md 2.0.13~2.0.19 各 Entry）：
+3. **✅ 已结案（2.0.27，用户复验）→ 原文：🔴 最高优先（2.0.20 待验证）：断开状态显示链（2.0.13~2.0.20 系列）**。用户需求：点"断开连接"后内容消失+显示未连接，且重启 Melody 保持。已实锤的事实链（细节 opslog/2026-10.md 2.0.13~2.0.19 各 Entry）：
    - Melody 的"断开连接"只掉一次 profile，**TWS 耳机 ~12s 自动回连，系统蓝牙始终显示已连接**（dumpsys `active_a2dp_devices`）——任何蓝牙探测都无法区分；
    - 蓝牙探测正源只有 **A2DP/HEADSET profile proxy 的按设备列表**（GATT_SERVER、隐藏 `BluetoothDevice.getConnectionState()` 均被日志证伪，勿再启用）；
    - 解法=**应用层锁存断开意图**：A2DP/HFP `CONNECTION_STATE_CHANGED` 广播 DISCONNECTED → 持久化标志 `.melodylink_bose_user_disconnect`（跨重启）；CONNECTED 广播**仅在 ≥60s 后**清除（12s 自动回连不洗白）；`isBoseUiConnectedCached()`=探测&&未锁存，是全部 9 个消费点的唯一连接语义源；写路径的 `isSonyConnected()` 未动（bug1 依赖）。
