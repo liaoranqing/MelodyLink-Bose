@@ -163,6 +163,8 @@ public final class HookModule extends XposedModule {
     /** Bounded diagnostics so a silent mechanism cannot pass as a working one (2.0.30). */
     private volatile int resumeLogCount;
     private volatile int screenProbeCount;
+    /** How many times the observer registration has been attempted in this process. */
+    private volatile int lifecycleAttempts;
     /**
      * Screen resolution is a full reflective walk of the fragment and preference trees, and
      * 2.0.30 called it from four places inside one injection tick - the ANR trace showed the
