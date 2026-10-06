@@ -5495,6 +5495,20 @@ public final class HookModule extends XposedModule {
                 log(Log.INFO, TAG, event("Bose UI link " + (next ? "up" : "down")
                         + " reason=" + (Boolean.TRUE.equals(latched) ? "user_disconnected_latch"
                                 : (next ? "link_up" : "link_down")) + " probe=" + lastProbeDetail));
+                if (next) {
+                    // 2.0.26: a hot reconnect never rebuilds the host's preference tree, so no
+                    // detailPreferenceAdd / captureNoiseEffectRow fires and our sections stay
+                    // absent until the page is re-entered (video 18:52: 未连接全灰 → 开蓝牙连上,
+                    // 三态/空间音频 回来了, Bose音效/按键/模式槽/电源 整片没有). Re-inject on
+                    // the down→up edge; the install path is idempotent.
+                    mainHandler.post(() -> {
+                        try {
+                            boolean done = installBoseIntoLiveScreen();
+                            MLog.event("bose.inject.on_link_up", "ok", done);
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
             }
             lastUiConnected = next;
             uiStateCheckedAt = now;
