@@ -5374,6 +5374,38 @@ public final class HookModule extends XposedModule {
         lastTrustedLinkUp = up;
     }
 
+    private boolean lastAdapterWasOnForLatch = true;
+
+    /**
+     * Turning Bluetooth back on is a NEW user intent — the automatic TWS bounce can never
+     * look like this, because it happens while the adapter stays ON.
+     *
+     * <p>Without this the latch can only be cleared by a CONNECTED broadcast that arrives
+     * >=60s after the drop. Reconnect inside that window is rejected, and after it the
+     * device is already connected so no further CONNECTED broadcast ever comes: the latch
+     * sticks forever. logs/0597 14:22:41 shows exactly that — bose.cnc.apply with
+     * probe=a2dp=1 headset=1 (really connected) yet enabled=false, and no
+     * "Bose reconnect accepted" line anywhere in the capture.
+     */
+    private void clearLatchOnAdapterRecovery() {
+        boolean on = isBoseAdapterOn();
+        if (!on) {
+            lastAdapterWasOnForLatch = false;
+            return;
+        }
+        if (lastAdapterWasOnForLatch) return;
+        lastAdapterWasOnForLatch = true;
+        try {
+            Object[] value = MelodySharedStateStore.readBoseUserDisconnect(
+                    boseUserDisconnectFile(), null);
+            if (value != null && Boolean.TRUE.equals(value[0])) {
+                log(Log.INFO, TAG, event("Bose reconnect accepted: adapter turned on (latch clear)"));
+                latchBoseUserDisconnect(false);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void latchBoseUserDisconnect(boolean value) {
         try {
             String address = targetAddress != null ? targetAddress
@@ -6802,6 +6834,8 @@ public final class HookModule extends XposedModule {
             registerBoseLinkBroadcasts();
             // 2.0.20: latch on a trusted probe drop too, independent of broadcasts.
             latchBoseUserDisconnectOnProbeDown();
+            // 2.0.23: and let the user out of the latch when they turn Bluetooth back on.
+            clearLatchOnAdapterRecovery();
             // 2.0.15: on a disconnect→connect transition, pull battery right away so
             // the 通用设置 header does not wait for the next page-driven BMAP session.
             long now = android.os.SystemClock.elapsedRealtime();
