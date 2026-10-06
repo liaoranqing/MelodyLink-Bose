@@ -6896,8 +6896,12 @@ public final class HookModule extends XposedModule {
             // 2.0.20: register the disconnect latch lazily — hook setup can predate
             // Application.attach, so retry from this 250ms tick until it lands.
             registerBoseLinkBroadcasts();
-            // 2.0.20: latch on a trusted probe drop too, independent of broadcasts.
-            latchBoseUserDisconnectOnProbeDown();
+            // 2.0.27: the probe-drop latch is removed. A transient trusted "down" is not user
+            // intent, and it re-latched a headset that was live: logs/0600 shows
+            // bose.inject.on_link_up ok=true (so the latch had cleared) followed by a fresh
+            // latch file while the buds were connected — both pages then read 未连接 forever.
+            // The DISCONNECTED broadcast path stays, because that drop IS what Melody's
+            // 断开连接 causes, and the receiver registration is reliable since 2.0.20.
             // 2.0.24: and let the user out of the latch when the classic link is rebuilt after
             // the profile services went away (switching Bluetooth off). The adapter-state
             // version in 2.0.23 never fires here: ColorOS reports BLE_ON with A2DP live.
