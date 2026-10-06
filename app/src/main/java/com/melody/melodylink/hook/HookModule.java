@@ -151,6 +151,18 @@ public final class HookModule extends XposedModule {
      * page the host already tore down.
      */
     private volatile Activity liveHostActivity;
+    /**
+     * The newest PreferenceScreen the host itself reported building. {@code G9.Q.t()} is
+     * {@code setPreferencesFromResource}, so its return is the authoritative "this page's tree
+     * is brand new" event — independent of whether the FragmentManager walk works on a given
+     * ColorOS build (2.0.30).
+     */
+    private volatile Object liveBuiltScreen;
+    /** The fragment that owns {@link #liveBuiltScreen}; used to prove it is still on screen. */
+    private volatile Object liveBuiltFragment;
+    /** Bounded diagnostics so a silent mechanism cannot pass as a working one (2.0.30). */
+    private volatile int resumeLogCount;
+    private volatile int screenProbeCount;
     private volatile Object lastAudioPreferenceAnchor;
     /** The Ba/z noiseReductionModeVO most recently passed to onEarphoneDataChanged (:fg). */
     private volatile Object lastNoiseReductionVo;
@@ -256,19 +268,20 @@ public final class HookModule extends XposedModule {
             for (long delay : new long[]{300L, 1000L, 3000L, 8000L, 20000L}) {
                 mainHandler.postDelayed(this::initializeSonyConfig, delay);
             }
+            // 2.0.30: this must NOT be gated on isPrimaryProcess(). 2.0.29 shipped it inside
+            // that gate and the whole live-tree mechanism was inert: the preference UI runs in a
+            // second process, "com.oplus.melody:fg" (2026-10-06 20:32 logcat: bose.retry.tick
+            // and every inject event come from pid 21922 = :fg, while the only
+            // "lifecycle observer unavailable" line comes from pid 20626 = the primary
+            // process). The primary process hosts no Activities at all, so a resumed-Activity
+            // feed registered there can never report the page the user is looking at.
+            registerAppVisibilityLifecycleCallbacks();
+            for (long delay : new long[]{300L, 1000L, 3000L, 8000L, 20000L}) {
+                mainHandler.postDelayed(this::registerAppVisibilityLifecycleCallbacks, delay);
+            }
             if (isPrimaryProcess()) {
                 clearSharedSonyCommand();
                 clearSharedSonyBatteryCommand();
-                registerAppVisibilityLifecycleCallbacks();
-                // 2.0.29 depends on those callbacks to know which preference tree is live, so
-                // the 2.0.19 failure mode (setup runs before Application.attach, sees a null
-                // application, returns silently, and is never retried) would now be invisible
-                // corruption rather than a missing feature. Registration is idempotent.
-                for (long delay : new long[]{300L, 1000L, 3000L, 8000L, 20000L}) {
-                    mainHandler.postDelayed(() -> {
-                        if (isPrimaryProcess()) registerAppVisibilityLifecycleCallbacks();
-                    }, delay);
-                }
             }
             ClassLoader loader = param.getClassLoader();
             melodyClassLoader = loader;
@@ -1320,6 +1333,17 @@ public final class HookModule extends XposedModule {
                                             "keys", describeChildKeys(screen, 0));
                                 }
                                 if (screen != null) {
+                                    // 2.0.30: the host just built this page's tree in front of
+                                    // us. Record it as the live tree and drop every row cached
+                                    // from the previous one, so visibility and gating can no
+                                    // longer be applied to the destroyed page's objects.
+                                    if (n > 0) {
+                                        liveBuiltScreen = screen;
+                                        liveBuiltFragment = frag;
+                                        MLog.event("bose.tree.build", "step", label,
+                                                "children", n,
+                                                "class", frag.getClass().getSimpleName());
+                                    }
                                     // 0.5.62: t() reports children=1, so at that moment the
                                     // tree holds only its root; the real sections are added by
                                     // the host afterwards through settingListChanged. Walking
@@ -1854,39 +1878,78 @@ public final class HookModule extends XposedModule {
     private java.util.List<Object> liveBoseScreens() {
         java.util.List<Object> ranked = new java.util.ArrayList<>();
         java.util.List<Object> others = new java.util.ArrayList<>();
+        String reason = "ok";
+        int fragments = -1;
         try {
+            // The tree the host just built wins outright: it is the page being assembled in
+            // front of the user, and it does not depend on reflecting into the FragmentManager.
+            Object built = liveBuiltScreen;
+            if (built != null && PrefRef.getPreferenceCount(built) > 0
+                    && builtFragmentStillShown()) ranked.add(built);
             Activity activity = liveHostActivity;
-            if (activity == null || activity.isFinishing()) return ranked;
-            Object manager = null;
-            for (String name : new String[]{"getSupportFragmentManager", "getFragmentManager"}) {
-                manager = PrefRef.invokeNoArg(activity, name);
-                if (manager != null) break;
-            }
-            if (manager == null) return ranked;
-            java.util.List<?> fragments = readFragmentList(manager);
-            if (fragments == null) return ranked;
-            for (Object fragment : fragments) {
-                if (fragment == null) continue;
-                Object screen = PrefRef.getPreferenceScreen(fragment);
-                if (screen == null) continue;
-                if (PrefRef.getPreferenceCount(screen) <= 0) continue;
-                // Prefer a screen we can actually attribute to our pages: one that already
-                // carries our keys, or one carrying the host noise row we anchor on. A random
-                // Melody page's screen must never be able to say "already injected".
-                if (PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
-                        || PrefRef.findPreferenceRecursive(screen, BOSE_EXTRA_CATEGORY_KEY) != null
-                        || PrefRef.findPreferenceRecursive(screen, "NoiseReductionItem") != null
-                        || PrefRef.findPreferenceRecursive(screen, "OneSpaceNoisePreference") != null) {
-                    ranked.add(screen);
+            if (activity == null) {
+                reason = "no_resumed_activity";
+            } else if (activity.isFinishing()) {
+                reason = "activity_finishing";
+            } else {
+                Object manager = null;
+                for (String name : new String[]{"getSupportFragmentManager", "getFragmentManager"}) {
+                    manager = PrefRef.invokeNoArg(activity, name);
+                    if (manager != null) break;
+                }
+                if (manager == null) {
+                    reason = "no_fragment_manager";
                 } else {
-                    others.add(screen);
+                    java.util.List<?> found = readFragmentList(manager);
+                    if (found == null) {
+                        reason = "no_fragment_list_field";
+                    } else {
+                        fragments = found.size();
+                        for (Object fragment : found) {
+                            if (fragment == null) continue;
+                            Object screen = PrefRef.getPreferenceScreen(fragment);
+                            if (screen == null) continue;
+                            if (PrefRef.getPreferenceCount(screen) <= 0) continue;
+                            // Prefer a screen we can actually attribute to our pages: one that
+                            // already carries our keys, or one carrying the host noise row we
+                            // anchor on. A random Melody page's screen must never be able to
+                            // say "already injected".
+                            if (PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
+                                    || PrefRef.findPreferenceRecursive(screen, BOSE_EXTRA_CATEGORY_KEY) != null
+                                    || PrefRef.findPreferenceRecursive(screen, "NoiseReductionItem") != null
+                                    || PrefRef.findPreferenceRecursive(screen, "OneSpaceNoisePreference") != null) {
+                                ranked.add(screen);
+                            } else {
+                                others.add(screen);
+                            }
+                        }
+                        if (ranked.isEmpty() && others.isEmpty()) {
+                            reason = fragments == 0 ? "no_fragments" : "fragments_without_screen";
+                        }
+                    }
                 }
             }
             ranked.addAll(others);
         } catch (Throwable t) {
-            // Whatever was classified so far is still better than nothing.
+            reason = "error";
+        }
+        if (ranked.isEmpty() && screenProbeCount++ < 10) {
+            MLog.event("bose.live.screens", "n", screenProbeCount, "reason", reason,
+                    "fragments", fragments,
+                    "activity", liveHostActivity == null ? "null"
+                            : liveHostActivity.getClass().getSimpleName(),
+                    "built", liveBuiltScreen == null ? "null" : "set");
         }
         return ranked;
+    }
+
+    /** The fragment that reported the build must still belong to the Activity in front. */
+    private boolean builtFragmentStillShown() {
+        Object frag = liveBuiltFragment;
+        if (frag == null) return false;
+        Activity front = liveHostActivity;
+        if (front == null) return true;
+        return PrefRef.invokeNoArg(frag, "getActivity") == front;
     }
 
     /**
@@ -1969,6 +2032,11 @@ public final class HookModule extends XposedModule {
     private void invalidateBoseTreeFor(Activity dead) {
         if (dead == null) return;
         int dropped = 0;
+        if (belongsTo(liveBuiltScreen, dead)) {
+            liveBuiltScreen = null;
+            liveBuiltFragment = null;
+            dropped++;
+        }
         dropped += dropDeadRow(boseCncPreference, dead) ? 1 : 0;
         dropped += dropDeadRow(boseCncOneSpacePreference, dead) ? 1 : 0;
         dropped += dropDeadRow(boseExtraCategory, dead) ? 1 : 0;
@@ -6046,7 +6114,8 @@ public final class HookModule extends XposedModule {
         if (activityLifecycleRegistered) return;
         Application application = currentApplication();
         if (application == null) {
-            log(Log.WARN, TAG, event("Melody activity lifecycle observer unavailable: application is null"));
+            log(Log.WARN, TAG, event("Melody activity lifecycle observer unavailable: "
+                    + "application is null process=" + safeProcessName()));
             return;
         }
         synchronized (this) {
@@ -6070,6 +6139,13 @@ public final class HookModule extends XposedModule {
                     // reported rows=14 touched=27 while the screen did not change (2.0.28
                     // revalidation, logs/0600). Reconcile against the tree this Activity
                     // actually shows now; the call is idempotent and cheap.
+                    // 2.0.30: log the first few resumes. 2.0.29 could not tell "the observer
+                    // never registered" apart from "it fired and found nothing".
+                    if (resumeLogCount++ < 6) {
+                        MLog.event("bose.lifecycle.resume", "n", resumeLogCount,
+                                "activity", activity.getClass().getSimpleName(),
+                                "process", safeProcessName());
+                    }
                     mainHandler.post(HookModule.this::reconcileBoseTreeWithLiveScreen);
                 }
 
@@ -6098,7 +6174,18 @@ public final class HookModule extends XposedModule {
                 }
             });
             activityLifecycleRegistered = true;
-            log(Log.INFO, TAG, event("registered Melody app visibility lifecycle observer"));
+            log(Log.INFO, TAG, event("registered Melody app visibility lifecycle observer"
+                    + " process=" + safeProcessName()));
+        }
+    }
+
+    /** Process name for diagnostics; never throws, since getProcessName is a hidden-ish API. */
+    private static String safeProcessName() {
+        try {
+            String name = Application.getProcessName();
+            return name == null ? "unknown" : name;
+        } catch (Throwable t) {
+            return "unknown";
         }
     }
 
