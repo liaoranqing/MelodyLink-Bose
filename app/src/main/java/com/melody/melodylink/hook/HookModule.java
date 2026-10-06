@@ -1922,6 +1922,21 @@ public final class HookModule extends XposedModule {
     }
 
     private java.util.List<Object> computeLiveBoseScreens() {
+        final long walkStartedAt = android.os.SystemClock.elapsedRealtime();
+        java.util.List<Object> result = doComputeLiveBoseScreens();
+        // Cost has to be visible: three releases in a row froze the page inside this walk and
+        // the logs only said "it returned nothing".
+        long ms = android.os.SystemClock.elapsedRealtime() - walkStartedAt;
+        if (ms >= 5 && screenProbeCount < 30) {
+            screenProbeCount++;
+            MLog.event("bose.live.cost", "ms", ms, "found", result.size(),
+                    "activity", liveHostActivity == null ? "null"
+                            : liveHostActivity.getClass().getSimpleName());
+        }
+        return result;
+    }
+
+    private java.util.List<Object> doComputeLiveBoseScreens() {
         java.util.List<Object> ranked = new java.util.ArrayList<>();
         java.util.List<Object> others = new java.util.ArrayList<>();
         String reason = "ok";

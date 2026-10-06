@@ -347,14 +347,28 @@ final class PrefRef {
      * Therefore the found object's own key is verified before it is accepted.
      */
     static Object findPreferenceRecursive(Object container, String key) {
-        if (container == null || key == null) return null;
+        return findPreferenceRecursive(container, key, 0);
+    }
+
+    /**
+     * Depth cap for the recursive walk. Real preference trees here are three or four levels
+     * deep, so 16 is generous - but the walk had no bound at all, and the 2.0.30/2.0.31/2.0.32
+     * ANR traces all show the main thread spinning inside it (54.8s of main-thread CPU in one
+     * sample). A cycle is reachable: we insert our own cards into groups the host also writes
+     * to, and one bad parent pointer turns this into an infinite loop. Caching reflection could
+     * not fix that, which is why three versions in a row still froze the page.
+     */
+    private static final int MAX_WALK_DEPTH = 16;
+
+    private static Object findPreferenceRecursive(Object container, String key, int depth) {
+        if (container == null || key == null || depth > MAX_WALK_DEPTH) return null;
         Object direct = findPreference(container, key);
         if (direct != null && keyMatches(direct, key)) return direct;
         int count = getPreferenceCount(container);
         for (int i = 0; i < count; i++) {
             Object child = getPreference(container, i);
             if (child == null) continue;
-            Object hit = findPreferenceRecursive(child, key);
+            Object hit = findPreferenceRecursive(child, key, depth + 1);
             if (hit != null) return hit;
         }
         return null;
@@ -586,7 +600,6 @@ final class PrefRef {
         for (Field f : childrenFields(container.getClass())) {
             java.util.List<?> list = null;
             try {
-                f.setAccessible(true);
                 Object v = f.get(container);
                 if (v instanceof java.util.List) list = (java.util.List<?>) v;
             } catch (Throwable ignored) {
@@ -598,13 +611,28 @@ final class PrefRef {
             Object first = list.get(0);
             if (first == null) continue;
             // A Preference child exposes getKey; anything else is some other list.
-            try {
-                first.getClass().getMethod("getKey");
-                return list;
-            } catch (Throwable ignored) {
-            }
+            if (exposesGetKey(first.getClass())) return list;
         }
         return null;
+    }
+
+    /**
+     * Whether a class exposes {@code getKey()}, memoised per class. The 2.0.32 ANR trace caught
+     * the main thread inside this helper: {@code getPreferenceCount} resolves the children list
+     * for every node of every walk, so a per-call {@code setAccessible} plus a per-call
+     * {@code getMethod} added up to seconds on the detail page's 49-row tree.
+     */
+    private static boolean exposesGetKey(Class<?> type) {
+        Boolean known = GETKEY_CACHE.get(type.getName());
+        if (known != null) return known;
+        boolean verdict;
+        try {
+            verdict = type.getMethod("getKey") != null;
+        } catch (Throwable t) {
+            verdict = false;
+        }
+        GETKEY_CACHE.put(type.getName(), verdict);
+        return verdict;
     }
 
     /**
@@ -625,7 +653,13 @@ final class PrefRef {
             for (Field f : cls.getDeclaredFields()) {
                 if (!java.util.List.class.isAssignableFrom(f.getType())) continue;
                 if (f.getType() == java.util.LinkedList.class) continue;
-                out.add(f);
+                // Opened once here rather than on every read: setAccessible is not free and
+                // this list is consulted per node of every walk.
+                try {
+                    f.setAccessible(true);
+                    out.add(f);
+                } catch (Throwable ignored) {
+                }
             }
         }
         CHILDREN_FIELDS_CACHE.put(startCls.getName(), out);
@@ -831,6 +865,8 @@ final class PrefRef {
     private static final Map<String, Method> NO_ARG_INT_CACHE = new ConcurrentHashMap<>();
     private static final java.util.Set<String> NO_ARG_INT_MISS =
             java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /** "This class exposes getKey()" verdict per class (2.0.33). */
+    private static final Map<String, Boolean> GETKEY_CACHE = new ConcurrentHashMap<>();
     /** androidx.preference.Preference per loader, so the name lookup runs once. */
     private static final Map<String, Class<?>> PREFERENCE_BASE_CACHE = new ConcurrentHashMap<>();
     /** isPreferenceType verdict per (loader, type name). */
