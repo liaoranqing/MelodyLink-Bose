@@ -486,6 +486,14 @@ final class PrefRef {
 
     /** One-int-parameter, reference-returning accessor: the renamed {@code getPreference}. */
     private static Method findIndexedAccessor(ClassLoader cl, Class<?> type) {
+        // 2.0.31: memoised, including "this class has none". This scan walks every declared
+        // method of the whole hierarchy and calls isPreferenceType (a Class.forName) on each,
+        // and it used to run again for every single child index of every walk.
+        String key = (cl == null ? "boot" : Integer.toHexString(System.identityHashCode(cl)))
+                + '#' + type.getName();
+        Method hit = INDEXED_ACCESSOR_CACHE.get(key);
+        if (hit != null) return hit;
+        if (INDEXED_ACCESSOR_MISS.contains(key)) return null;
         for (Class<?> cls = type; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
             for (Method m : cls.getDeclaredMethods()) {
                 if (m.getParameterCount() != 1) continue;
@@ -498,11 +506,13 @@ final class PrefRef {
                 if (!isPreferenceType(cl, ret)) continue;
                 try {
                     m.setAccessible(true);
+                    INDEXED_ACCESSOR_CACHE.put(key, m);
                     return m;
                 } catch (Throwable ignored) {
                 }
             }
         }
+        INDEXED_ACCESSOR_MISS.add(key);
         return null;
     }
 
@@ -517,13 +527,38 @@ final class PrefRef {
      */
     private static boolean isPreferenceType(ClassLoader cl, Class<?> type) {
         if (type == null) return false;
-        try {
-            Class<?> base = Class.forName("androidx.preference.Preference", false, cl);
-            if (base.isAssignableFrom(type)) return true;
-        } catch (Throwable ignored) {
+        String loaderKey = cl == null ? "boot" : Integer.toHexString(System.identityHashCode(cl));
+        String key = loaderKey + '#' + type.getName();
+        Boolean known = PREFERENCE_TYPE_CACHE.get(key);
+        if (known != null) return known;
+        Class<?> base = preferenceBase(cl, loaderKey);
+        // Object.class means the androidx class could not be resolved for this loader, in which
+        // case only the package-name fallback may claim a match.
+        boolean verdict = (base != Object.class && base.isAssignableFrom(type))
+                || type.getName().startsWith("com.oplus.")
+                || type.getName().startsWith("com.coui.");
+        PREFERENCE_TYPE_CACHE.put(key, verdict);
+        return verdict;
+    }
+
+    /**
+     * {@code androidx.preference.Preference} for this loader, resolved once; {@code Object.class}
+     * stands for "not available". The old code ran {@code Class.forName} inside the candidate
+     * loop, so a failed match cost a loader probe per method per class per child index.
+     */
+    private static Class<?> preferenceBase(ClassLoader cl, String loaderKey) {
+        Class<?> cached = PREFERENCE_BASE_CACHE.get(loaderKey);
+        if (cached != null) return cached;
+        Class<?> base = Object.class;
+        if (cl != null) {
+            try {
+                Class<?> found = Class.forName("androidx.preference.Preference", false, cl);
+                if (found != null) base = found;
+            } catch (Throwable ignored) {
+            }
         }
-        String name = type.getName();
-        return name.startsWith("com.oplus.") || name.startsWith("com.coui.");
+        PREFERENCE_BASE_CACHE.put(loaderKey, base);
+        return base;
     }
 
     /**
@@ -746,6 +781,24 @@ final class PrefRef {
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private static final Map<String, Method> METHOD_CACHE = new ConcurrentHashMap<>();
+    /**
+     * Negative results. Without this every failed lookup re-walked the whole hierarchy and
+     * threw a fresh {@link NoSuchMethodException} per level - and building an exception fills
+     * in a stack trace, which is the single most expensive thing a walk can do. The 2.0.30 ANR
+     * trace sat exactly there: PrefRef.findMethod -> Class.getDeclaredMethod ->
+     * fillInStackTrace, called once per child node from isBoseInjected().
+     */
+    private static final java.util.Set<String> METHOD_MISS =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+
+    /** Resolved indexed accessor per (loader, class), plus its negative set. */
+    private static final Map<String, Method> INDEXED_ACCESSOR_CACHE = new ConcurrentHashMap<>();
+    private static final java.util.Set<String> INDEXED_ACCESSOR_MISS =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /** androidx.preference.Preference per loader, so the name lookup runs once. */
+    private static final Map<String, Class<?>> PREFERENCE_BASE_CACHE = new ConcurrentHashMap<>();
+    /** isPreferenceType verdict per (loader, type name). */
+    private static final Map<String, Boolean> PREFERENCE_TYPE_CACHE = new ConcurrentHashMap<>();
 
     static void invokeSetter(Object target, String name, Class<?> paramType, Object value) {
         if (target == null) return;
@@ -815,6 +868,7 @@ final class PrefRef {
         String cacheKey = startCls.getName() + '#' + name + '#' + paramTypes.length;
         Method cached = METHOD_CACHE.get(cacheKey);
         if (cached != null) return cached;
+        if (METHOD_MISS.contains(cacheKey)) return null;
         for (Class<?> cls = startCls; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
             try {
                 Method m = cls.getDeclaredMethod(name, paramTypes);
@@ -823,6 +877,7 @@ final class PrefRef {
             } catch (NoSuchMethodException ignored) {
             }
         }
+        METHOD_MISS.add(cacheKey);
         return null;
     }
 

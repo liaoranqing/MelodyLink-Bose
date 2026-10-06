@@ -163,6 +163,17 @@ public final class HookModule extends XposedModule {
     /** Bounded diagnostics so a silent mechanism cannot pass as a working one (2.0.30). */
     private volatile int resumeLogCount;
     private volatile int screenProbeCount;
+    /**
+     * Screen resolution is a full reflective walk of the fragment and preference trees, and
+     * 2.0.30 called it from four places inside one injection tick - the ANR trace showed the
+     * main thread stuck in PrefRef under isBoseInjected(). The result is therefore memoised for
+     * {@link #LIVE_SCREENS_TTL_MS} and dropped whenever the tree generation moves.
+     */
+    private static final long LIVE_SCREENS_TTL_MS = 250L;
+    private volatile java.util.List<Object> liveScreensCache;
+    private volatile long liveScreensCacheAt;
+    private volatile int liveScreensCacheGen;
+    private volatile int liveScreensGeneration;
     private volatile Object lastAudioPreferenceAnchor;
     /** The Ba/z noiseReductionModeVO most recently passed to onEarphoneDataChanged (:fg). */
     private volatile Object lastNoiseReductionVo;
@@ -1340,9 +1351,23 @@ public final class HookModule extends XposedModule {
                                     if (n > 0) {
                                         liveBuiltScreen = screen;
                                         liveBuiltFragment = frag;
+                                        advanceLiveScreensGeneration();
                                         MLog.event("bose.tree.build", "step", label,
                                                 "children", n,
                                                 "class", frag.getClass().getSimpleName());
+                                        // 2.0.31: this is the one moment we are guaranteed to
+                                        // learn about a fresh tree, and the resume feed has not
+                                        // been delivering (2.0.30 field log: bose.tree.build
+                                        // fired twice while bose.lifecycle.resume fired zero
+                                        // times). Reconcile from here too, after the host has
+                                        // finished adding its own rows. Without a trigger the
+                                        // page stays empty whenever the earbuds were already
+                                        // connected before Melody started, because
+                                        // lastUiConnected initialises to true and no down->up
+                                        // edge ever fires.
+                                        mainHandler.postDelayed(
+                                                HookModule.this::reconcileBoseTreeWithLiveScreen,
+                                                400L);
                                     }
                                     // 0.5.62: t() reports children=1, so at that moment the
                                     // tree holds only its root; the real sections are added by
@@ -1876,6 +1901,25 @@ public final class HookModule extends XposedModule {
      * host already tore down cannot keep reporting itself as live (2.0.29).
      */
     private java.util.List<Object> liveBoseScreens() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        java.util.List<Object> cached = liveScreensCache;
+        if (cached != null && liveScreensCacheGen == liveScreensGeneration
+                && now - liveScreensCacheAt < LIVE_SCREENS_TTL_MS) {
+            return cached;
+        }
+        java.util.List<Object> computed = computeLiveBoseScreens();
+        liveScreensCache = computed;
+        liveScreensCacheAt = now;
+        liveScreensCacheGen = liveScreensGeneration;
+        return computed;
+    }
+
+    /** Invalidate the memo when the tree we would have described changed. */
+    private void advanceLiveScreensGeneration() {
+        liveScreensGeneration++;
+    }
+
+    private java.util.List<Object> computeLiveBoseScreens() {
         java.util.List<Object> ranked = new java.util.ArrayList<>();
         java.util.List<Object> others = new java.util.ArrayList<>();
         String reason = "ok";
@@ -2050,6 +2094,7 @@ public final class HookModule extends XposedModule {
      */
     private void invalidateBoseTreeFor(Activity dead) {
         if (dead == null) return;
+        advanceLiveScreensGeneration();
         int dropped = 0;
         if (belongsTo(liveBuiltScreen, dead)) {
             liveBuiltScreen = null;
@@ -6165,6 +6210,12 @@ public final class HookModule extends XposedModule {
 
     private void registerAppVisibilityLifecycleCallbacks() {
         if (activityLifecycleRegistered) return;
+        // 2.0.31: report through MLog, not the module logger. The only line this ever produced
+        // was the one emitted from inside onPackageReady's hook frame; the five retry ticks
+        // posted after it left no trace at all, which cannot be told apart from "they never
+        // ran". MLog writes straight to Log, so it survives outside a hook frame.
+        MLog.event("bose.lifecycle.register", "attempt", ++lifecycleAttempts,
+                "process", safeProcessName());
         Application application = currentApplication();
         if (application == null) {
             log(Log.WARN, TAG, event("Melody activity lifecycle observer unavailable: "
@@ -6186,6 +6237,7 @@ public final class HookModule extends XposedModule {
                 @Override
                 public void onActivityResumed(Activity activity) {
                     liveHostActivity = activity;
+                    advanceLiveScreensGeneration();
                     // 2.0.29: leaving and re-entering a page rebuilds the whole preference
                     // tree, but nothing told us — so the rows in our fields and the screens in
                     // boseInjectedScreens kept pointing at the destroyed instance. The host
