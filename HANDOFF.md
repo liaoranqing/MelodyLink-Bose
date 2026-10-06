@@ -34,6 +34,8 @@
 8. **删代码后必须验证"顺手重试/维护状态"的隐性依赖还在**：2.0.0 剥离 whitelist 分支的 `isRegisteredSonyName()` 时，顺带删掉了它作为 initializeSonyConfig 重试者的副作用，导致 onPackageReady 初始化失败后再无人重试、所有资产不可用。删任何调用点前先问"这个调用点保障了什么状态"。
 9. **剥离/批量删除用脚本时**：多行字段（匿名监听器）和注册语句（多行 hookAny）要单独处理；正则删分支容易误切内层 `}` 造成失衡；删完跑 `static_check.py` + 残留引用扫描（`bose3d/dangling_refs.py`）+ 乱码/符号检查（`bose3d/final_verify.py`）三道闸。
 10. **详情页 3D 模型黑屏 ≠ 照片可见性问题（曾误判，已纠正）**：2.0.3~2.0.5 模型黑屏的**真凶是 v4 资产的 glb BIN chunk 损坏**（make_vfxms4.py 从 bin 数据内部读 binlen、且漏拷 8 字节 BIN 头 → glTF 解析失败 → TextureView 在但不画）。我一度误判为"模型渲染依赖照片 field d 处于 VISIBLE"并据此改了 GONE/INVISIBLE/alpha，全部无效。**教训：模型黑屏先字节级校验 .vfxms 容器**（10 个大端 u32 偏移、glb 的 BIN chunk 头 type 必须 =0x4E4942、glb 切片长度必须等于头声明值），用 `python` 逐字段比对一个已知好的旧资产，再怀疑 hook/视图。视图层级可用 `adb shell uiautomator dump`（需 `MSYS_NO_PATHCONV=1` 防 git-bash 路径转换）确认 TextureView 是否在、尺寸是否正常——在且尺寸正常就说明问题在资产/加载，不在视图可见性。
+11. **蓝牙"连接"判据必须绑定具体 profile，且 Melody 的"断开"必须应用层锁存（2.0.13~2.0.20 血泪链）**：GATT_SERVER（断开后 BLE 常驻）、隐藏 `BluetoothDevice.getConnectionState()`（ACL 常驻）都把"用户已断开"误报成连接，先后被 0590/0591/0592 日志证伪；唯一可信正源 = A2DP/HEADSET profile proxy 的按设备列表（`getProfileProxy` 绑定，新绑 proxy 前 4s 列表为空需信任窗）。但 TWS 断开后 ~12s 自动回连，**任何探测最终都会说"已连接"**——Melody 的"断开连接"是应用层动作，必须应用层锁存（`.melodylink_bose_user_disconnect` 持久化文件），CONNECTED 广播 ≥60s 才清除。proxy 刚绑定时 `getConnectedDevices` 也可能短暂为空，判定要 fail-open。
+12. **"静默 return"必须留痕（2.0.19 教训）**：环境性失败（currentApplication()==null、广播注册失败等）只 return 不打日志，整个特性静默失效且装机日志"看起来一切正常"，排查耗一轮装机。一次性诊断日志 + 失败可重试 + 失败必留痕，三者缺一不可。另外：泛型/类型类编译错误 static_check 抓不到（只查括号与 null 比较），改泛型签名后 CI 是唯一闸。
 
 ---
 
@@ -135,20 +137,24 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 ---
 
-## 8. 当前待办（按优先级，2026-10-05 22:30）
+## 8. 当前待办（按优先级，2026-10-06 12:40 由 ZCode 更新）
 
-> 实时状态以 `opslog/STATUS.md` 为准。**2.0.6（`757e793`）修复了 2.0.3~2.0.5 模型黑屏的真凶（v4 资产 BIN chunk 损坏）**，待 push+CI+复验。
+> 实时状态以 `opslog/STATUS.md` 为准。**2.0.20（`14544a8`，待用户 push）是当前唯一待装机验证版本**：断开意图锁存机制（见 §1.11）。
 
-1. **✅ 已结案（2.0.6，用户复验通过）：模型黑屏**。以下为当时的取证要点，保留以免走回头路：
-   - 真凶（已字节级实锤）：v4 资产 glb 的 BIN chunk 头损坏（make_vfxms4.py 偏移读错），glTF 解析失败 → TextureView 在但黑屏。2.0.6 已修（BIN type=0x4E4942、切片长度匹配、13239210 字节）。
-   - 之前"模型依赖照片 d VISIBLE"的判断是**错的**（红鲱鱼），见 §1.10 的纠正。2.0.5 的照片方案（d 保持 VISIBLE + alpha 钳 0）本身没被证明有害，随 2.0.6 一起验证：期望=白色放大模型 + 无照片。
-   - 若 2.0.6 模型仍黑：用 `uiautomator dump` 确认 TextureView 尺寸正常后，重点查 loadSceneFromBuffer（可临时加 hook 打 ByteBuffer 头+异常），别再动照片可见性。
-   - 若 2.0.6 模型正常但照片仍闪现：照片方案问题，单独处理（回退到 2.0.1 装 PNG+原生 crossfade 兜底）。
-2. **✅ 已结案（2026-10-06，用户确认）：bug1 ANC 三态图标不即时刷新**。详情页=2.0.11 点击时乐观镜像；通用设置=2.0.12（`ff50c2f`）捕获 `OneSpaceNoisePreference$b.onChanged` 重绘，并在主进程写入拦截时立刻 `writeSharedBoseState()`；日志 14 次 `bose.anc.onespace.replayed`、零 skip/fail。**关键教训：通用设置与耳机设置是两套宿主类、两条绘制路径，且显示用 modeType(1/5/2)、写入/镜像用协议索引(0/1/2)——映射必须交回宿主 `l9/b.getCurrentNoiseMode()`，不能猜。** 以下原始取证保留：机制已实锤（logs/0587）：点击只触发 `NoiseReductionItem$a.c`，之后**无 getNoiseReductionModeIndex 重读、无 onEarphoneDataChanged**；重进才重读 getter。状态写入/持久化均正确。2.0.7 的 `Preference.notifyChanged()` 无效（点击后仍无重读）。**2.0.8（`b9d39e1`，已推未装机）= 诊断版**：打 `bose.anc.refresh`(两 row 是否 null)/`refresh_done`(notifyChanged 成功)/`refresh_fail`。下一任：装机 2.0.8→点一次 ANC→读这三条：row=null 则修 `captureNoiseEffectRow` 的进程/页面捕获；refresh_done 但图标不刷新则 rebind 非图标路径，改对活着的 NoiseReductionItem 调 `onEarphoneDataChanged(LBa/z;)`（smali 实证签名；VO 实例可从 hook `noiseReductionModeVO`=Ba.z.getCurrentNoiseReductionModeIndex 的 getThisObject 缓存，注意该 getter 可能 0 触发需另找来源）。详见 `opslog/STATUS.md`「下一任的第一个动作」。
-3. **bug2：Bose 注入内容偶发消失**：无法稳定复现，挂起，需现场日志。
-4. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.6 回归。
-5. **CNC 通用设置滑条**（低优先级）：`cnc.onespace.skip reason=no_tree`。不主动改。
-6. 2.0.0 剥离后 vendor 等已删；加回其他品牌参考 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
+1. **✅ 已结案（2.0.6，用户复验通过）：模型黑屏**。真凶=v4 资产 glb 的 BIN chunk 头损坏（make_vfxms4.py 偏移读错），不是照片可见性（红鲱鱼，§1.10 已纠正）。模型黑屏先字节级校验 .vfxms（10 个大端 u32、BIN type=0x4E4942），别动视图可见性。
+2. **✅ 已结案（2026-10-06，用户确认）：bug1 ANC 三态图标不即时刷新**。详情页=2.0.11 点击时乐观镜像；通用设置=2.0.12 捕获 `OneSpaceNoisePreference$b.onChanged` 重绘。**关键教训：两页是两套宿主类、两条绘制路径，显示用 modeType(1/5/2)、写入用协议索引(0/1/2)，映射交回宿主 `l9/b.getCurrentNoiseMode()`，不能猜。**
+3. **🔴 最高优先（2.0.20 待验证）：断开状态显示链（2.0.13~2.0.20 系列）**。用户需求：点"断开连接"后内容消失+显示未连接，且重启 Melody 保持。已实锤的事实链（细节 opslog/2026-10.md 2.0.13~2.0.19 各 Entry）：
+   - Melody 的"断开连接"只掉一次 profile，**TWS 耳机 ~12s 自动回连，系统蓝牙始终显示已连接**（dumpsys `active_a2dp_devices`）——任何蓝牙探测都无法区分；
+   - 蓝牙探测正源只有 **A2DP/HEADSET profile proxy 的按设备列表**（GATT_SERVER、隐藏 `BluetoothDevice.getConnectionState()` 均被日志证伪，勿再启用）；
+   - 解法=**应用层锁存断开意图**：A2DP/HFP `CONNECTION_STATE_CHANGED` 广播 DISCONNECTED → 持久化标志 `.melodylink_bose_user_disconnect`（跨重启）；CONNECTED 广播**仅在 ≥60s 后**清除（12s 自动回连不洗白）；`isBoseUiConnectedCached()`=探测&&未锁存，是全部 9 个消费点的唯一连接语义源；写路径的 `isSonyConnected()` 未动（bug1 依赖）。
+   - **2.0.19 失败教训（§1.12）**：接收器注册时 `currentApplication()` 为 null（hook setup 早于 Application.attach）静默返回不重试 → 整机制失效且日志"看起来正常"。2.0.20 改为幂等重试（watcher 每拍）+ 第二锁存路径（可信探测 up→down 跳变直接落标志）。
+   - 下一任验证清单：①启动日志必现 `registered Bose link broadcast latch`；②断开 → `Bose user-disconnect latch -> true`、内容消失；③12s 回连/重启 Melody 不恢复；④耳机重新开关机（≥60s CONNECTED）→ `Bose reconnect accepted` → 恢复。
+4. **bug2：Bose 注入内容偶发消失**：无法稳定复现，挂起，需现场日志（禁止凭猜测改注入链）。
+5. **模型入场动画流畅度**（#8，用户明确后置）。
+6. **死诊断清理**：`evt=bose.anc.sweep ... changed=false` 不参与刷新路径，单独提交删除。
+7. **已知边界（若用户反馈再修）**：①断开后 60s 内耳机重新开关机，锁存未清；②耳机系统已连+锁存时点 Melody"连接"按钮不产生 CONNECTED 广播，需重新开关机耳机才恢复；③通用设置电量显示依赖主动拉取（≤10s），若仍延迟查 `repository first observed; pulling Bose battery` / `Bose link came up`。
+8. 通用设置图片/转圈：已修复；**CNC 通用设置滑条** `cnc.onespace.skip reason=no_tree`：不主动改。
+9. 2.0.0 剥离后 vendor 等已删；加回其他品牌参考 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
 
 
 
