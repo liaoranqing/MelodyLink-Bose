@@ -851,6 +851,11 @@ public final class HookModule extends XposedModule {
                         // the blank circle). i() ("sonyCardImage") is LiveData-observer
                         // driven and may never run for a device with no catalog entry, so
                         // this bind is the reliable moment to install the photo.
+                        // 2.0.21: same reason it is the reliable moment to ask for battery —
+                        // waiting for the next scheduled pull is what the user reads as
+                        // "过一会才刷出来，有点慢". Rate-limited; the primary owns the BMAP
+                        // queue and this only writes the request file.
+                        requestOneSpaceBatteryRefresh();
                         if (replaceBoseOneSpaceHeaderImage(chain.getThisObject())) {
                             return result;
                         }
@@ -5178,6 +5183,24 @@ public final class HookModule extends XposedModule {
     @SuppressLint("MissingPermission")
     private boolean isBoseLinkConnected() {
         ensureBoseProfileProxies();
+        // 2.0.21: an adapter that is not ON IS disconnected. Without this the probe below
+        // fail-opened to "connected" the moment Bluetooth was switched off from 控制中心:
+        // the profile services unbind, both proxies go null, probed stays false and the
+        // old `: true` branch fabricated a link. logs/0595 shows exactly that — 12:55:25
+        // dtoConnectionState=3 (greyed, correct) then 12:55:31 =2 with the full content
+        // back, and no .melodylink_bose_user_disconnect file ever existed.
+        boolean adapterOn = isBoseAdapterOn();
+        if (adapterOn && !lastAdapterOnState) {
+            // Bluetooth just came back on: the held reading belongs to the previous session,
+            // and keeping it would hide earbuds the user has just reconnected for 30s.
+            lastTrustedProbeUp = null;
+            lastProbeDetail = "adapter_just_enabled";
+        }
+        lastAdapterOnState = adapterOn;
+        if (!adapterOn) {
+            lastProbeDetail = "adapter_off";
+            return false;
+        }
         boolean probed = false;
         boolean a2dpUp = false;
         boolean headsetUp = false;
@@ -5210,8 +5233,45 @@ public final class HookModule extends XposedModule {
         lastProbeDetail = "a2dp=" + (probed ? (a2dpUp ? 1 : 0) : -1)
                 + " headset=" + (headsetProxy == null || headsetBoundAt == 0
                         || now - headsetBoundAt < 4000L ? -1 : (headsetUp ? 1 : 0));
-        // No trusted probe yet (first seconds after process start): unknown, fail open.
-        return probed ? (a2dpUp || headsetUp) : true;
+        if (probed) {
+            boolean up = a2dpUp || headsetUp;
+            lastTrustedProbeUp = up;
+            lastTrustedProbeAt = now;
+            return up;
+        }
+        // Untrusted window (proxies null or younger than 4s). 2.0.21: keep the last trusted
+        // reading instead of inventing a link — the profile services can vanish right after a
+        // real disconnect. Only a process that has never probed fails open, which is the 2.0.14
+        // lesson (an already-linked device must not be gated off while the proxies bind).
+        Boolean held = lastTrustedProbeUp;
+        long heldAge = now - lastTrustedProbeAt;
+        if (held != null && heldAge < 30000L) {
+            lastProbeDetail += " held=" + (held ? "up" : "down") + " age=" + heldAge + "ms";
+            return held;
+        }
+        lastProbeDetail += " fail_open_never_probed";
+        return true;
+    }
+
+    /**
+     * Adapter-level link truth: only STATE_ON can host a live profile link. Used by
+     * {@link #isBoseLinkConnected()} so switching Bluetooth off is a real disconnect.
+     * Returns true when the state cannot be read at all — never fabricate a disconnect
+     * from a missing API.
+     */
+    @SuppressLint("MissingPermission")
+    private boolean isBoseAdapterOn() {
+        try {
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            if (adapter == null) return true;
+            try {
+                return adapter.getState() == BluetoothAdapter.STATE_ON;
+            } catch (Throwable stateMissing) {
+                return adapter.isEnabled();
+            }
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     /** True when both profile proxies are bound and old enough to trust. */
@@ -5366,6 +5426,10 @@ public final class HookModule extends XposedModule {
 
     private static volatile android.bluetooth.BluetoothProfile a2dpProxy;
     private static volatile android.bluetooth.BluetoothProfile headsetProxy;
+    /** Last reading taken while the proxies were trusted, for the untrusted window. */
+    private static volatile Boolean lastTrustedProbeUp;
+    private static volatile long lastTrustedProbeAt;
+    private static volatile boolean lastAdapterOnState = true;
     private static volatile boolean profileProxyBindAttempted;
     private static volatile long a2dpBoundAt;
     private static volatile long headsetBoundAt;
@@ -5408,6 +5472,9 @@ public final class HookModule extends XposedModule {
                                 headsetProxy = null;
                                 headsetBoundAt = 0;
                             }
+                            // §1.12: this used to be silent, which is how the adapter-off
+                            // fail-open looked like a working latch in the field logs.
+                            log(Log.INFO, TAG, event("Bose link probe proxy unbound profile=" + profile));
                         }
                     };
             adapter.getProfileProxy(application, listener, android.bluetooth.BluetoothProfile.A2DP);
@@ -5603,6 +5670,26 @@ public final class HookModule extends XposedModule {
         if (!MelodySharedStateStore.delete(file)) {
             log(Log.WARN, TAG, "shared Sony ANC command delete failed");
         }
+    }
+
+    private long lastOneSpaceBatteryRequestAt;
+
+    /**
+     * Battery request triggered by the 通用设置 card binding. Rate-limited to one per 4s and
+     * skipped while we consider the link down, so a disconnected device cannot feed a stale
+     * reading back into the header (2.0.18 lesson: RFCOMM still succeeds over a surviving ACL).
+     */
+    private void requestOneSpaceBatteryRefresh() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastOneSpaceBatteryRequestAt < 4000L) return;
+        lastOneSpaceBatteryRequestAt = now;
+        if (!boseBonded() || !isBoseUiConnectedCached()) {
+            MLog.event("bose.battery.onespace_skip", "reason",
+                    boseBonded() ? "link_down" : "not_bonded");
+            return;
+        }
+        MLog.event("bose.battery.onespace_request");
+        requestSonyBatteryRefresh();
     }
 
     private void requestSonyBatteryRefresh() {
