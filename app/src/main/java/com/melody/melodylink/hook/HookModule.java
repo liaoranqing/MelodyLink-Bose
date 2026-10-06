@@ -5693,6 +5693,8 @@ public final class HookModule extends XposedModule {
         boolean probed = false;
         boolean a2dpUp = false;
         boolean headsetUp = false;
+        boolean a2dpAged = false;
+        boolean headsetAged = false;
         long now = android.os.SystemClock.elapsedRealtime();
         try {
             for (android.bluetooth.BluetoothProfile proxy :
@@ -5703,8 +5705,18 @@ public final class HookModule extends XposedModule {
                 // Only trust a proxy that has been bound for a while; treat younger
                 // ones as not-yet-probed so the fail-open below keeps us honest.
                 long boundAt = proxy == a2dpProxy ? a2dpBoundAt : headsetBoundAt;
-                if (boundAt == 0 || now - boundAt < 4000L) continue;
-                probed = true;
+                if (boundAt == 0) continue;
+                // 2.0.36: the four-second distrust exists because a freshly bound proxy hands
+                // back an EMPTY device list (2.0.14: "disabled" 4s before "enabled" while
+                // connected). That is a false negative. A proxy that already lists our device
+                // is giving real evidence, and waiting four seconds to believe it is what made
+                // the reconnected sections take 4-5s to come back. So: read every bound proxy,
+                // but let only an aged one prove a negative.
+                if (now - boundAt >= 4000L) {
+                    probed = true;
+                    if (proxy == a2dpProxy) a2dpAged = true;
+                    else headsetAged = true;
+                }
                 for (BluetoothDevice connected : proxy.getConnectedDevices()) {
                     if (connected != null && isTargetAddress(connected.getAddress())) {
                         if (proxy == a2dpProxy) a2dpUp = true;
@@ -5719,10 +5731,11 @@ public final class HookModule extends XposedModule {
             //   A2DP/HEADSET lists were empty — the exact state users call 断开).
         } catch (Throwable ignored) {
         }
-        lastProbeDetail = "a2dp=" + (probed ? (a2dpUp ? 1 : 0) : -1)
-                + " headset=" + (headsetProxy == null || headsetBoundAt == 0
-                        || now - headsetBoundAt < 4000L ? -1 : (headsetUp ? 1 : 0));
-        if (probed) {
+        lastProbeDetail = "a2dp=" + (a2dpUp ? 1 : (a2dpAged ? 0 : -1))
+                + " headset=" + (headsetUp ? 1 : (headsetAged ? 0 : -1));
+        // A positive from any bound proxy - young or aged - is real evidence. Only a negative
+        // needs the proxy to have been bound long enough to trust its empty list.
+        if (a2dpUp || headsetUp || probed) {
             boolean up = a2dpUp || headsetUp;
             lastTrustedProbeUp = up;
             lastTrustedProbeAt = now;
@@ -7466,7 +7479,12 @@ public final class HookModule extends XposedModule {
             // 2.0.15: on a disconnect→connect transition, pull battery right away so
             // the 通用设置 header does not wait for the next page-driven BMAP session.
             long now = android.os.SystemClock.elapsedRealtime();
-            if (now - lastMainLinkProbeAt >= 5000L) {
+            // 2.0.36: 5s → 1s. This throttle, not only the four-second proxy distrust, was what
+            // made a reconnected page wait: the watcher runs every 250ms but only evaluated the
+            // link once per five seconds. The battery pull below still fires only on a
+            // transition and only for a fully aged pair of proxies, so this does not add BMAP
+            // traffic - it only notices the change sooner.
+            if (now - lastMainLinkProbeAt >= 1000L) {
                 lastMainLinkProbeAt = now;
                 boolean up = isBoseUiConnectedCached();
                 // null→up counts too, but never pull during the fail-open window:
