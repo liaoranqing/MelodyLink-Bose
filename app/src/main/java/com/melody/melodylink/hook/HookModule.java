@@ -5146,29 +5146,41 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * True when the earbuds currently have a live Bluetooth link. Uses the public
-     * {@code BluetoothManager.getConnectedDevices} API so it works from every Melody
-     * process (GATT is the ACL-level presence for earbuds; A2DP/HEADSET cover active
-     * audio paths). The hidden {@code BluetoothDevice.getConnectionState()} probe from
-     * {@link #isDeviceConnected} is a bonus path, never load-bearing: that hidden API
-     * is blocked by reflection filters on some ColorOS builds.
+     * True when the earbuds currently have a live Bluetooth link.
+     *
+     * <p>2.0.14 rewrite: 2.0.13's {@code BluetoothManager.getConnectedDevices} probe
+     * never returned the earbuds — GATT client-side connections are only visible to
+     * the app that opened them, and A2DP/HEADSET need an explicitly bound profile
+     * proxy, so the check reported "disconnected" while the earbuds were linked and
+     * wrongly gated battery + sliders off. Now we bind the A2DP and HEADSET proxies
+     * (public API, per-device {@code getConnectedDevices}) and fail OPEN while the
+     * proxies are still binding, so an already-linked device is never gated off;
+     * accuracy resumes seconds later when the proxies land.
      */
     @SuppressLint("MissingPermission")
     private boolean isBoseLinkConnected() {
         BluetoothDevice device = targetBoseDevice;
         if (device != null && isDeviceConnected(device)) return true;
+        ensureBoseProfileProxies();
+        boolean probed = false;
         try {
             Application application = currentApplication();
-            Object manager = application == null
-                    ? null : application.getSystemService(Context.BLUETOOTH_SERVICE);
-            if (manager instanceof android.bluetooth.BluetoothManager) {
-                int[] profiles = {android.bluetooth.BluetoothProfile.GATT,
-                        android.bluetooth.BluetoothProfile.A2DP,
-                        android.bluetooth.BluetoothProfile.HEADSET};
-                for (int profile : profiles) {
+            for (android.bluetooth.BluetoothProfile proxy :
+                    new android.bluetooth.BluetoothProfile[]{a2dpProxy, headsetProxy}) {
+                if (proxy == null) continue;
+                probed = true;
+                for (BluetoothDevice connected : proxy.getConnectedDevices()) {
+                    if (connected != null && isTargetAddress(connected.getAddress())) {
+                        return true;
+                    }
+                }
+            }
+            if (application != null) {
+                Object manager = application.getSystemService(Context.BLUETOOTH_SERVICE);
+                if (manager instanceof android.bluetooth.BluetoothManager) {
                     for (BluetoothDevice connected
                             : ((android.bluetooth.BluetoothManager) manager)
-                            .getConnectedDevices(profile)) {
+                            .getConnectedDevices(android.bluetooth.BluetoothProfile.GATT_SERVER)) {
                         if (connected != null && isTargetAddress(connected.getAddress())) {
                             return true;
                         }
@@ -5177,7 +5189,45 @@ public final class HookModule extends XposedModule {
             }
         } catch (Throwable ignored) {
         }
-        return false;
+        // No proxy bound yet (first seconds after process start): unknown, fail open.
+        return !probed;
+    }
+
+    private static volatile android.bluetooth.BluetoothProfile a2dpProxy;
+    private static volatile android.bluetooth.BluetoothProfile headsetProxy;
+    private static volatile boolean profileProxyBindAttempted;
+
+    private void ensureBoseProfileProxies() {
+        if (profileProxyBindAttempted) return;
+        profileProxyBindAttempted = true;
+        try {
+            Application application = currentApplication();
+            BluetoothAdapter adapter = application == null
+                    ? null : BluetoothAdapter.getDefaultAdapter();
+            if (application == null || adapter == null) return;
+            android.bluetooth.BluetoothProfile.ServiceListener listener =
+                    new android.bluetooth.BluetoothProfile.ServiceListener() {
+                        @Override public void onServiceConnected(int profile,
+                                android.bluetooth.BluetoothProfile proxy) {
+                            if (profile == android.bluetooth.BluetoothProfile.A2DP) {
+                                a2dpProxy = proxy;
+                            } else if (profile == android.bluetooth.BluetoothProfile.HEADSET) {
+                                headsetProxy = proxy;
+                            }
+                            lastCncEnabledCheckAt = 0; // re-evaluate on the next poll
+                            log(Log.INFO, TAG, event("Bose link probe proxy bound profile=" + profile));
+                        }
+
+                        @Override public void onServiceDisconnected(int profile) {
+                            if (profile == android.bluetooth.BluetoothProfile.A2DP) a2dpProxy = null;
+                            else headsetProxy = null;
+                        }
+                    };
+            adapter.getProfileProxy(application, listener, android.bluetooth.BluetoothProfile.A2DP);
+            adapter.getProfileProxy(application, listener, android.bluetooth.BluetoothProfile.HEADSET);
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose link probe proxy bind failed", t);
+        }
     }
 
     /** Mirror the live link state onto both CNC sliders (disabled when disconnected). */
@@ -5214,10 +5264,12 @@ public final class HookModule extends XposedModule {
             String negative) {
         Object builder = null;
         ClassLoader loader = context.getClassLoader();
+        // loadClass, not Class.forName: smali-form names like W2/h throw
+        // "Invalid name" in Class.forName (0.5.35 lesson — 2.0.13 shipped this bug).
         for (String name : new String[]{
                 "com.coui.appcompat.dialog.COUIAlertDialogBuilder", "W2/h"}) {
             try {
-                Class<?> cls = Class.forName(name, false, loader);
+                Class<?> cls = loadClass(loader, name);
                 builder = cls.getConstructor(Context.class).newInstance(context);
                 log(Log.INFO, TAG, event("using COUI dialog builder " + name));
                 break;
@@ -5987,18 +6039,10 @@ public final class HookModule extends XposedModule {
                             && method.getDeclaringClass() != Object.class)) {
                         return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
                     }
-                    int current = boseTransport.getStandbyMinutes();
-                    int[] presets = com.melody.melodylink.bose.BoseBmap.STANDBY_MINUTES;
-                    int next = presets[0];
-                    for (int value : presets) {
-                        if (value > current) {
-                            next = value;
-                            break;
-                        }
-                    }
-                    setPreferenceValue(row, "setSummary",
-                            com.melody.melodylink.bose.BoseBmap.standbyLabel(next));
-                    forwardBoseCommand(CMD_STANDBY, next, 0, 0, 0);
+                    // 2.0.14: the old silent cycle (summary ticks forward on every tap)
+                    // read as a dead button — present the presets in a proper dialog,
+                    // same as the button-action picker.
+                    showBoseStandbyPicker(row);
                     return Boolean.TRUE;
                 });
         try {
@@ -6006,6 +6050,31 @@ public final class HookModule extends XposedModule {
             setter.invoke(row, listener);
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose standby listener install failed", t);
+        }
+    }
+
+    /** Auto-off preset picker as a styled dialog. */
+    private void showBoseStandbyPicker(final Object row) {
+        try {
+            Context context = detailActivity;
+            if (context == null) return;
+            int[] presets = com.melody.melodylink.bose.BoseBmap.STANDBY_MINUTES;
+            String[] labels = new String[presets.length];
+            for (int i = 0; i < presets.length; i++) {
+                labels[i] = com.melody.melodylink.bose.BoseBmap.standbyLabel(presets[i]);
+            }
+            android.app.Dialog dialog = buildStyledDialog(context,
+                    "\u81ea\u52a8\u5173\u673a", null, labels,
+                    (d, which) -> {
+                        int minutes = presets[which];
+                        setPreferenceValue(row, "setSummary",
+                                com.melody.melodylink.bose.BoseBmap.standbyLabel(minutes));
+                        forwardBoseCommand(CMD_STANDBY, minutes, 0, 0, 0);
+                    },
+                    null, null, "\u53d6\u6d88");
+            dialog.show();
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose standby picker failed", t);
         }
     }
 
@@ -7173,15 +7242,14 @@ public final class HookModule extends XposedModule {
     private void projectBoseBatteryIntoDto(Object address, Object dto) {
         if (targetBoseDevice == null || !boseHostConnected) return;
         if (!isTargetAddress(address) || dto == null) return;
-        // 2.0.13: the DTO's `connectionState` field holds the host's REAL Bluetooth
-        // state (2 = connected; the same value EarphoneControlProvider compares against).
-        // Our dtoConnectionState hook fakes 2 toward getters, but the field keeps host
-        // truth — and EarphoneDTO is an immutable data class, so once written our battery
-        // values survive through later copy() rebuilds. The header renders the numbers
-        // unconditionally, which is how a disconnected device still showed 电量: project
-        // only when the host itself sees the link up, and actively clear otherwise.
-        int hostConnectionState = readIntField(dto, "connectionState", -1);
-        if (hostConnectionState != 2) {
+        // 2.0.14: gate on our own live-link probe. 2.0.13 trusted the DTO's
+        // `connectionState` field as "host truth", but that field never reaches 2 for
+        // the disguised device — the dtoConnectionState hook exists precisely because
+        // the host's own protocol handshake never runs for it, so connected earbuds
+        // got their battery cleared too. EarphoneDTO is an immutable data class, so
+        // battery values written earlier survive copy() rebuilds and would keep
+        // showing on a disconnected device — actively clear when the link is down.
+        if (!isBoseLinkConnected()) {
             // writeIntField cannot distinguish "changed" from "already 0", and the DTO
             // rebuild fires often — only touch fields (and log) when something is stale.
             boolean stale = readIntField(dto, "leftBattery", 0) != 0
@@ -7194,8 +7262,7 @@ public final class HookModule extends XposedModule {
                 writeIntField(dto, "rightBattery", 0);
                 writeIntField(dto, "boxBattery", 0);
                 writeBooleanField(dto, "isBatteryInfoReceived", false);
-                log(Log.INFO, TAG, event("cleared Bose battery from disconnected device DTO"
-                        + " connectionState=" + hostConnectionState));
+                log(Log.INFO, TAG, event("cleared Bose battery from disconnected device DTO"));
             }
             return;
         }
