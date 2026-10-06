@@ -2204,6 +2204,11 @@ public final class HookModule extends XposedModule {
                 "parent_attached", isPreferenceAttached(parent),
                 "activity_shown", activity != null && !activity.isFinishing());
         if (!landed) return false;
+        // 2.0.25: freshly built rows start out enabled, and the watcher only fires when the
+        // link state CHANGES — so a page (re)built while the earbuds are disconnected kept
+        // 音效/模式槽 bright (user screenshot: 未连接 yet EQ draggable). Re-apply the current
+        // gate to this page's rows at the moment they land.
+        applyBoseCncEnabled(true);
         MLog.event("bose.injected",
                 "page", detailPage ? "detail" : "general",
                 "anchor", PrefRef.getKey(noiseRow),
@@ -5583,23 +5588,35 @@ public final class HookModule extends XposedModule {
             // 2.0.22: say WHICH rows we actually hold. 通用设置 kept its 降噪等级 slider live
             // while 耳机设置 greyed out on the same disconnect, and without this it is
             // impossible to tell a stale reference from a missing attach.
+            // 2.0.25: count what we actually reach. The user's screenshot showed 未连接 with
+            // the EQ and 模式槽 rows still bright, and the old line could not tell an empty
+            // list from a setEnabled that silently failed.
+            int held = 0, applied = 0;
             MLog.event("bose.cnc.apply", "enabled", enabled,
                     "detail_row", boseCncPreference != null ? "held" : "null",
                     "onespace_row", boseCncOneSpacePreference != null ? "held" : "null",
                     "probe", detail);
             for (Object target : new Object[]{boseCncPreference, boseCncOneSpacePreference}) {
                 if (target == null) continue;
-                setPreferenceValue(target, "setEnabled", enabled);
+                held++;
+                if (setPreferenceValue(target, "setEnabled", enabled)) applied++;
             }
             // 2.0.16: the Bose 音效 rows follow the same gate — writing to a
             // disconnected headset silently fails anyway, and a dead row reads as a bug.
+            int rowsHeld = 0, rowsApplied = 0;
             for (java.util.List<?> rows : new java.util.List<?>[]{boseEqSliders,
                     boseButtonDropdowns, boseModeSlotSliders}) {
                 for (Object row : rows) {
                     if (row == null) continue;
-                    setPreferenceValue(row, "setEnabled", enabled);
+                    rowsHeld++;
+                    if (setPreferenceValue(row, "setEnabled", enabled)) rowsApplied++;
                 }
             }
+            MLog.event("bose.cnc.apply.rows", "enabled", enabled,
+                    "eq", boseEqSliders.size(), "slots", boseModeSlotSliders.size(),
+                    "buttons", boseButtonDropdowns.size(),
+                    "cnc_applied", applied + "/" + held,
+                    "rows_applied", rowsApplied + "/" + rowsHeld);
             log(Log.INFO, TAG, event("Bose CNC sliders " + (enabled ? "enabled" : "disabled")
                     + " (link " + (enabled ? "up" : "down") + " " + detail + ")"));
         });
