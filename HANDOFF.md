@@ -301,6 +301,15 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 - 工作区根目录 `opslog/`（操作日志+状态快照）与 `ONCALL-PROTOCOL.md`（AI 接管协议）**不在仓库内、不提交**。
 - 反编译产物（smali/dex/dexdump）在仓库外的工作区根目录（`tools/smali*`、`melody1763/`、`dex1763/`、`dexdump*.txt`），**不提交、不上传**（版权）。
 
+### 13.32 2026-10-06 新增：2.0.30~2.0.33 连续 ANR 事故的四条铁律
+
+1. **换过 APK（安装或降级）之后，必须 `am force-stop com.oplus.melody` 并用 `ps -A | grep -c com.oplus.melody` 确认是 0**。LSPosed 不会热替换我们的模块：`verbose_*.log` 明确写着 `Class com.melody.melodylink.hook.HookModule refused to be hot reloaded, skipping` + `Auto hot reload failed ... status=1` —— 也就是说**磁盘上的 APK 换了，进程里跑的还是旧 dex**，此时任何"降级成功/修复无效"的观察都是假的。另外 ColorOS 的 Hans 会把 App 冻在 `do_freezer_trap`，**第一次 force-stop 可能杀不掉**，要再停一次并确认。
+2. **模块日志有两个通道，取证必须都查**：logcat 里的 `MelodyLinkBose:`，以及 `/data/adb/lspd/log/modules_*.log` + `verbose_*.log`（LSPosed 帧内日志，格式 `(进程)[包名,TAG,帧id]`）。2026-10-06 我曾据"logcat 零条模块日志"断言"模块没加载"，而 LSPosed 日志里同一时刻 `:fg` 的注册尝试明明在——**结论错在选错通道**。
+3. **打通一条"一直空转"的路由之前，先量它的成本**。空转往往正是因为它下游贵或有病。ANR 栈里主线程 `schedstat` 达数十秒 CPU ＝ **自旋**。
+   ~~第一嫌疑是无界递归/环；只缓存反射救不了环（2.0.30/31/32 三版都栽在这里）。`PrefRef.findPreferenceRecursive` 现已限深 16。~~
+   **↑ 这条归因是错的，2026-10-06 22:20 实测更正**：既不是环，也不是反射慢。真因是 `PrefRef.readChildCount()` 在"读不到 children 字段"时退回**"取第一个无参 int 方法"**，而叶子 `androidx.preference.Preference` 在 17.6.3 只有 `getLayoutResource()/getOrder()/getWidgetLayoutResource()` 三个无参 int 方法（smali 实证），资源 id 约 **21 亿** ⇒ `getPreferenceCount(leaf)=2131493245` ⇒ `for (i=0;i<count;i++)` 在**广度**上爆炸。ANR 栈递归只有 3 层深即为铁证（2.0.33 的限深 16 因此完全没治住）。修法见 2.0.34：方法来源计数 >512 一律当垃圾并打 `evt=pref.count_bogus`，且每次遍历带 4000 节点预算。**教训：先证再改——我连着三版按"慢/环"猜着加缓存和限深，让你手机卡了四次。**
+4. **装机后的 ANR 验证窗口必须覆盖完整交互（≥90s）再统计**，且过滤要带日期字段：`awk '$1=="10-06" && $2>="装机时刻"'`。只按 `$2>=时刻` 会把昨天的同分钟数行算进来（假阳性），而在 ANR 发生前就收表会得出假阴性结论（我 21:19 那次就犯了）。
+
 ---
 
 ## 14. 交接铁律（2026-10-06 用户指令，对所有接棒 AI 永久生效）
