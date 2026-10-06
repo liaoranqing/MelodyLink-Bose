@@ -5406,6 +5406,37 @@ public final class HookModule extends XposedModule {
         }
     }
 
+    private boolean boseProfilesUnboundSinceLatch;
+
+    /**
+     * Let the user out of the disconnect latch once the classic link has really been rebuilt.
+     *
+     * <p>2.0.24: the adapter-state version never fires on this handset — logs/0598 shows
+     * `settings global bluetooth_on=0` (and dumpsys reports BLE_ON) while our own probe reads
+     * a2dp=1 headset=1, i.e. ColorOS does not report STATE_ON even with A2DP live. The signal
+     * that IS reliable is the profile service lifecycle: switching Bluetooth off unbinds the
+     * A2DP/HEADSET proxies (boseProfilesUnboundSinceLatch), Melody's 断开连接 does not. So:
+     * link back up after the services were unbound = a new connection, clear the latch;
+     * a 12s TWS bounce after 断开 keeps the services bound, so it stays latched, and a fresh
+     * process never clears anything (the 断开-then-restart-Melody requirement holds).
+     */
+    private void clearLatchOnLinkRebuild() {
+        if (!boseProfilesUnboundSinceLatch) return;
+        if (!isBoseLinkProbeTrusted()) return;
+        if (!isBoseLinkConnectedCached()) return;
+        try {
+            Object[] value = MelodySharedStateStore.readBoseUserDisconnect(
+                    boseUserDisconnectFile(), null);
+            if (value != null && Boolean.TRUE.equals(value[0])) {
+                log(Log.INFO, TAG, event("Bose reconnect accepted: link rebuilt after profile"
+                        + " services were unbound (latch clear)"));
+                latchBoseUserDisconnect(false);
+            }
+        } catch (Throwable ignored) {
+        }
+        boseProfilesUnboundSinceLatch = false;
+    }
+
     private void latchBoseUserDisconnect(boolean value) {
         try {
             String address = targetAddress != null ? targetAddress
@@ -5417,6 +5448,7 @@ public final class HookModule extends XposedModule {
             MelodySharedStateStore.writeBoseUserDisconnect(
                     boseUserDisconnectFile(), address, value, System.currentTimeMillis());
             uiStateCheckedAt = 0; // force the cached combined state to re-read
+            if (value) boseProfilesUnboundSinceLatch = false; // only an unbind AFTER the latch unlocks it
             log(Log.INFO, TAG, event("Bose user-disconnect latch -> " + value));
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Bose user-disconnect latch write failed", t);
@@ -5524,6 +5556,7 @@ public final class HookModule extends XposedModule {
                             }
                             // §1.12: this used to be silent, which is how the adapter-off
                             // fail-open looked like a working latch in the field logs.
+                            boseProfilesUnboundSinceLatch = true;
                             log(Log.INFO, TAG, event("Bose link probe proxy unbound profile=" + profile));
                         }
                     };
@@ -6834,7 +6867,10 @@ public final class HookModule extends XposedModule {
             registerBoseLinkBroadcasts();
             // 2.0.20: latch on a trusted probe drop too, independent of broadcasts.
             latchBoseUserDisconnectOnProbeDown();
-            // 2.0.23: and let the user out of the latch when they turn Bluetooth back on.
+            // 2.0.24: and let the user out of the latch when the classic link is rebuilt after
+            // the profile services went away (switching Bluetooth off). The adapter-state
+            // version in 2.0.23 never fires here: ColorOS reports BLE_ON with A2DP live.
+            clearLatchOnLinkRebuild();
             clearLatchOnAdapterRecovery();
             // 2.0.15: on a disconnect→connect transition, pull battery right away so
             // the 通用设置 header does not wait for the next page-driven BMAP session.
