@@ -5169,12 +5169,13 @@ public final class HookModule extends XposedModule {
     @SuppressLint("MissingPermission")
     private boolean isBoseLinkConnected() {
         BluetoothDevice device = targetBoseDevice;
-        if (device != null && isDeviceConnected(device)) return true;
+        boolean hiddenUp = device != null && isDeviceConnected(device);
         ensureBoseProfileProxies();
         boolean probed = false;
+        boolean a2dpUp = false;
+        boolean headsetUp = false;
         long now = android.os.SystemClock.elapsedRealtime();
         try {
-            Application application = currentApplication();
             for (android.bluetooth.BluetoothProfile proxy :
                     new android.bluetooth.BluetoothProfile[]{a2dpProxy, headsetProxy}) {
                 if (proxy == null) continue;
@@ -5187,27 +5188,27 @@ public final class HookModule extends XposedModule {
                 probed = true;
                 for (BluetoothDevice connected : proxy.getConnectedDevices()) {
                     if (connected != null && isTargetAddress(connected.getAddress())) {
-                        return true;
+                        if (proxy == a2dpProxy) a2dpUp = true;
+                        else headsetUp = true;
                     }
                 }
             }
-            if (application != null) {
-                Object manager = application.getSystemService(Context.BLUETOOTH_SERVICE);
-                if (manager instanceof android.bluetooth.BluetoothManager) {
-                    for (BluetoothDevice connected
-                            : ((android.bluetooth.BluetoothManager) manager)
-                            .getConnectedDevices(android.bluetooth.BluetoothProfile.GATT_SERVER)) {
-                        if (connected != null && isTargetAddress(connected.getAddress())) {
-                            return true;
-                        }
-                    }
-                }
-            }
+            // 2.0.16: GATT_SERVER dropped as a positive. 0590 log: after the user
+            // taps 断开连接 the BLE link persists, so the earbuds kept showing up on
+            // the phone's GATT server and the probe reported "up" while A2DP/HEADSET
+            // were long gone — the whole reason 断开 looked connected.
         } catch (Throwable ignored) {
         }
-        // No proxy bound yet (first seconds after process start): unknown, fail open.
-        return !probed;
+        lastProbeDetail = "hidden=" + (hiddenUp ? 1 : 0)
+                + " a2dp=" + (probed ? (a2dpUp ? 1 : 0) : -1)
+                + " headset=" + (headsetProxy == null ? -1 : (headsetUp ? 1 : 0));
+        if (hiddenUp) return true;
+        // No trusted probe yet (first seconds after process start): unknown, fail open.
+        return probed ? (a2dpUp || headsetUp) : true;
     }
+
+    /** One-line breakdown of the last probe, for transition logs. */
+    private volatile String lastProbeDetail = "";
 
     /**
      * Memoized variant for hook paths that may fire per UI bind: the underlying probe
@@ -5234,15 +5235,14 @@ public final class HookModule extends XposedModule {
 
     private void ensureBoseProfileProxies() {
         if (profileProxyBindAttempted) return;
-        profileProxyBindAttempted = true;
         try {
             Application application = currentApplication();
             BluetoothAdapter adapter = application == null
                     ? null : BluetoothAdapter.getDefaultAdapter();
-            if (application == null || adapter == null) {
-                log(Log.WARN, TAG, event("Bose link probe unavailable: no app/adapter"));
-                return;
-            }
+            // Latch only after the proxies are actually requested — a null app/adapter
+            // at first call (hook setup racing Application.attach) must stay retryable.
+            if (application == null || adapter == null) return;
+            profileProxyBindAttempted = true;
             android.bluetooth.BluetoothProfile.ServiceListener listener =
                     new android.bluetooth.BluetoothProfile.ServiceListener() {
                         @Override public void onServiceConnected(int profile,
@@ -5291,13 +5291,23 @@ public final class HookModule extends XposedModule {
         if (!force && lastCncEnabled != null && lastCncEnabled == connected) return;
         lastCncEnabled = connected;
         final boolean enabled = connected;
+        final String detail = lastProbeDetail;
         mainHandler.post(() -> {
             for (Object target : new Object[]{boseCncPreference, boseCncOneSpacePreference}) {
                 if (target == null) continue;
                 setPreferenceValue(target, "setEnabled", enabled);
             }
+            // 2.0.16: the Bose 音效 rows follow the same gate — writing to a
+            // disconnected headset silently fails anyway, and a dead row reads as a bug.
+            for (List<Object> rows : new List<?>[]{boseEqSliders, boseButtonDropdowns,
+                    boseModeSlotSliders}) {
+                for (Object row : rows) {
+                    if (row == null) continue;
+                    setPreferenceValue(row, "setEnabled", enabled);
+                }
+            }
             log(Log.INFO, TAG, event("Bose CNC sliders " + (enabled ? "enabled" : "disabled")
-                    + " (link " + (enabled ? "up" : "down") + ")"));
+                    + " (link " + (enabled ? "up" : "down") + " " + detail + ")"));
         });
     }
 
@@ -5463,6 +5473,10 @@ public final class HookModule extends XposedModule {
         if (address == null) address = readSharedSonyAddress();
         if (!isTargetAddress(address)) return;
         if (isPrimaryProcess()) {
+            // 2.0.16: resolve the device on the cold-start path too — otherwise the
+            // first pull after a fresh process start silently no-ops and the
+            // 通用设置 battery still waits for a page visit.
+            if (targetBoseDevice == null || !boseHostConnected) resolveBoseForTile();
             if (targetBoseDevice != null && boseHostConnected) {
                 boseTransport.refreshBattery();
             }
@@ -6484,11 +6498,25 @@ public final class HookModule extends XposedModule {
         }
         if (address instanceof String && isTargetAddress(address)) {
             rememberTargetAddress((String) address);
+            boolean firstCapture = earphoneRepository == null;
             earphoneRepository = chain.getThisObject();
             if (!isPrimaryProcess() && !"repositoryNotify".equals(label)
                     && !"repositoryClientObserve".equals(label)
                     && readSharedSonyState() != null) {
                 refreshTargetRepository("foreground repository observed");
+            }
+            // 2.0.16: first time the primary process sees this device's repository,
+            // pull battery proactively so the 通用设置 header shows it without the
+            // user having to open 耳机设置 first (the BMAP session otherwise only
+            // starts on a page visit or a tile tap).
+            if (isPrimaryProcess() && firstCapture) {
+                mainHandler.postDelayed(() -> {
+                    if (earphoneRepository != null && isBoseLinkConnectedCached()
+                            && boseSessionState.getBattery() == null) {
+                        log(Log.INFO, TAG, event("repository first observed; pulling Bose battery"));
+                        requestSonyBatteryRefresh();
+                    }
+                }, 1200L);
             }
         }
     }
@@ -6522,7 +6550,9 @@ public final class HookModule extends XposedModule {
             if (now - lastMainLinkProbeAt >= 5000L) {
                 lastMainLinkProbeAt = now;
                 boolean up = isBoseLinkConnectedCached();
-                if (lastMainLinkUp != null && !lastMainLinkUp && up) {
+                // null→up counts too: the first evaluation after a fresh Melody start
+                // with the earbuds already linked must pull battery as well.
+                if (up && !Boolean.TRUE.equals(lastMainLinkUp)) {
                     log(Log.INFO, TAG, event("Bose link came up; refreshing battery"));
                     requestSonyBatteryRefresh();
                 }
