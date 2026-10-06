@@ -399,6 +399,13 @@ final class PrefRef {
      * {@code i()} and the CharSequence/int ones are excluded by the return type.
      */
     private static Method findNoArgIntMethod(Class<?> type) {
+        // 2.0.32: memoised like the other hierarchy scans. getPreferenceCount() reaches this on
+        // every node of every recursive walk, and an uncached miss meant a full
+        // getDeclaredMethods() scan per child.
+        String key = type.getName();
+        Method known = NO_ARG_INT_CACHE.get(key);
+        if (known != null) return known;
+        if (NO_ARG_INT_MISS.contains(key)) return null;
         for (Class<?> cls = type; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
             for (Method m : cls.getDeclaredMethods()) {
                 if (m.getParameterCount() != 0) continue;
@@ -406,11 +413,13 @@ final class PrefRef {
                 if (m.getName().equals("hashCode") || m.getName().equals("size")) continue;
                 try {
                     m.setAccessible(true);
+                    NO_ARG_INT_CACHE.put(key, m);
                     return m;
                 } catch (Throwable ignored) {
                 }
             }
         }
+        NO_ARG_INT_MISS.add(key);
         return null;
     }
 
@@ -574,33 +583,53 @@ final class PrefRef {
      */
     private static java.util.List<?> getChildrenList(Object container) {
         if (container == null) return null;
-        for (Class<?> cls = container.getClass(); cls != null && cls != Object.class;
-                cls = cls.getSuperclass()) {
-            for (Field f : cls.getDeclaredFields()) {
-                if (!java.util.List.class.isAssignableFrom(f.getType())) continue;
-                if (f.getType() == java.util.LinkedList.class) continue;
-                java.util.List<?> list = null;
-                try {
-                    f.setAccessible(true);
-                    Object v = f.get(container);
-                    if (v instanceof java.util.List) list = (java.util.List<?>) v;
-                } catch (Throwable ignored) {
-                }
-                if (list == null) continue;
-                // An empty list is accepted: it is the natural state of a group we are about
-                // to inject into, and there is no element to type-check.
-                if (list.isEmpty()) return list;
-                Object first = list.get(0);
-                if (first == null) continue;
-                // A Preference child exposes getKey; anything else is some other list.
-                try {
-                    first.getClass().getMethod("getKey");
-                    return list;
-                } catch (Throwable ignored) {
-                }
+        for (Field f : childrenFields(container.getClass())) {
+            java.util.List<?> list = null;
+            try {
+                f.setAccessible(true);
+                Object v = f.get(container);
+                if (v instanceof java.util.List) list = (java.util.List<?>) v;
+            } catch (Throwable ignored) {
+            }
+            if (list == null) continue;
+            // An empty list is accepted: it is the natural state of a group we are about
+            // to inject into, and there is no element to type-check.
+            if (list.isEmpty()) return list;
+            Object first = list.get(0);
+            if (first == null) continue;
+            // A Preference child exposes getKey; anything else is some other list.
+            try {
+                first.getClass().getMethod("getKey");
+                return list;
+            } catch (Throwable ignored) {
             }
         }
         return null;
+    }
+
+    /**
+     * The candidate children fields of a class, resolved once per class name (2.0.32).
+     *
+     * <p>The 21:19:43 ANR trace showed the main thread inside {@code Class.getDeclaredFields}
+     * reached from {@code getPreference <- findPreferenceRecursive <- isBoseInjection}: the
+     * scan ran again for every child index of every walk. 2.0.31 had already memoised
+     * {@code findMethod}, the indexed accessor and {@code isPreferenceType} but missed this
+     * one. The candidate list is kept (not a single winner) so the runtime still applies the
+     * per-instance checks below exactly as before.
+     */
+    private static java.util.List<Field> childrenFields(Class<?> startCls) {
+        java.util.List<Field> cached = CHILDREN_FIELDS_CACHE.get(startCls.getName());
+        if (cached != null) return cached;
+        java.util.List<Field> out = new java.util.ArrayList<>();
+        for (Class<?> cls = startCls; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
+            for (Field f : cls.getDeclaredFields()) {
+                if (!java.util.List.class.isAssignableFrom(f.getType())) continue;
+                if (f.getType() == java.util.LinkedList.class) continue;
+                out.add(f);
+            }
+        }
+        CHILDREN_FIELDS_CACHE.put(startCls.getName(), out);
+        return out;
     }
 
     /**
@@ -794,6 +823,13 @@ final class PrefRef {
     /** Resolved indexed accessor per (loader, class), plus its negative set. */
     private static final Map<String, Method> INDEXED_ACCESSOR_CACHE = new ConcurrentHashMap<>();
     private static final java.util.Set<String> INDEXED_ACCESSOR_MISS =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /** Candidate children-list fields per class (2.0.32). */
+    private static final Map<String, java.util.List<Field>> CHILDREN_FIELDS_CACHE =
+            new ConcurrentHashMap<>();
+    /** No-arg int accessor per class (2.0.32), plus its negative set. */
+    private static final Map<String, Method> NO_ARG_INT_CACHE = new ConcurrentHashMap<>();
+    private static final java.util.Set<String> NO_ARG_INT_MISS =
             java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     /** androidx.preference.Preference per loader, so the name lookup runs once. */
     private static final Map<String, Class<?>> PREFERENCE_BASE_CACHE = new ConcurrentHashMap<>();
