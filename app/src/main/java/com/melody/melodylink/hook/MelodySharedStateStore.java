@@ -17,6 +17,7 @@ final class MelodySharedStateStore {
     static final String BOSE_EXTRA_STATE_FILE = ".melodylink_bose_extra_state";
     static final String BOSE_EXTRA_COMMAND_FILE = ".melodylink_bose_extra_command";
     static final String BOSE_CNC_COMMAND_FILE = ".melodylink_bose_cnc_command";
+    static final String BOSE_USER_DISCONNECT_FILE = ".melodylink_bose_user_disconnect";
 
     private final File directory;
 
@@ -58,6 +59,36 @@ final class MelodySharedStateStore {
 
     File boseCncCommandFile() {
         return new File(directory, BOSE_CNC_COMMAND_FILE);
+    }
+
+    File boseUserDisconnectFile() {
+        return new File(directory, BOSE_USER_DISCONNECT_FILE);
+    }
+
+    /**
+     * Melody-level "user tapped 断开连接" latch. System-level profiles reconnect on
+     * their own seconds later (TWS auto-reconnect), so no Bluetooth probe can
+     * distinguish that from a genuine reconnect — the intent has to be latched here,
+     * persisted, and cleared only when a reconnect arrives late enough (>=60s) to be
+     * user-initiated (earbuds power-cycled) rather than the automatic one.
+     */
+    static boolean writeBoseUserDisconnect(File file, String address, boolean flag, long at) {
+        return write(file, address + "\n" + (flag ? "1" : "0") + "\n" + at + "\n");
+    }
+
+    /** {flag, at} or null when absent/foreign-address. */
+    static Object[] readBoseUserDisconnect(File file, String expectAddress) {
+        String[] lines = readLines(file, 3);
+        if (lines == null) return null;
+        String address = lines[0].trim();
+        if (address.isEmpty() || "null".equals(address)) return null;
+        if (expectAddress != null && !expectAddress.equalsIgnoreCase(address)) return null;
+        try {
+            return new Object[]{"1".equals(lines[1].trim()),
+                    Long.parseLong(lines[2].trim())};
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     static SharedState readState(File file) {

@@ -583,6 +583,10 @@ public final class HookModule extends XposedModule {
             // converted to the opaque protocol index passed to EarphoneRepository.s0.
             startForegroundStateWatcher();
             startPersistentLogCapture();
+            // 2.0.19: latch the user's 断开连接 intent — system profiles auto-reconnect
+            // seconds later, so the probe alone cannot keep the device marked
+            // disconnected across that bounce, let alone a Melody restart.
+            if (isPrimaryProcess()) registerBoseLinkBroadcasts();
             // Report every hard-coded anchor that this Melody build no longer ships, so a
             // host update is diagnosed from evidence instead of from guesswork.
             mainHandler.post(() -> ClassAudit.run(loader));
@@ -1477,11 +1481,11 @@ public final class HookModule extends XposedModule {
                         // host's own value so its native disconnected UI takes over.
                         // Write-path gating still uses isSonyConnected(), untouched.
                         if ("dtoConnectionState".equals(label)) {
-                            if (isBoseLinkConnectedCached()) result = 2;
+                            if (isBoseUiConnectedCached()) result = 2;
                         } else if ("dtoAclState".equals(label)) {
-                            if (isBoseLinkConnectedCached()) result = 2;
+                            if (isBoseUiConnectedCached()) result = 2;
                         } else if ("dtoInitCompleted".equals(label)) {
-                            result = isBoseLinkConnectedCached();
+                            result = isBoseUiConnectedCached();
                         } else if ("dtoNoiseReductionMode".equals(label)) {
                             EarbudsState state = sonySessionState.getAnc();
                             int mode = state == null ? readSharedSonyModeIndex()
@@ -1494,9 +1498,9 @@ public final class HookModule extends XposedModule {
                                 || label.startsWith("detailInfoHeadsetState")) {
                             // 2.0.15: same honest projection as dtoConnectionState — the
                             // detail header swaps battery for disconnect_state_tv on this.
-                            if (isBoseLinkConnectedCached()) result = 2;
+                            if (isBoseUiConnectedCached()) result = 2;
                         } else if (label.startsWith("detailInfoSupportSpp")) {
-                            if (isBoseLinkConnectedCached()) result = true;
+                            if (isBoseUiConnectedCached()) result = true;
                         }
                     }
                     if (("opsNoiseReductionMode".equals(label) || "noiseReductionModeVO".equals(label))
@@ -5085,6 +5089,11 @@ public final class HookModule extends XposedModule {
         return application == null ? null : MelodySharedStateStore.from(application).boseExtraCommandFile();
     }
 
+    private static File boseUserDisconnectFile() {
+        Application application = currentApplication();
+        return application == null ? null : MelodySharedStateStore.from(application).boseUserDisconnectFile();
+    }
+
     private static File boseCncCommandFile() {
         Application application = currentApplication();
         return application == null ? null : MelodySharedStateStore.from(application).boseCncCommandFile();
@@ -5216,6 +5225,68 @@ public final class HookModule extends XposedModule {
     private volatile String lastProbeDetail = "";
 
     /**
+     * Latches the user's 断开连接 intent from the system profile-state broadcasts.
+     * Melody's disconnect drops A2DP/HFP (the probe sees it), but TWS earbuds
+     * auto-reconnect ~12s later, so the drop alone cannot stay authoritative —
+     * especially across a Melody restart while the earbuds are (system-)connected.
+     * A reconnect is honored only when it arrives >=60s after the drop: the
+     * automatic one never does, a power-cycle does.
+     */
+    private void registerBoseLinkBroadcasts() {
+        try {
+            Application application = currentApplication();
+            if (application == null) return;
+            android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
+                @Override public void onReceive(Context context, Intent intent) {
+                    try {
+                        Object device = intent.getParcelableExtra(
+                                "android.bluetooth.device.extra.DEVICE");
+                        String address = device instanceof BluetoothDevice
+                                ? ((BluetoothDevice) device).getAddress() : null;
+                        if (address == null || !isTargetAddress(address)) return;
+                        int state = intent.getIntExtra(
+                                "android.bluetooth.profile.extra.STATE", -1);
+                        if (state == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED
+                                || state == android.bluetooth.BluetoothProfile.STATE_DISCONNECTING) {
+                            setUserDisconnectedLatch(address, true);
+                        } else if (state == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
+                            Object[] latched = MelodySharedStateStore.readBoseUserDisconnect(
+                                    boseUserDisconnectFile(), address);
+                            boolean flag = latched != null && (Boolean) latched[0];
+                            long at = latched == null ? 0L : (Long) latched[1];
+                            if (flag && System.currentTimeMillis() - at >= 60000L) {
+                                log(Log.INFO, TAG,
+                                        event("Bose reconnect accepted (>=60s after disconnect)"));
+                                setUserDisconnectedLatch(address, false);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        log(Log.WARN, TAG, "Bose link broadcast handling failed", t);
+                    }
+                }
+            };
+            android.content.IntentFilter filter = new android.content.IntentFilter();
+            filter.addAction("android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED");
+            filter.addAction("android.bluetooth.headset.profile.action.CONNECTION_STATE_CHANGED");
+            application.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            log(Log.INFO, TAG, event("registered Bose link broadcast latch"));
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose link broadcast registration failed", t);
+        }
+    }
+
+    private void setUserDisconnectedLatch(String address, boolean value) {
+        try {
+            MelodySharedStateStore.writeBoseUserDisconnect(
+                    boseUserDisconnectFile(), address, value, System.currentTimeMillis());
+            uiStateCheckedAt = 0; // force the cached combined state to re-read
+            log(Log.INFO, TAG, event("Bose user-disconnect latch -> " + value));
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "Bose user-disconnect latch write failed", t);
+        }
+    }
+
+    /**
      * Memoized variant for hook paths that may fire per UI bind: the underlying probe
      * involves binder calls, so never run it more often than every 500 ms.
      */
@@ -5223,6 +5294,31 @@ public final class HookModule extends XposedModule {
     private volatile boolean lastLinkState = true;
     private long lastMainLinkProbeAt;
     private Boolean lastMainLinkUp;
+    private volatile long uiStateCheckedAt;
+    private volatile boolean lastUiConnected = true;
+
+    /**
+     * The combined "show the device as connected" state: live profile link AND not
+     * latched as user-disconnected. The latch survives Melody restarts, which is
+     * what keeps a 断开-then-restart device showing disconnected even though the
+     * system profiles are (auto-re)connected.
+     */
+    private boolean isBoseUiConnectedCached() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - uiStateCheckedAt >= 500L) {
+            Boolean latched = null;
+            try {
+                Object[] value = MelodySharedStateStore.readBoseUserDisconnect(
+                        boseUserDisconnectFile(), null);
+                latched = value == null ? null : (Boolean) value[0];
+            } catch (Throwable ignored) {
+            }
+            lastUiConnected = isBoseLinkConnectedCached() && !Boolean.TRUE.equals(latched);
+            uiStateCheckedAt = now;
+        }
+        return lastUiConnected;
+    }
+
     private boolean isBoseLinkConnectedCached() {
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - linkStateCheckedAt >= 500L) {
@@ -5292,7 +5388,7 @@ public final class HookModule extends XposedModule {
         long now = android.os.SystemClock.elapsedRealtime();
         if (!force && now - lastCncEnabledCheckAt < 2000L) return;
         lastCncEnabledCheckAt = now;
-        boolean connected = isBoseLinkConnected();
+        boolean connected = isBoseUiConnectedCached();
         if (!force && lastCncEnabled != null && lastCncEnabled == connected) return;
         lastCncEnabled = connected;
         final boolean enabled = connected;
@@ -6519,7 +6615,7 @@ public final class HookModule extends XposedModule {
                     // 2.0.18: only pull once the probe is trusted — during the
                     // fail-open window the earbuds may be disconnected and RFCOMM
                     // still succeeds over the surviving ACL link.
-                    if (earphoneRepository != null && isBoseLinkConnectedCached()
+                    if (earphoneRepository != null && isBoseUiConnectedCached()
                             && isBoseLinkProbeTrusted()
                             && boseSessionState.getBattery() == null) {
                         log(Log.INFO, TAG, event("repository first observed; pulling Bose battery"));
@@ -6558,7 +6654,7 @@ public final class HookModule extends XposedModule {
             long now = android.os.SystemClock.elapsedRealtime();
             if (now - lastMainLinkProbeAt >= 5000L) {
                 lastMainLinkProbeAt = now;
-                boolean up = isBoseLinkConnectedCached();
+                boolean up = isBoseUiConnectedCached();
                 // null→up counts too, but never pull during the fail-open window:
                 // 0591 log — the untrusted "up" fired a BMAP session that SUCCEEDED
                 // over the surviving ACL link and repopulated battery on a device
@@ -7352,7 +7448,7 @@ public final class HookModule extends XposedModule {
         // got their battery cleared too. EarphoneDTO is an immutable data class, so
         // battery values written earlier survive copy() rebuilds and would keep
         // showing on a disconnected device — actively clear when the link is down.
-        if (!isBoseLinkConnected()) {
+        if (!isBoseUiConnectedCached()) {
             // writeIntField cannot distinguish "changed" from "already 0", and the DTO
             // rebuild fires often — only touch fields (and log) when something is stale.
             boolean stale = readIntField(dto, "leftBattery", 0) != 0
