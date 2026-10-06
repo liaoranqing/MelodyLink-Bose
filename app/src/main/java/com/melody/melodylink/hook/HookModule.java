@@ -5232,10 +5232,20 @@ public final class HookModule extends XposedModule {
      * A reconnect is honored only when it arrives >=60s after the drop: the
      * automatic one never does, a power-cycle does.
      */
+    private final java.util.concurrent.atomic.AtomicBoolean boseLinkBroadcastsRegisterAttempted =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     private void registerBoseLinkBroadcasts() {
+        // Hook setup can run before Application.attach (2.0.0 lesson): 0594 showed the
+        // 2.0.19 receiver silently never registering because currentApplication() was
+        // null at setup time. Retry from the 250ms watcher until it lands.
+        if (!boseLinkBroadcastsRegisterAttempted.compareAndSet(false, true)) return;
         try {
             Application application = currentApplication();
-            if (application == null) return;
+            if (application == null) {
+                boseLinkBroadcastsRegisterAttempted.set(false);
+                return;
+            }
             android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
                 @Override public void onReceive(Context context, Intent intent) {
                     try {
@@ -5248,7 +5258,7 @@ public final class HookModule extends XposedModule {
                                 "android.bluetooth.profile.extra.STATE", -1);
                         if (state == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED
                                 || state == android.bluetooth.BluetoothProfile.STATE_DISCONNECTING) {
-                            setUserDisconnectedLatch(address, true);
+                            latchBoseUserDisconnect(true);
                         } else if (state == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
                             Object[] latched = MelodySharedStateStore.readBoseUserDisconnect(
                                     boseUserDisconnectFile(), address);
@@ -5257,7 +5267,7 @@ public final class HookModule extends XposedModule {
                             if (flag && System.currentTimeMillis() - at >= 60000L) {
                                 log(Log.INFO, TAG,
                                         event("Bose reconnect accepted (>=60s after disconnect)"));
-                                setUserDisconnectedLatch(address, false);
+                                latchBoseUserDisconnect(false);
                             }
                         }
                     } catch (Throwable t) {
@@ -5271,12 +5281,38 @@ public final class HookModule extends XposedModule {
             application.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
             log(Log.INFO, TAG, event("registered Bose link broadcast latch"));
         } catch (Throwable t) {
+            boseLinkBroadcastsRegisterAttempted.set(false);
             log(Log.WARN, TAG, "Bose link broadcast registration failed", t);
         }
     }
 
-    private void setUserDisconnectedLatch(String address, boolean value) {
+    /**
+     * Second, broadcast-independent latch path: a trusted probe going down IS the
+     * user-visible drop (Melody's 断开连接 drops A2DP/HFP). The reconnect-side clear
+     * stays broadcast-only, so the automatic ~12s bounce can never un-latch.
+     */
+    private long lastLatchProbeCheckAt;
+    private Boolean lastTrustedLinkUp;
+    private void latchBoseUserDisconnectOnProbeDown() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastLatchProbeCheckAt < 2000L) return;
+        lastLatchProbeCheckAt = now;
+        if (!isBoseLinkProbeTrusted()) return;
+        boolean up = isBoseLinkConnectedCached();
+        if (lastTrustedLinkUp != null && lastTrustedLinkUp && !up) {
+            latchBoseUserDisconnect(true);
+        }
+        lastTrustedLinkUp = up;
+    }
+
+    private void latchBoseUserDisconnect(boolean value) {
         try {
+            String address = targetAddress != null ? targetAddress
+                    : MelodySharedStateStore.readBoseExtraAddress(boseExtraStateFile());
+            if (address == null && !BoseDeviceConfig.INSTANCE.getKNOWN_MACS().isEmpty()) {
+                address = BoseDeviceConfig.INSTANCE.getKNOWN_MACS().iterator().next();
+            }
+            if (address == null) return;
             MelodySharedStateStore.writeBoseUserDisconnect(
                     boseUserDisconnectFile(), address, value, System.currentTimeMillis());
             uiStateCheckedAt = 0; // force the cached combined state to re-read
@@ -6649,6 +6685,11 @@ public final class HookModule extends XposedModule {
         // Bluetooth link, so a disconnected device cannot drag 降噪等级.
         if (!isPrimaryProcess()) applyBoseCncEnabled(false);
         if (isPrimaryProcess()) {
+            // 2.0.20: register the disconnect latch lazily — hook setup can predate
+            // Application.attach, so retry from this 250ms tick until it lands.
+            registerBoseLinkBroadcasts();
+            // 2.0.20: latch on a trusted probe drop too, independent of broadcasts.
+            latchBoseUserDisconnectOnProbeDown();
             // 2.0.15: on a disconnect→connect transition, pull battery right away so
             // the 通用设置 header does not wait for the next page-driven BMAP session.
             long now = android.os.SystemClock.elapsedRealtime();
