@@ -5299,8 +5299,8 @@ public final class HookModule extends XposedModule {
             }
             // 2.0.16: the Bose 音效 rows follow the same gate — writing to a
             // disconnected headset silently fails anyway, and a dead row reads as a bug.
-            for (List<Object> rows : new List<?>[]{boseEqSliders, boseButtonDropdowns,
-                    boseModeSlotSliders}) {
+            for (java.util.List<?> rows : new java.util.List<?>[]{boseEqSliders,
+                    boseButtonDropdowns, boseModeSlotSliders}) {
                 for (Object row : rows) {
                     if (row == null) continue;
                     setPreferenceValue(row, "setEnabled", enabled);
