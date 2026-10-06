@@ -145,6 +145,12 @@ public final class HookModule extends XposedModule {
     private volatile boolean retainSharedSonyStateAfterCommandDisconnect;
     private volatile boolean activityLifecycleRegistered;
     private volatile Activity detailActivity;
+    /**
+     * The Melody Activity that is resumed right now, and therefore the only root we trust for
+     * a live preference tree (2.0.29). Every other screen reference we hold can belong to a
+     * page the host already tore down.
+     */
+    private volatile Activity liveHostActivity;
     private volatile Object lastAudioPreferenceAnchor;
     /** The Ba/z noiseReductionModeVO most recently passed to onEarphoneDataChanged (:fg). */
     private volatile Object lastNoiseReductionVo;
@@ -254,6 +260,15 @@ public final class HookModule extends XposedModule {
                 clearSharedSonyCommand();
                 clearSharedSonyBatteryCommand();
                 registerAppVisibilityLifecycleCallbacks();
+                // 2.0.29 depends on those callbacks to know which preference tree is live, so
+                // the 2.0.19 failure mode (setup runs before Application.attach, sees a null
+                // application, returns silently, and is never retried) would now be invisible
+                // corruption rather than a missing feature. Registration is idempotent.
+                for (long delay : new long[]{300L, 1000L, 3000L, 8000L, 20000L}) {
+                    mainHandler.postDelayed(() -> {
+                        if (isPrimaryProcess()) registerAppVisibilityLifecycleCallbacks();
+                    }, delay);
+                }
             }
             ClassLoader loader = param.getClassLoader();
             melodyClassLoader = loader;
@@ -1778,19 +1793,34 @@ public final class HookModule extends XposedModule {
     }
 
     /**
-     * Show or hide every Bose section we injected. The cards themselves are not kept as
-     * fields, so walk each captured row, hide the row and its parent card, and dedupe by
-     * identity so a card with ten rows is only touched once.
+     * Show or hide every Bose section we injected.
+     *
+     * <p>2.0.29: 2.0.28 walked the fields we hold, and the field values proved to belong to a
+     * preference tree the host had already destroyed — {@code rows=14 touched=27} fired while
+     * the screen stayed unchanged. So the row set is now resolved by key from the tree the
+     * resumed Activity shows right now, and our fields are re-pointed at those objects; the
+     * cached fields are only a fallback for when no live tree can be proven.
      */
     private void applyBoseSectionsVisible(final boolean visible) {
         mainHandler.post(() -> {
             java.util.List<Object> rows = new java.util.ArrayList<>();
-            if (boseCncPreference != null) rows.add(boseCncPreference);
-            if (boseCncOneSpacePreference != null) rows.add(boseCncOneSpacePreference);
-            if (boseExtraCategory != null) rows.add(boseExtraCategory);
-            rows.addAll(boseEqSliders);
-            rows.addAll(boseButtonDropdowns);
-            rows.addAll(boseModeSlotSliders);
+            String source = "cached";
+            Object live = liveBoseScreen();
+            if (live != null) {
+                rows.addAll(collectBoseRows(live));
+                if (!rows.isEmpty()) {
+                    source = "live";
+                    adoptLiveBoseRows(rows);
+                }
+            }
+            if (rows.isEmpty()) {
+                if (boseCncPreference != null) rows.add(boseCncPreference);
+                if (boseCncOneSpacePreference != null) rows.add(boseCncOneSpacePreference);
+                if (boseExtraCategory != null) rows.add(boseExtraCategory);
+                rows.addAll(boseEqSliders);
+                rows.addAll(boseButtonDropdowns);
+                rows.addAll(boseModeSlotSliders);
+            }
             java.util.Set<Object> seen = java.util.Collections.newSetFromMap(
                     new java.util.IdentityHashMap<>());
             int touched = 0;
@@ -1806,9 +1836,206 @@ public final class HookModule extends XposedModule {
                 } catch (Throwable ignored) {
                 }
             }
-            MLog.event("bose.sections.visibility", "visible", visible,
+            MLog.event("bose.sections.visibility", "visible", visible, "source", source,
                     "rows", rows.size(), "touched", touched);
         });
+    }
+
+    private Object liveBoseScreen() {
+        java.util.List<Object> screens = liveBoseScreens();
+        return screens.isEmpty() ? null : screens.get(0);
+    }
+
+    /**
+     * Every non-empty PreferenceScreen of the Activity resumed right now, best candidate first.
+     * Unlike {@link #boseLiveScreen()} this never consults our own bookkeeping, so a page the
+     * host already tore down cannot keep reporting itself as live (2.0.29).
+     */
+    private java.util.List<Object> liveBoseScreens() {
+        java.util.List<Object> ranked = new java.util.ArrayList<>();
+        java.util.List<Object> others = new java.util.ArrayList<>();
+        try {
+            Activity activity = liveHostActivity;
+            if (activity == null || activity.isFinishing()) return ranked;
+            Object manager = null;
+            for (String name : new String[]{"getSupportFragmentManager", "getFragmentManager"}) {
+                manager = PrefRef.invokeNoArg(activity, name);
+                if (manager != null) break;
+            }
+            if (manager == null) return ranked;
+            java.util.List<?> fragments = readFragmentList(manager);
+            if (fragments == null) return ranked;
+            for (Object fragment : fragments) {
+                if (fragment == null) continue;
+                Object screen = PrefRef.getPreferenceScreen(fragment);
+                if (screen == null) continue;
+                if (PrefRef.getPreferenceCount(screen) <= 0) continue;
+                // Prefer a screen we can actually attribute to our pages: one that already
+                // carries our keys, or one carrying the host noise row we anchor on. A random
+                // Melody page's screen must never be able to say "already injected".
+                if (PrefRef.findPreferenceRecursive(screen, BOSE_CNC_KEY) != null
+                        || PrefRef.findPreferenceRecursive(screen, BOSE_EXTRA_CATEGORY_KEY) != null
+                        || PrefRef.findPreferenceRecursive(screen, "NoiseReductionItem") != null
+                        || PrefRef.findPreferenceRecursive(screen, "OneSpaceNoisePreference") != null) {
+                    ranked.add(screen);
+                } else {
+                    others.add(screen);
+                }
+            }
+            ranked.addAll(others);
+        } catch (Throwable t) {
+            // Whatever was classified so far is still better than nothing.
+        }
+        return ranked;
+    }
+
+    /**
+     * False only when we can prove the anchor is not on any screen the front Activity shows.
+     * With no live screen to compare against this stays true, which is the pre-2.0.29 behaviour.
+     */
+    private boolean anchorIsLive(Object anchor) {
+        if (anchor == null) return false;
+        java.util.List<Object> screens = liveBoseScreens();
+        if (screens.isEmpty()) return true;
+        for (Object screen : screens) {
+            if (containsRow(screen, anchor, 0)) return true;
+        }
+        return false;
+    }
+
+    /** Every preference under {@code root} whose key is ours, in tree order (2.0.29). */
+    private java.util.List<Object> collectBoseRows(Object root) {
+        java.util.List<Object> out = new java.util.ArrayList<>();
+        collectBoseRowsInto(root, out, 0);
+        return out;
+    }
+
+    private void collectBoseRowsInto(Object node, java.util.List<Object> out, int depth) {
+        if (node == null || depth > 12) return;
+        String key = PrefRef.getKey(node);
+        if (key != null && key.startsWith("melodylink.bose.")) out.add(node);
+        int count = PrefRef.getPreferenceCount(node);
+        for (int i = 0; i < count; i++) {
+            collectBoseRowsInto(PrefRef.getPreference(node, i), out, depth + 1);
+        }
+    }
+
+    /** Identity check: is this exact object still hanging under {@code root}? */
+    private static boolean containsRow(Object root, Object row, int depth) {
+        if (root == null || row == null || depth > 12) return false;
+        if (root == row) return true;
+        int count = PrefRef.getPreferenceCount(root);
+        for (int i = 0; i < count; i++) {
+            if (containsRow(PrefRef.getPreference(root, i), row, depth + 1)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Re-point the cached fields at the live row objects so no other consumer reads a ghost.
+     * The 通用设置 copy ({@code boseCncOneSpacePreference}) lives in the view hierarchy rather
+     * than in a screen, so it is deliberately left alone here.
+     */
+    private void adoptLiveBoseRows(java.util.List<Object> rows) {
+        boseCncPreference = null;
+        boseExtraCategory = null;
+        boseEqSliders.clear();
+        boseButtonDropdowns.clear();
+        boseModeSlotSliders.clear();
+        for (Object row : rows) {
+            String key = PrefRef.getKey(row);
+            if (key == null) continue;
+            // The card wrappers share their row's prefix (melodylink.bose.eq.card.0 and so on)
+            // and must not be adopted into the row lists: those get re-synced with slider-only
+            // calls such as setProgress.
+            boolean card = key.contains(".card.");
+            if (BOSE_CNC_KEY.equals(key)) boseCncPreference = row;
+            else if (BOSE_EXTRA_CATEGORY_KEY.equals(key)) boseExtraCategory = row;
+            else if (card) {
+                // Visibility still applies to cards through their children's getParent(); they
+                // are intentionally not cached.
+            } else if (key.startsWith("melodylink.bose.eq.")) boseEqSliders.add(row);
+            else if (key.startsWith("melodylink.bose.btn.")) boseButtonDropdowns.add(row);
+            else if (key.startsWith("melodylink.bose.mode.")) boseModeSlotSliders.add(row);
+        }
+    }
+
+    /**
+     * Forget every reference that belonged to a destroyed Activity (2.0.29). Its Preference
+     * objects stay reachable through our own fields — which is precisely what kept the dead
+     * page's screen alive inside the weak {@link #boseInjectedScreens} set — so clearing here is
+     * what makes that weakness do its job.
+     */
+    private void invalidateBoseTreeFor(Activity dead) {
+        if (dead == null) return;
+        int dropped = 0;
+        dropped += dropDeadRow(boseCncPreference, dead) ? 1 : 0;
+        dropped += dropDeadRow(boseCncOneSpacePreference, dead) ? 1 : 0;
+        dropped += dropDeadRow(boseExtraCategory, dead) ? 1 : 0;
+        dropped += dropDeadRow(noiseEffectRow, dead) ? 1 : 0;
+        dropped += dropDeadRow(oneSpaceNoiseEffectRow, dead) ? 1 : 0;
+        dropped += dropDeadRows(boseEqSliders, dead);
+        dropped += dropDeadRows(boseButtonDropdowns, dead);
+        dropped += dropDeadRows(boseModeSlotSliders, dead);
+        if (dropped > 0) {
+            MLog.event("bose.tree.invalidated", "activity", dead.getClass().getSimpleName(),
+                    "dropped", dropped);
+        }
+    }
+
+    private boolean dropDeadRow(Object row, Activity dead) {
+        if (!belongsTo(row, dead)) return false;
+        if (row == boseCncPreference) boseCncPreference = null;
+        if (row == boseCncOneSpacePreference) boseCncOneSpacePreference = null;
+        if (row == boseExtraCategory) boseExtraCategory = null;
+        if (row == noiseEffectRow) noiseEffectRow = null;
+        if (row == oneSpaceNoiseEffectRow) oneSpaceNoiseEffectRow = null;
+        return true;
+    }
+
+    private int dropDeadRows(java.util.List<Object> rows, Activity dead) {
+        int dropped = 0;
+        java.util.Iterator<Object> it = rows.iterator();
+        while (it.hasNext()) {
+            if (belongsTo(it.next(), dead)) {
+                it.remove();
+                dropped++;
+            }
+        }
+        return dropped;
+    }
+
+    /** True when {@code row}'s own context is the given Activity (rows survive their page). */
+    private static boolean belongsTo(Object row, Activity activity) {
+        if (row == null || activity == null) return false;
+        Object context = PrefRef.invokeNoArg(row, "getContext");
+        if (!(context instanceof Context)) return false;
+        return findActivity((Context) context) == activity;
+    }
+
+    /**
+     * Called on every resume. Makes the injected sections self-healing: if the page the user
+     * came back to has no Bose rows and Bose is connected, install into THAT tree; if it has
+     * them, re-apply the connection gate to the live objects (2.0.29).
+     */
+    private void reconcileBoseTreeWithLiveScreen() {
+        try {
+            Object live = liveBoseScreen();
+            if (live == null) return;
+            int liveRows = collectBoseRows(live).size();
+            boolean connected = isBoseUiConnectedCached();
+            MLog.event("bose.tree.reconcile", "live_rows", liveRows, "connected", connected,
+                    "bonded", boseBonded(),
+                    "activity", liveHostActivity == null ? "null"
+                            : liveHostActivity.getClass().getSimpleName());
+            if (liveRows == 0) {
+                if (boseBonded() && connected) installBoseIntoLiveScreen();
+                return;
+            }
+            applyBoseSectionsVisible(connected);
+        } catch (Throwable t) {
+            MLog.event("bose.tree.reconcile_error", "error", MLog.compactThrowable(t));
+        }
     }
 
     private static void notifyPreferenceChanged(Object preference, String which) {
@@ -2047,6 +2274,12 @@ public final class HookModule extends XposedModule {
 
     /** The PreferenceScreen of the fragment currently hosting our anchor. */
     private Object boseLiveScreen() {
+        // 2.0.29: ask the resumed Activity first. The set below is weak, but our own row
+        // fields kept the destroyed page's screen alive through their parent chains, so the
+        // first non-empty entry could be a tree the host had already thrown away — which made
+        // isBoseInjected() answer "already injected" about a ghost and skip the rebuild.
+        Object live = liveBoseScreen();
+        if (live != null) return live;
         try {
             // Scan the whole set: it holds screens from both pages, and picking
             // iterator().next() would report "already injected" for the detail page just
@@ -2094,6 +2327,31 @@ public final class HookModule extends XposedModule {
      * both is safe.
      */
     private Object pickLiveAnchor() {
+        Object anchor = pickCachedAnchor();
+        // 2.0.29: the fields above are only what the host last handed us. When the page has
+        // been rebuilt they point into a dead tree, and the idempotency check downstream then
+        // "finds" our section there and reports a successful install that the user cannot see.
+        Object live = liveBoseScreen();
+        if (live == null) return anchor;
+        if (anchor != null && containsRow(live, anchor, 0)) return anchor;
+        for (String key : new String[]{"NoiseReductionItem", "OneSpaceNoisePreference"}) {
+            Object fresh = PrefRef.findPreferenceRecursive(live, key);
+            if (fresh == null) continue;
+            if (NOISE_ROW_CLASS_ONESPACE.equals(fresh.getClass().getName())) {
+                oneSpaceNoiseEffectRow = fresh;
+            } else {
+                noiseEffectRow = fresh;
+            }
+            MLog.event("bose.anchor.refreshed", "key", key,
+                    "was", anchor == null ? "null" : anchor.getClass().getSimpleName(),
+                    "now", fresh.getClass().getSimpleName());
+            return fresh;
+        }
+        return anchor;
+    }
+
+    /** The two captured host noise rows, front page preferred. May be stale; see pickLiveAnchor(). */
+    private Object pickCachedAnchor() {
         boolean detailFront = detailActivity != null
                 && !detailActivity.isFinishing()
                 && detailActivity.hasWindowFocus();
@@ -2111,6 +2369,15 @@ public final class HookModule extends XposedModule {
         // detail anchor because that is the page that renders nothing without us.
         Object noiseRow = pickLiveAnchor();
         if (noiseRow == null) return false;
+        // 2.0.29: refuse to write into a tree we cannot see. Without this the call below
+        // "succeeds" against the destroyed page — it finds its own section already there —
+        // and the user gets evt=bose.inject.on_link_up ok=true with nothing on screen.
+        if (!anchorIsLive(noiseRow)) {
+            MLog.event("bose.inject.anchor_offtree",
+                    "anchor", noiseRow.getClass().getSimpleName(),
+                    "key", PrefRef.getKey(noiseRow));
+            return false;
+        }
 
         ClassLoader loader = noiseRow.getClass().getClassLoader();
         // 0.5.11: this used to bail out when no PreferenceScreen had been located yet,
@@ -5796,6 +6063,14 @@ public final class HookModule extends XposedModule {
 
                 @Override
                 public void onActivityResumed(Activity activity) {
+                    liveHostActivity = activity;
+                    // 2.0.29: leaving and re-entering a page rebuilds the whole preference
+                    // tree, but nothing told us — so the rows in our fields and the screens in
+                    // boseInjectedScreens kept pointing at the destroyed instance. The host
+                    // reported rows=14 touched=27 while the screen did not change (2.0.28
+                    // revalidation, logs/0600). Reconcile against the tree this Activity
+                    // actually shows now; the call is idempotent and cheap.
+                    mainHandler.post(HookModule.this::reconcileBoseTreeWithLiveScreen);
                 }
 
                 @Override
@@ -5818,6 +6093,8 @@ public final class HookModule extends XposedModule {
 
                 @Override
                 public void onActivityDestroyed(Activity activity) {
+                    if (liveHostActivity == activity) liveHostActivity = null;
+                    invalidateBoseTreeFor(activity);
                 }
             });
             activityLifecycleRegistered = true;
