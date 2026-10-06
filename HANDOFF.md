@@ -1,8 +1,8 @@
 # MelodyLink-Bose 项目交接文档（HANDOFF）
 
-> **写给接手的下一个 AI / 开发者。**
-> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-06 00:10 由 Qoder 更新** · 当前版本 **2.0.12 / versionCode 212** · HEAD=origin/main=`ff50c2f`（CI run 37337125325 success）**设备仍装 2.0.11**。模型已修好（2.0.6）；bug1 耳机设置侧已由 2.0.11 修好并经用户确认，通用设置侧由 2.0.12 修复待装机验证。实时状态与下一步判定见 `opslog/STATUS.md`。
-> 这份文档是**技术权威交接入口**，接手后先通读全文，再动手。**接管流程/日志规范先看工作区根目录 `ONCALL-PROTOCOL.md` 与 `opslog/STATUS.md`**（当前状态快照以 STATUS.md 为准）。
+> **写给接手的下一个 AI / 开发者。**>   
+> 生成时间：2026-10-05 19:50（前任 workbuddy 模型）· **2026-10-06 00:10 由 Qoder 更新** · 当前版本 **2.0.12 / versionCode 212** · HEAD=origin/main=`ff50c2f`（CI run 37337125325 success）**设备仍装 2.0.11**。模型已修好（2.0.6）；bug1 耳机设置侧已由 2.0.11 修好并经用户确认，通用设置侧由 2.0.12 修复待装机验证。实时状态与下一步判定见 `opslog/STATUS.md`。>   
+> 这份文档是**技术权威交接入口**，接手后先通读全文，再动手。**接管流程/日志规范先看工作区根目录 `ONCALL-PROTOCOL.md` 与 `opslog/STATUS.md`**（当前状态快照以 STATUS.md 为准）。>   
 > **交接状态**：前任 workbuddy 模型 token 耗尽，2026-10-05 起由 Qoder 模型接管；2026-10-06 00:40 Qoder 完成阶段性交接（bug1 两页全部结案）。**完整自包含交接全书见 `docs/HANDOVER-2026-10-06.md`**（背景/环境/选型理由/架构/文件结构/版本时间线/禁忌/方法论/移植指南/下一步）。遗留 bug2(内容偶发消失，需现场复现取证，任务 #9)；模型入场动画略卡（#8，用户明确后置）。最高优先级见 §8。
 
 ---
@@ -55,18 +55,18 @@
 
 ## 3. 架构地图（app/src/main/java/com/melody/melodylink/）
 
-| 文件 | 职责 |
-|---|---|
-| `hook/HookModule.java`（~8000 行，**核心**） | 所有 hook 注册 + 按 label 分发：设备伪装、catalog 注入、产品图、ANC 路由、Preference 注入、CNC 滑条 |
-| `hook/PrefRef.java` | Preference 树反射工具（findPreferenceRecursive / getOrder / shiftOrders） |
-| `hook/MLog.java` | 统一日志，`MLog.event("evt=...", "k", v)` 事件 key 化，便于 grep |
-| `hook/BoseControlProviderBridge.java` | EarphoneControlProvider 的 query/call hook（音量面板磁贴） |
-| `hook/MelodySharedStateStore.java` | 跨进程文件通道（主进程 ↔ :fg） |
-| `hook/MelodyStateBridge.kt` | AncMode→Melody 索引映射 |
-| `bose/BoseTransport.java` | BMAP 短会话 RFCOMM |
-| `bose/BoseBmap.java` | 帧编解码（从 A 版移植，勿动） |
-| `bose/BoseDeviceConfig.kt` | MAC 白名单、模式常量、capabilities |
-| `vendor/*/`、`sony/ huawei/ xiaomi/ samsung/` | 各品牌适配层（移植模板，声明式 JSON 驱动） |
+| 文件                                           | 职责                                                                      |
+| -------------------------------------------- | ----------------------------------------------------------------------- |
+| `hook/HookModule.java`（~8000 行，**核心**）       | 所有 hook 注册 + 按 label 分发：设备伪装、catalog 注入、产品图、ANC 路由、Preference 注入、CNC 滑条 |
+| `hook/PrefRef.java`                          | Preference 树反射工具（findPreferenceRecursive / getOrder / shiftOrders）      |
+| `hook/MLog.java`                             | 统一日志，`MLog.event("evt=...", "k", v)` 事件 key 化，便于 grep                   |
+| `hook/BoseControlProviderBridge.java`        | EarphoneControlProvider 的 query/call hook（音量面板磁贴）                       |
+| `hook/MelodySharedStateStore.java`           | 跨进程文件通道（主进程 ↔ :fg）                                                      |
+| `hook/MelodyStateBridge.kt`                  | AncMode→Melody 索引映射                                                     |
+| `bose/BoseTransport.java`                    | BMAP 短会话 RFCOMM                                                         |
+| `bose/BoseBmap.java`                         | 帧编解码（从 A 版移植，勿动）                                                        |
+| `bose/BoseDeviceConfig.kt`                   | MAC 白名单、模式常量、capabilities                                               |
+| `vendor/*/`、`sony/ huawei/ xiaomi/ samsung/` | 各品牌适配层（移植模板，声明式 JSON 驱动）                                                |
 
 ---
 
@@ -86,10 +86,10 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 **Melody 17.6.3 有两套独立设备目录**，这是本项目踩过最大的坑：
 
-| 类 | 角色 | 查询键 |
-|---|---|---|
-| `L6/a` | SupportConfigManager | MAC 地址 |
-| `c9/a` | WhitelistRepository | productId + 蓝牙名 |
+| 类      | 角色                   | 查询键             |
+| ------ | -------------------- | --------------- |
+| `L6/a` | SupportConfigManager | MAC 地址          |
+| `c9/a` | WhitelistRepository  | productId + 蓝牙名 |
 
 早期只在 `L6/a` 注入克隆条目，却发现 Bose 详情页根本不走这条路——详情页实际走 `c9/a.c(productId, name)`。**#4（Enco 降噪残留）的真正修复是 0.5.74 在 `detail.lookup_stripped` 里按 Bose MAC 正向判据剥离子级**，而不是 0.5.75 的 `Ba/z` getter hook（那是死代码，`bose.vo.*` 事件 0 次）。
 
@@ -99,18 +99,18 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 > 这是逆向工程的事实信息（hook 点对照），不含 OPPO 代码，可安全发布。**注意：Melody 反编译 smali 源码、APK、dex、dexdump 全文都属于 OPPO 版权物，不能上传 GitHub。**
 
-| 功能 | 16.8.3 | 17.6.3 | 证据 |
-|---|---|---|---|
-| whitelist | common.util.V.a | **T.a**(Collection,String,String)→WhitelistConfigDTO | 签名唯一命中 |
-| nativeConnectDevice | E7.c.b | **e7.c.c** | 日志 getDeviceOrCreateDevice |
-| directConnectSpp | E7.c.a | **e7.c.a**(DeviceInfo,Z) | 日志 m_spp_le.directConnectSpp |
-| repositoryGet | U.y | **J.y**(S)→EarphoneDTO | — |
-| repositoryObserve | U.z | **J.A**(S)→LiveData（J.z 是 getEarphoneIdentity，别认错） | 方法体 const-string |
-| detailInfo 三件套 | v9.C1576a | **G9.a**(getConnectionState/getHeadsetConnectionState/getIsSpp) | 结构一致 |
-| noiseReductionModeVO | pa.C1405p | **Ba.z**.getCurrentNoiseReductionModeIndex | — |
-| noiseModeWrite | U.s0 | **J.v0**(I,S)→CF | 实测生效 |
-| 电量状态类 | V$a | **earphone.K$a** | 异常栈实锤 |
-| ANC 结果 DTO | SetCommandStateDTO | **earphone.O**(address,setCommandStatus) | — |
+| 功能                   | 16.8.3             | 17.6.3                                                          | 证据                           |
+| -------------------- | ------------------ | --------------------------------------------------------------- | ---------------------------- |
+| whitelist            | common.util.V.a    | **T.a**(Collection,String,String)→WhitelistConfigDTO            | 签名唯一命中                       |
+| nativeConnectDevice  | E7.c.b             | **e7.c.c**                                                      | 日志 getDeviceOrCreateDevice   |
+| directConnectSpp     | E7.c.a             | **e7.c.a**(DeviceInfo,Z)                                        | 日志 m_spp_le.directConnectSpp |
+| repositoryGet        | U.y                | **J.y**(S)→EarphoneDTO                                          | —                            |
+| repositoryObserve    | U.z                | **J.A**(S)→LiveData（J.z 是 getEarphoneIdentity，别认错）              | 方法体 const-string             |
+| detailInfo 三件套       | v9.C1576a          | **G9.a**(getConnectionState/getHeadsetConnectionState/getIsSpp) | 结构一致                         |
+| noiseReductionModeVO | pa.C1405p          | **Ba.z**.getCurrentNoiseReductionModeIndex                      | —                            |
+| noiseModeWrite       | U.s0               | **J.v0**(I,S)→CF                                                | 实测生效                         |
+| 电量状态类                | V$a                | **earphone.K$a**                                                | 异常栈实锤                        |
+| ANC 结果 DTO           | SetCommandStateDTO | **earphone.O**(address,setCommandStatus)                        | —                            |
 
 **方法论**：`hookNamed` 返回 boolean + `hookAny(label, "类#方法#参数个数", ...)` 多候选绑定，旧名优先新名兜底。定位手段 = 官方 `dexdump.exe -d`（build-tools 37.0.0）+ 方法体 const-string 日志比对。工作区已有现成产物：`dexdump1.txt`/`dexdump2.txt`（17.6.3 全量反汇编，640 万行）、`dexquery.py`、`melody1763.zip`。**不要再手写 DEX 解析器。**
 
@@ -120,13 +120,14 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 
 **三个核心 bug 的最终真相：**
 
-| # | 现象 | 真凶 | 修复 |
-|---|---|---|---|
+| #  | 现象                  | 真凶                                                                  | 修复                                                       |
+| -- | ------------------- | ------------------------------------------------------------------- | -------------------------------------------------------- |
 | #4 | 详情页有 Enco 四级降噪+增强人声 | 克隆条目 `instanceof Parcelable continue` 静默丢弃 Function + 两套 catalog 查错 | 0.5.74 删 Parcelable 跳过 + `detail.lookup_stripped` 正向判据剥离 |
-| #2 | 通用设置无耳机图 | **我们自己的 `hideLoadingView` 无条件 setVisibility(GONE) 误伤容器** | 0.5.78 加类型判断（只隐藏 Lottie/Progress/Loading/Spin） |
-| #1 | 详情页闪→空白→消失 | 第一阶段=finish 拦截制造多实例互杀；第二阶段=DecorView INVISIBLE 是系统 resume 正常中间态 | 0.5.74 回滚 finish 拦截；确认非 bug |
+| #2 | 通用设置无耳机图            | **我们自己的 `hideLoadingView` 无条件 setVisibility(GONE) 误伤容器**            | 0.5.78 加类型判断（只隐藏 Lottie/Progress/Loading/Spin）           |
+| #1 | 详情页闪→空白→消失          | 第一阶段=finish 拦截制造多实例互杀；第二阶段=DecorView INVISIBLE 是系统 resume 正常中间态     | 0.5.74 回滚 finish 拦截；确认非 bug                              |
 
 **其他已确认结论：**
+
 - 磁贴显示前置：SystemUI 锁存 `notifyChange(baseUri, 0x500|1)`，每次查询都要确保发过。
 - ancModeIndex：OFF→0、NOISE_CANCELING→1、TRANSPARENCY/AMBIENT→**2**（写 3 会越界钳回 0）。
 - 电量：投影进 EarphoneDTO 字段（leftBattery/rightBattery/boxBattery/isBatteryInfoReceived），已实测 ✅。
@@ -148,6 +149,8 @@ Bose 被注册为 **Enco X3（productId 0x67410=422928）** 让 Melody 原生 UI
 4. 通用设置图片 / 转圈：2.0.0 已确认修复，随 2.0.6 回归。
 5. **CNC 通用设置滑条**（低优先级）：`cnc.onespace.skip reason=no_tree`。不主动改。
 6. 2.0.0 剥离后 vendor 等已删；加回其他品牌参考 `git show 009def5~1:app/src/main/java/com/melody/melodylink/vendor`。
+
+
 
 ---
 
