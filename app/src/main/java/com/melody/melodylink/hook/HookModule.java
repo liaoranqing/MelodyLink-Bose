@@ -1469,12 +1469,19 @@ public final class HookModule extends XposedModule {
                         }
                     }
                     if (isTargetObject(chain.getThisObject())) {
-                        if ("dtoConnectionState".equals(label) && isSonyConnected()) {
-                            result = 2;
-                        } else if ("dtoAclState".equals(label) && isSonyConnected()) {
-                            result = 2;
+                        // 2.0.15: project the connection state HONESTLY. Faking 2
+                        // unconditionally kept the host rendering a connected device
+                        // forever — battery stayed visible and the native
+                        // disconnect_state_tv never appeared after the earbuds went
+                        // down. 2 = linked (per our own probe); otherwise hand back the
+                        // host's own value so its native disconnected UI takes over.
+                        // Write-path gating still uses isSonyConnected(), untouched.
+                        if ("dtoConnectionState".equals(label)) {
+                            if (isBoseLinkConnectedCached()) result = 2;
+                        } else if ("dtoAclState".equals(label)) {
+                            if (isBoseLinkConnectedCached()) result = 2;
                         } else if ("dtoInitCompleted".equals(label)) {
-                            result = isSonyConnected();
+                            result = isBoseLinkConnectedCached();
                         } else if ("dtoNoiseReductionMode".equals(label)) {
                             EarbudsState state = sonySessionState.getAnc();
                             int mode = state == null ? readSharedSonyModeIndex()
@@ -1485,9 +1492,11 @@ public final class HookModule extends XposedModule {
                     if (isDetailConnectionInfoObject(chain.getThisObject()) && isSonyConnected()) {
                         if (label.startsWith("detailInfoConnectionState")
                                 || label.startsWith("detailInfoHeadsetState")) {
-                            result = 2;
+                            // 2.0.15: same honest projection as dtoConnectionState — the
+                            // detail header swaps battery for disconnect_state_tv on this.
+                            if (isBoseLinkConnectedCached()) result = 2;
                         } else if (label.startsWith("detailInfoSupportSpp")) {
-                            result = true;
+                            if (isBoseLinkConnectedCached()) result = true;
                         }
                     }
                     if (("opsNoiseReductionMode".equals(label) || "noiseReductionModeVO".equals(label))
@@ -5163,11 +5172,18 @@ public final class HookModule extends XposedModule {
         if (device != null && isDeviceConnected(device)) return true;
         ensureBoseProfileProxies();
         boolean probed = false;
+        long now = android.os.SystemClock.elapsedRealtime();
         try {
             Application application = currentApplication();
             for (android.bluetooth.BluetoothProfile proxy :
                     new android.bluetooth.BluetoothProfile[]{a2dpProxy, headsetProxy}) {
                 if (proxy == null) continue;
+                // A freshly bound proxy reports an empty device list for the first few
+                // seconds (2.0.14 log: "disabled" 4s before "enabled" while connected).
+                // Only trust a proxy that has been bound for a while; treat younger
+                // ones as not-yet-probed so the fail-open below keeps us honest.
+                long boundAt = proxy == a2dpProxy ? a2dpBoundAt : headsetBoundAt;
+                if (boundAt == 0 || now - boundAt < 4000L) continue;
                 probed = true;
                 for (BluetoothDevice connected : proxy.getConnectedDevices()) {
                     if (connected != null && isTargetAddress(connected.getAddress())) {
@@ -5193,9 +5209,28 @@ public final class HookModule extends XposedModule {
         return !probed;
     }
 
+    /**
+     * Memoized variant for hook paths that may fire per UI bind: the underlying probe
+     * involves binder calls, so never run it more often than every 500 ms.
+     */
+    private volatile long linkStateCheckedAt;
+    private volatile boolean lastLinkState = true;
+    private long lastMainLinkProbeAt;
+    private Boolean lastMainLinkUp;
+    private boolean isBoseLinkConnectedCached() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - linkStateCheckedAt >= 500L) {
+            lastLinkState = isBoseLinkConnected();
+            linkStateCheckedAt = now;
+        }
+        return lastLinkState;
+    }
+
     private static volatile android.bluetooth.BluetoothProfile a2dpProxy;
     private static volatile android.bluetooth.BluetoothProfile headsetProxy;
     private static volatile boolean profileProxyBindAttempted;
+    private static volatile long a2dpBoundAt;
+    private static volatile long headsetBoundAt;
 
     private void ensureBoseProfileProxies() {
         if (profileProxyBindAttempted) return;
@@ -5204,23 +5239,38 @@ public final class HookModule extends XposedModule {
             Application application = currentApplication();
             BluetoothAdapter adapter = application == null
                     ? null : BluetoothAdapter.getDefaultAdapter();
-            if (application == null || adapter == null) return;
+            if (application == null || adapter == null) {
+                log(Log.WARN, TAG, event("Bose link probe unavailable: no app/adapter"));
+                return;
+            }
             android.bluetooth.BluetoothProfile.ServiceListener listener =
                     new android.bluetooth.BluetoothProfile.ServiceListener() {
                         @Override public void onServiceConnected(int profile,
                                 android.bluetooth.BluetoothProfile proxy) {
+                            long boundAt = android.os.SystemClock.elapsedRealtime();
                             if (profile == android.bluetooth.BluetoothProfile.A2DP) {
                                 a2dpProxy = proxy;
+                                a2dpBoundAt = boundAt;
                             } else if (profile == android.bluetooth.BluetoothProfile.HEADSET) {
                                 headsetProxy = proxy;
+                                headsetBoundAt = boundAt;
                             }
-                            lastCncEnabledCheckAt = 0; // re-evaluate on the next poll
+                            // Re-evaluate once the new proxy is old enough to trust.
+                            mainHandler.postDelayed(() -> {
+                                lastCncEnabledCheckAt = 0;
+                                applyBoseCncEnabled(true);
+                            }, 4500L);
                             log(Log.INFO, TAG, event("Bose link probe proxy bound profile=" + profile));
                         }
 
                         @Override public void onServiceDisconnected(int profile) {
-                            if (profile == android.bluetooth.BluetoothProfile.A2DP) a2dpProxy = null;
-                            else headsetProxy = null;
+                            if (profile == android.bluetooth.BluetoothProfile.A2DP) {
+                                a2dpProxy = null;
+                                a2dpBoundAt = 0;
+                            } else {
+                                headsetProxy = null;
+                                headsetBoundAt = 0;
+                            }
                         }
                     };
             adapter.getProfileProxy(application, listener, android.bluetooth.BluetoothProfile.A2DP);
@@ -6466,6 +6516,18 @@ public final class HookModule extends XposedModule {
         // Bluetooth link, so a disconnected device cannot drag 降噪等级.
         if (!isPrimaryProcess()) applyBoseCncEnabled(false);
         if (isPrimaryProcess()) {
+            // 2.0.15: on a disconnect→connect transition, pull battery right away so
+            // the 通用设置 header does not wait for the next page-driven BMAP session.
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (now - lastMainLinkProbeAt >= 5000L) {
+                lastMainLinkProbeAt = now;
+                boolean up = isBoseLinkConnectedCached();
+                if (lastMainLinkUp != null && !lastMainLinkUp && up) {
+                    log(Log.INFO, TAG, event("Bose link came up; refreshing battery"));
+                    requestSonyBatteryRefresh();
+                }
+                lastMainLinkUp = up;
+            }
             observeSharedSonyCommand();
             observeSharedSonyBatteryCommand();
             observeSharedBoseCncCommand();
