@@ -347,28 +347,37 @@ final class PrefRef {
      * Therefore the found object's own key is verified before it is accepted.
      */
     static Object findPreferenceRecursive(Object container, String key) {
-        return findPreferenceRecursive(container, key, 0);
+        if (container == null || key == null) return null;
+        return findPreferenceRecursive(container, key, 0, new int[]{MAX_WALK_NODES});
     }
 
     /**
      * Depth cap for the recursive walk. Real preference trees here are three or four levels
      * deep, so 16 is generous - but the walk had no bound at all, and the 2.0.30/2.0.31/2.0.32
-     * ANR traces all show the main thread spinning inside it (54.8s of main-thread CPU in one
-     * sample). A cycle is reachable: we insert our own cards into groups the host also writes
-     * to, and one bad parent pointer turns this into an infinite loop. Caching reflection could
-     * not fix that, which is why three versions in a row still froze the page.
+     * ANR traces all show the main thread spinning inside it.
      */
     private static final int MAX_WALK_DEPTH = 16;
 
-    private static Object findPreferenceRecursive(Object container, String key, int depth) {
+    /**
+     * Node budget for one walk. Depth alone was not enough: the freeze was in breadth, one
+     * container reporting an absurd child count. With that now rejected, this is the belt that
+     * makes "a single preference walk blocks the main thread" structurally impossible - the
+     * walk gives up after this many nodes and reports not-found, which every caller already
+     * treats as "not injected here".
+     */
+    private static final int MAX_WALK_NODES = 4000;
+
+    private static Object findPreferenceRecursive(Object container, String key, int depth,
+            int[] budget) {
         if (container == null || key == null || depth > MAX_WALK_DEPTH) return null;
+        if (--budget[0] < 0) return null;
         Object direct = findPreference(container, key);
         if (direct != null && keyMatches(direct, key)) return direct;
         int count = getPreferenceCount(container);
         for (int i = 0; i < count; i++) {
             Object child = getPreference(container, i);
             if (child == null) continue;
-            Object hit = findPreferenceRecursive(child, key, depth + 1);
+            Object hit = findPreferenceRecursive(child, key, depth + 1, budget);
             if (hit != null) return hit;
         }
         return null;
@@ -471,12 +480,36 @@ final class PrefRef {
                 // may well be an unrelated accessor.
                 return fromField;
             }
-            // No field fallback: a negative count can never be a real child count, which rules
-            // out order/resource ids (those are >= 0 but typically small); keep it only when
-            // it is a plausible total.
-            return fromMethod < 0 ? 0 : fromMethod;
+            // No field fallback. The old comment here assumed an unrelated accessor would be
+            // "typically small" - that is false, and it is the 2.0.30-2.0.33 freeze. On 17.6.3 a
+            // leaf Preference declares exactly getLayoutResource()/getOrder()/
+            // getWidgetLayoutResource() as its no-arg int methods (verified in smali), and a
+            // resource id is ~2.1e9, so getPreferenceCount(leaf) returned 2131493245 and every
+            // "for (i = 0; i < count; i++) getPreference(...)" spun on the main thread for
+            // seconds. The ANR trace was: isBoseInjected <- findPreferenceRecursive <-
+            // getPreference <- findIndexedAccessor, recursion only three levels deep - a
+            // breadth explosion, not a cycle.
+            if (fromMethod < 0 || fromMethod > MAX_PLAUSIBLE_CHILDREN) {
+                reportBogusCount(container, fromMethod);
+                return 0;
+            }
+            return fromMethod;
         } catch (Throwable t) {
             return Math.max(fromField, 0);
+        }
+    }
+
+    /** No real group on this page has more than a few dozen children; beyond this the count is a resource id. */
+    private static final int MAX_PLAUSIBLE_CHILDREN = 512;
+    private static final java.util.concurrent.atomic.AtomicInteger BOGUS_COUNT_LOGS =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Bounded so a pathological tree cannot itself become a log flood. */
+    private static void reportBogusCount(Object container, int raw) {
+        int seen = BOGUS_COUNT_LOGS.getAndIncrement();
+        if (seen < 8) {
+            MLog.event("pref.count_bogus", "class", container.getClass().getName(),
+                    "raw", raw, "seen", seen + 1);
         }
     }
 
