@@ -5168,8 +5168,6 @@ public final class HookModule extends XposedModule {
      */
     @SuppressLint("MissingPermission")
     private boolean isBoseLinkConnected() {
-        BluetoothDevice device = targetBoseDevice;
-        boolean hiddenUp = device != null && isDeviceConnected(device);
         ensureBoseProfileProxies();
         boolean probed = false;
         boolean a2dpUp = false;
@@ -5193,18 +5191,25 @@ public final class HookModule extends XposedModule {
                     }
                 }
             }
-            // 2.0.16: GATT_SERVER dropped as a positive. 0590 log: after the user
-            // taps 断开连接 the BLE link persists, so the earbuds kept showing up on
-            // the phone's GATT server and the probe reported "up" while A2DP/HEADSET
-            // were long gone — the whole reason 断开 looked connected.
+            // Positives are ONLY the per-profile A2DP/HEADSET lists:
+            // - GATT_SERVER dropped in 2.0.16 (the BLE link survives 断开连接);
+            // - hidden BluetoothDevice.getConnectionState() dropped in 2.0.18 (0591
+            //   log: it sees the surviving ACL/LE link and reported "up" while the
+            //   A2DP/HEADSET lists were empty — the exact state users call 断开).
         } catch (Throwable ignored) {
         }
-        lastProbeDetail = "hidden=" + (hiddenUp ? 1 : 0)
-                + " a2dp=" + (probed ? (a2dpUp ? 1 : 0) : -1)
-                + " headset=" + (headsetProxy == null ? -1 : (headsetUp ? 1 : 0));
-        if (hiddenUp) return true;
+        lastProbeDetail = "a2dp=" + (probed ? (a2dpUp ? 1 : 0) : -1)
+                + " headset=" + (headsetProxy == null || headsetBoundAt == 0
+                        || now - headsetBoundAt < 4000L ? -1 : (headsetUp ? 1 : 0));
         // No trusted probe yet (first seconds after process start): unknown, fail open.
         return probed ? (a2dpUp || headsetUp) : true;
+    }
+
+    /** True when both profile proxies are bound and old enough to trust. */
+    private boolean isBoseLinkProbeTrusted() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        return a2dpBoundAt != 0 && headsetBoundAt != 0
+                && now - a2dpBoundAt >= 4000L && now - headsetBoundAt >= 4000L;
     }
 
     /** One-line breakdown of the last probe, for transition logs. */
@@ -6511,12 +6516,16 @@ public final class HookModule extends XposedModule {
             // starts on a page visit or a tile tap).
             if (isPrimaryProcess() && firstCapture) {
                 mainHandler.postDelayed(() -> {
+                    // 2.0.18: only pull once the probe is trusted — during the
+                    // fail-open window the earbuds may be disconnected and RFCOMM
+                    // still succeeds over the surviving ACL link.
                     if (earphoneRepository != null && isBoseLinkConnectedCached()
+                            && isBoseLinkProbeTrusted()
                             && boseSessionState.getBattery() == null) {
                         log(Log.INFO, TAG, event("repository first observed; pulling Bose battery"));
                         requestSonyBatteryRefresh();
                     }
-                }, 1200L);
+                }, 4500L);
             }
         }
     }
@@ -6550,9 +6559,11 @@ public final class HookModule extends XposedModule {
             if (now - lastMainLinkProbeAt >= 5000L) {
                 lastMainLinkProbeAt = now;
                 boolean up = isBoseLinkConnectedCached();
-                // null→up counts too: the first evaluation after a fresh Melody start
-                // with the earbuds already linked must pull battery as well.
-                if (up && !Boolean.TRUE.equals(lastMainLinkUp)) {
+                // null→up counts too, but never pull during the fail-open window:
+                // 0591 log — the untrusted "up" fired a BMAP session that SUCCEEDED
+                // over the surviving ACL link and repopulated battery on a device
+                // the user considers disconnected.
+                if (up && isBoseLinkProbeTrusted() && !Boolean.TRUE.equals(lastMainLinkUp)) {
                     log(Log.INFO, TAG, event("Bose link came up; refreshing battery"));
                     requestSonyBatteryRefresh();
                 }
