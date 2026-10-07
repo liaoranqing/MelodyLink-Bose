@@ -24,6 +24,7 @@ final class ClassAudit {
             "com.oplus.melody.ui.component.detail.DetailMainViewModel",
             "com.oplus.melody.ui.component.detail.noisereduction.NoiseReductionItem",
             "com.oplus.melody.ui.component.detail.equalizer.EqualizerItem",
+            "com.oplus.melody.btsdk.multidevice.HeadsetCoreService",
             "com.oplus.melody.ui.component.detail.spatialaudio.SpatialAudioItem",
             "com.oplus.melody.ui.widget.MelodyDetailModelView",
             "com.oplus.melody.ui.widget.MelodyPromptVolumeSeekBarPreference",

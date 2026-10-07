@@ -386,6 +386,15 @@ public final class HookModule extends XposedModule {
             hookNamed(loader, "com.oplus.melody.btsdk.api.data.DeviceInfo", "setDeviceConnectState", 1, "sppState");
             hookNamed(loader, "com.oplus.melody.btsdk.api.data.DeviceInfo", "setDeviceHeadsetConnectState", 1, "hfpState");
             hookNamed(loader, "com.oplus.melody.btsdk.api.data.DeviceInfo", "setDeviceA2dpConnectState", 1, "a2dpState");
+            // 2.0.41 Phase B step 1: HeadsetCoreService.M0(String, EqInfo, int) is the single
+            // funnel every custom-EQ commit passes through (s1dto/.../HeadsetCoreService.smali:
+            // 5179, which reads getFrequency()[I / getDbValue()[I at 5414-5574). The UI-side
+            // caller K8.d.i(int, K8.b, String) was rejected as an anchor: K8.d is a final class
+            // with a final method, the exact shape libxposed refused in 0.5.33. This build only
+            // observes - the dB semantics still have to be read off a real commit before we
+            // route anything, and letting the call through keeps today's behaviour intact.
+            hookNamed(loader, "com.oplus.melody.btsdk.multidevice.HeadsetCoreService",
+                    "M0", 3, "eqWriteService");
             hookNamed(loader, "com.oplus.melody.btsdk.api.data.DeviceInfo", "setDeviceLeAudioConnectState", 2, "leAudioState");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainViewModel", "f", 1, "detailState");
             hookNamed(loader, "com.oplus.melody.ui.component.detail.DetailMainViewModel", "g", 1, "detailConnectionState");
@@ -783,6 +792,13 @@ public final class HookModule extends XposedModule {
                 }
                 try {
                     captureRepository(label, chain);
+                    if ("eqWriteService".equals(label)) {
+                        // 2.0.41 Phase B step 1: observe only. Log what the host is about to
+                        // send for a custom-EQ commit, then let it run untouched.
+                        logEqWriteObserved("service", chain.getArg(0), chain.getArg(1),
+                                chain.getArg(2));
+                        return chain.proceed();
+                    }
                     if ("sonyCardImage".equals(label)) {
                         // Bose-only build: OneSpaceHeaderPreference.i(Lf9/b;) is the
                         // 通用设置 product photo loader. 17.6.3 smali shows it reads
@@ -8453,6 +8469,38 @@ public final class HookModule extends XposedModule {
 
     /** Capability code the host requires before it shows the custom-EQ category. */
     private static final int EAR_CAPABILITY_CUSTOM_EQ = 0x418;
+
+    /**
+     * 2.0.41: print what the host is about to send for a custom-EQ commit.
+     *
+     * <p>Observation, not intervention: the panel was configured with three frequencies and a
+     * ±10 axis, but whether {@code dbValue} carries signed dB directly or an offset index is
+     * something only a real commit can answer, and a wrong guess here writes to the device.
+     */
+    private void logEqWriteObserved(String where, Object address, Object eqInfo, Object extra) {
+        try {
+            Object freq = eqInfo == null ? null : PrefRef.invokeNoArg(eqInfo, "getFrequency");
+            Object db = eqInfo == null ? null : PrefRef.invokeNoArg(eqInfo, "getDbValue");
+            MLog.event("bose.eq.write",
+                    "where", where,
+                    "address", String.valueOf(address),
+                    "name", String.valueOf(eqInfo == null ? "null"
+                            : PrefRef.invokeNoArg(eqInfo, "getName")),
+                    "eq_id", String.valueOf(eqInfo == null ? "null"
+                            : PrefRef.invokeNoArg(eqInfo, "getEqId")),
+                    "min", String.valueOf(eqInfo == null ? "null"
+                            : PrefRef.invokeNoArg(eqInfo, "getMinValue")),
+                    "max", String.valueOf(eqInfo == null ? "null"
+                            : PrefRef.invokeNoArg(eqInfo, "getMaxValue")),
+                    "freq", freq instanceof int[]
+                            ? java.util.Arrays.toString((int[]) freq) : String.valueOf(freq),
+                    "db", db instanceof int[]
+                            ? java.util.Arrays.toString((int[]) db) : String.valueOf(db),
+                    "arg2", String.valueOf(extra));
+        } catch (Throwable t) {
+            MLog.event("bose.eq.write_error", "error", MLog.compactThrowable(t));
+        }
+    }
 
     /**
      * Adds a capability code to {@code earCapability}, preferring an in-place add.
