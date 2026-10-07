@@ -2178,6 +2178,7 @@ public final class HookModule extends XposedModule {
                     "activity", liveHostActivity == null ? "null"
                             : liveHostActivity.getClass().getSimpleName());
             if (liveRows == 0) {
+                lastReconcileVisible = null;
                 if (boseBonded() && connected) installBoseIntoLiveScreen();
                 return;
             }
@@ -2186,7 +2187,13 @@ public final class HookModule extends XposedModule {
             // fail-open default the rest of the module already uses.
             // 2.0.37: a new tree must match what is already on screen, so it follows the state
             // we actually acted on rather than the raw reading, which could be mid-flap.
-            if (lastProbeTrusted) applyBoseSectionsVisible(lastActedUiConnected);
+            // 2.0.38: this now runs from a two-second watchdog too, so apply only on a change -
+            // freshly built rows are visible by default and repeating the same call would just
+            // flood the log.
+            if (lastProbeTrusted && !Boolean.valueOf(lastActedUiConnected).equals(lastReconcileVisible)) {
+                lastReconcileVisible = Boolean.valueOf(lastActedUiConnected);
+                applyBoseSectionsVisible(lastActedUiConnected);
+            }
         } catch (Throwable t) {
             MLog.event("bose.tree.reconcile_error", "error", MLog.compactThrowable(t));
         }
@@ -5973,6 +5980,10 @@ public final class HookModule extends XposedModule {
     private volatile long linkStateCheckedAt;
     private volatile boolean lastLinkState = true;
     private long lastMainLinkProbeAt;
+    /** When the tree watchdog last re-checked the live preference tree (2.0.38). */
+    private long lastTreeWatchdogAt;
+    /** Last visibility the watchdog applied, so it stays quiet while nothing changes (2.0.38). */
+    private volatile Boolean lastReconcileVisible;
     private Boolean lastMainLinkUp;
     private volatile long uiStateCheckedAt;
     private volatile boolean lastUiConnected = true;
@@ -7520,6 +7531,18 @@ public final class HookModule extends XposedModule {
                     requestSonyBatteryRefresh();
                 }
                 lastMainLinkUp = up;
+            }
+            // 2.0.38: tree watchdog. The host drops our injected rows whenever it refreshes
+            // its own list, and that does NOT rebuild the fragment - so our other triggers
+            // (G9.Q.t() and the link edges) can be minutes away. Field log: injected at
+            // 12:11:06.630, the live tree was back to zero rows by 12:11:14, and nothing
+            // noticed until the next build at 12:13:06. Re-checking every two seconds turns
+            // "content vanished until you leave and re-enter" into a self-heal.
+            if (now - lastTreeWatchdogAt >= 2000L) {
+                lastTreeWatchdogAt = now;
+                if (liveHostActivity != null) {
+                    mainHandler.post(this::reconcileBoseTreeWithLiveScreen);
+                }
             }
             observeSharedSonyCommand();
             observeSharedSonyBatteryCommand();
