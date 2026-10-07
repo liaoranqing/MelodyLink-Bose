@@ -3272,10 +3272,55 @@ public final class HookModule extends XposedModule {
                 setIfPresent(type, copy, "id", pendingDetailMac);
             }
             stripEncoSubLevels(copy);
+            applyBoseCustomEqConfig(copy);
             return copy;
         } catch (Throwable t) {
             MLog.event("bose.catalog.clone_error", "error", MLog.compactThrowable(t));
             return null;
+        }
+    }
+
+    /**
+     * 2.0.39 Phase A: make Melody's own 大师调音 custom-EQ panel render Bose's three bands.
+     *
+     * <p>That panel is config-driven, not hardcoded: {@code CustomEqFragment} allocates its band
+     * array from {@code WhitelistConfigDTO$Function.getCustomEqFrequency().size()} and takes the
+     * dB axis from {@code customEqMax} (s2c9/ca.1/r.smali:8921 → :8939 → :8953 new-array). The
+     * Enco entry we clone carries six points; BMAP only has Bass/Mid/Treble, and the device
+     * accepts -10..+10 and answers InvalidData for ±11 - and a rejected write locks the whole
+     * Settings block, so the axis has to match what it really takes.
+     *
+     * <p>We copy the Function before writing. {@code cloneCatalogEntry} copies fields by
+     * reference, so writing through the shared object would silently reconfigure every real Enco
+     * entry in the catalog for this process.
+     */
+    private void applyBoseCustomEqConfig(Object entry) {
+        try {
+            Object function = readField(entry, "function");
+            if (function == null) {
+                MLog.event("bose.custom_eq", "skip", "no_function");
+                return;
+            }
+            Object owned = shallowCopyObject(function);
+            if (owned == null) {
+                MLog.event("bose.custom_eq", "skip", "copy_failed");
+                return;
+            }
+            setIfPresent(entry.getClass(), entry, "function", owned);
+
+            Object bandsBefore = readField(owned, "customEqFrequency");
+            MLog.event("bose.custom_eq",
+                    "bands_before", bandsBefore instanceof java.util.List
+                            ? ((java.util.List<?>) bandsBefore).size() : -1,
+                    "max_before", readIntField(owned, "customEqMax", 0),
+                    "equalizer", readIntField(owned, "customEqualizer", -99),
+                    "ui_version", readIntField(owned, "customEqUiVersion", -99));
+            setIfPresent(owned.getClass(), owned, "customEqFrequency",
+                    java.util.Arrays.asList(Integer.valueOf(100), Integer.valueOf(1000),
+                            Integer.valueOf(8000)));
+            writeIntField(owned, "customEqMax", 10);
+        } catch (Throwable t) {
+            MLog.event("bose.custom_eq_error", "error", MLog.compactThrowable(t));
         }
     }
 
