@@ -2184,7 +2184,9 @@ public final class HookModule extends XposedModule {
             // 2.0.35: same rule as the link edge - a page is only re-gated on evidence. Rows on
             // a freshly built tree start out visible, so skipping an untrusted reading is the
             // fail-open default the rest of the module already uses.
-            if (lastProbeTrusted) applyBoseSectionsVisible(connected);
+            // 2.0.37: a new tree must match what is already on screen, so it follows the state
+            // we actually acted on rather than the raw reading, which could be mid-flap.
+            if (lastProbeTrusted) applyBoseSectionsVisible(lastActedUiConnected);
         } catch (Throwable t) {
             MLog.event("bose.tree.reconcile_error", "error", MLog.compactThrowable(t));
         }
@@ -5982,6 +5984,11 @@ public final class HookModule extends XposedModule {
     private volatile boolean lastProbeTrusted;
     /** The last state our section visibility was actually driven to. */
     private volatile boolean lastActedUiConnected = true;
+    /** When the current continuous run of "down" readings began; 0 while the link reads up. */
+    private volatile long downSinceAt;
+    /** How long a drop must hold before we hide our sections. Transient profile flaps on this
+     *  stack last a couple of seconds; a real 断开连接 is covered by the latch and hides at once. */
+    private static final long HIDE_GRACE_MS = 2000L;
 
     /**
      * The combined "show the device as connected" state: live profile link AND not
@@ -6019,9 +6026,14 @@ public final class HookModule extends XposedModule {
             // headset as offline; only the visible action waits for evidence. A latch is the
             // user's own intent, so it always counts as evidence.
             boolean evidence = lastProbeTrusted || Boolean.TRUE.equals(latched);
+            boolean userIntent = Boolean.TRUE.equals(latched);
+            // 2.0.37: a "down" run only counts while it is continuous. Reset it whenever the
+            // reading is up, so a flap that ended two minutes ago cannot make the next drop
+            // hide instantly.
+            if (next) downSinceAt = 0L;
             if (evidence && next != lastActedUiConnected) {
-                lastActedUiConnected = next;
                 if (next) {
+                    lastActedUiConnected = true;
                     applyBoseSectionsVisible(true);
                     // 2.0.26: a hot reconnect never rebuilds the host's preference tree, so no
                     // detailPreferenceAdd / captureNoiseEffectRow fires and our sections stay
@@ -6035,12 +6047,24 @@ public final class HookModule extends XposedModule {
                         } catch (Throwable ignored) {
                         }
                     });
-                } else {
+                } else if (userIntent || (downSinceAt != 0L
+                        && now - downSinceAt >= HIDE_GRACE_MS)) {
                     // 2.0.28: the host hides its own rows when the earbuds drop, but our
                     // injected sections stayed on screen (user report: 断开时耳机设置里
                     // Bose 的内容也没有消失). Hide them on the same edge that re-injects
                     // them, so both directions are symmetric.
+                    // 2.0.37: but only after the drop has held for HIDE_GRACE_MS. The 22:58
+                    // field log shows the probe alternating between "proxy re-binding" and a
+                    // trusted "device not in the list" every few seconds while the earbuds stay
+                    // connected, and each of those trusted "down" readings hid 35 live rows -
+                    // content vanishing seconds after it appeared. Melody's 断开连接 sets the
+                    // latch, and that IS intent, so it still hides on the spot.
+                    lastActedUiConnected = false;
                     applyBoseSectionsVisible(false);
+                } else if (downSinceAt == 0L) {
+                    downSinceAt = now;
+                    MLog.event("bose.link.down_pending", "grace_ms", HIDE_GRACE_MS,
+                            "probe", lastProbeDetail);
                 }
             }
             lastUiConnected = next;
