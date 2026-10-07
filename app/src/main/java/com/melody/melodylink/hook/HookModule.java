@@ -8435,9 +8435,49 @@ public final class HookModule extends XposedModule {
         boolean updated = writeIntField(dto, "adaptiveEar", 1);
         updated |= writeIntField(dto, "adaptiveVolume", 1);
         updated |= writeIntField(dto, "gameEqualizerStatus", 1);
+        // 2.0.39 Phase A.2: the 自定义 equalizer row is gated on the DTO, not on the whitelist.
+        // EqualizerItem only offers the custom sheet when mSupportCustomEq is set
+        // (s2c9/.../equalizer/EqualizerItem.smali:1983), and that flag is the AND of
+        // EarphoneDTO.getSupportCustomEq() and the config check
+        // (s2c9/ca.1/F.smali:878, :994 -> c9/a.f().c(productId, name)). Inside the fragment the
+        // 自定义 category additionally needs earCapability to carry 0x418
+        // (s2c9/ca.1/r.smali:9390 with L.p(I,List) == list.contains(code)). Bose reports
+        // neither, which is why the sheet showed only the five Dynaudio presets.
+        updated |= writeBooleanField(dto, "supportCustomEq", true);
+        updated |= addEarCapability(dto, EAR_CAPABILITY_CUSTOM_EQ);
         if (updated) {
             log(Log.INFO, TAG,
                     event("claimed Melody master-tuning flags for the Bose device"));
+        }
+    }
+
+    /** Capability code the host requires before it shows the custom-EQ category. */
+    private static final int EAR_CAPABILITY_CUSTOM_EQ = 0x418;
+
+    /**
+     * Adds a capability code to {@code earCapability}, preferring an in-place add.
+     *
+     * <p>The field is final, so mutating the existing list is both simpler and safer than
+     * replacing it. If the host handed us an immutable list we fall back to a private copy.
+     */
+    private static boolean addEarCapability(Object dto, int code) {
+        try {
+            Object raw = readField(dto, "earCapability");
+            if (!(raw instanceof java.util.List)) return false;
+            @SuppressWarnings("unchecked")
+            java.util.List<Object> caps = (java.util.List<Object>) raw;
+            Integer boxed = Integer.valueOf(code);
+            if (caps.contains(boxed)) return false;
+            try {
+                return caps.add(boxed);
+            } catch (Throwable immutable) {
+                java.util.List<Object> copy = new java.util.ArrayList<>(caps);
+                copy.add(boxed);
+                setIfPresent(dto.getClass(), dto, "earCapability", copy);
+                return true;
+            }
+        } catch (Throwable t) {
+            return false;
         }
     }
 
